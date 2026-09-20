@@ -79,10 +79,24 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "mode"], "unbounded"))
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "mode"], nil))
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "max_children"], -1))
+    assert {:error, _} =
+             Persistence.decode_delegation_input(
+               raw
+               |> put_in(["budget", "mode"], "progress_scoped")
+               |> put_in(["budget", "model"], "gpt-5.6-sol")
+             )
 
     invalid_model = grant("issue-limit", :progress_scoped, "gpt-5.6-sol")
     assert Limit.resolve(@local_limit, %{managed_delegations: %{entries: [invalid_model]}}, "issue-limit") ==
              {:error, :managed_token_budget_unavailable_or_exhausted}
+  end
+
+  test "persistence save rejects malformed in-memory modes without raising", c do
+    accountable = hd(c.manifest.entries).accountable
+    {:ok, graph, _} = ResponsibilityGraph.delegate(c.state.responsibility_graph, accountable, c.now)
+    malformed = put_in(graph.delegations[accountable.id].budget.mode, :unbounded)
+
+    assert {:error, :invalid_budget} = Persistence.save(c.state.responsibility_graph_path, malformed)
   end
 
   test "useful progress beyond the former local threshold remains admissible across reload", c do
