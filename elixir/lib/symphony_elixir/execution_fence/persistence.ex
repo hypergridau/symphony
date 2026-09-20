@@ -14,11 +14,16 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
 
   @type load_result :: {:ok, ExecutionFence.state()} | :missing | {:error, term()}
 
+  @doc "Decodes exact authenticated snapshot bytes without path lookup or recovery fallback."
+  @spec decode_bytes(binary()) :: {:ok, ExecutionFence.state()} | {:error, term()}
+  def decode_bytes(contents) when is_binary(contents), do: decode_snapshot(contents)
+  def decode_bytes(_contents), do: {:error, {:invalid_snapshot, :invalid_snapshot_bytes}}
+
   @spec load(Path.t()) :: load_result()
   def load(path) when is_binary(path) do
     case File.read(path) do
       {:ok, contents} ->
-        decode_snapshot(contents)
+        decode_bytes(contents)
 
       {:error, :enoent} ->
         recover_missing_snapshot(path)

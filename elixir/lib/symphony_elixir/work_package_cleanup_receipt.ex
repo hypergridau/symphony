@@ -154,7 +154,10 @@ defmodule SymphonyElixir.WorkPackageCleanupReceipt do
     end
   end
 
-  defp stored_acknowledgement(semantic, authority, reservation, kind) do
+  @doc false
+  @spec stored_acknowledgement(map(), map(), map(), receipt_kind()) ::
+          {:ok, map()} | :missing | {:error, :invalid_cleanup_acknowledgement}
+  def stored_acknowledgement(semantic, authority, reservation, kind) do
     case Map.get(semantic, :acknowledgement, Map.get(semantic, "acknowledgement")) do
       nil ->
         :missing
@@ -198,9 +201,11 @@ defmodule SymphonyElixir.WorkPackageCleanupReceipt do
     end)
   end
 
-  defp acknowledgement_key(key) when key in @acknowledgement_fields, do: key
+  @doc false
+  @spec acknowledgement_key(term()) :: atom() | nil
+  def acknowledgement_key(key) when key in @acknowledgement_fields, do: key
 
-  defp acknowledgement_key(key) when is_binary(key) do
+  def acknowledgement_key(key) when is_binary(key) do
     case key do
       "projectionId" -> :projection_id
       "reservationId" -> :reservation_id
@@ -217,7 +222,7 @@ defmodule SymphonyElixir.WorkPackageCleanupReceipt do
     end
   end
 
-  defp acknowledgement_key(_key), do: nil
+  def acknowledgement_key(_key), do: nil
 
   defp acknowledgement_wire(acknowledgement) do
     %{
@@ -499,7 +504,10 @@ defmodule SymphonyElixir.WorkPackageCleanupReceipt do
     end)
   end
 
-  defp valid_stored_semantic(receipt, authority, kind) do
+  @doc false
+  @spec valid_stored_semantic(map(), map(), receipt_kind()) ::
+          :ok | {:error, :cleanup_receipt_authority_mismatch}
+  def valid_stored_semantic(receipt, authority, kind) do
     expected = %{
       contract_version: @contract_version,
       receipt_kind: Atom.to_string(kind),

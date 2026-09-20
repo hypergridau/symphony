@@ -44,6 +44,20 @@ defmodule SymphonyElixir.ExecutionFencePersistenceTest do
     assert {:error, {:invalid_snapshot, _reason}} = Persistence.load(path)
   end
 
+  test "exact-byte decoding retains the same validator and never consults recovery files", %{path: path} do
+    state = ExecutionFence.new()
+    assert :ok = Persistence.save(path, state)
+    bytes = File.read!(path)
+    assert {:ok, ^state} = Persistence.decode_bytes(bytes)
+    File.write!(path, "{broken}")
+    assert {:ok, ^state} = Persistence.decode_bytes(bytes)
+    assert File.read!(path) == "{broken}"
+
+    for invalid <- [nil, 7, "{broken}", ~s({"schema_version":1,"executions":[],"sessions":{},"history":[]})] do
+      assert {:error, {:invalid_snapshot, _}} = Persistence.decode_bytes(invalid)
+    end
+  end
+
   test "save creates the parent directory and replaces an existing snapshot", %{path: path} do
     {:ok, state, _token} = ExecutionFence.admit(ExecutionFence.new(), admission(), 100)
     assert :ok = Persistence.save(path, state)

@@ -33,6 +33,20 @@ defmodule SymphonyElixir.ResponsibilityGraphPersistenceTest do
     {:ok, path: path}
   end
 
+  test "exact-byte decoding preserves graph validation without filesystem effects", %{path: path} do
+    state = ResponsibilityGraph.new()
+    assert :ok = Persistence.save(path, state)
+    bytes = File.read!(path)
+    assert {:ok, ^state} = Persistence.decode_bytes(bytes)
+    File.write!(path, "{broken}")
+    assert {:ok, ^state} = Persistence.decode_bytes(bytes)
+    assert File.read!(path) == "{broken}"
+
+    for invalid <- [nil, 7, "{broken}", ~s({"schema_version":1,"delegations":[],"events":[]})] do
+      assert {:error, {:invalid_snapshot, _}} = Persistence.decode_bytes(invalid)
+    end
+  end
+
   test "persists and rehydrates the versioned delegation contract", %{path: path} do
     {:ok, graph, _owner} = ResponsibilityGraph.delegate(ResponsibilityGraph.new(), delegation("owner", :accountable), 0)
 

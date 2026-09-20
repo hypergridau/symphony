@@ -43,6 +43,22 @@ defmodule SymphonyElixir.ExecutionFence do
   @spec validate(state()) :: :ok | {:error, :invalid_state}
   def validate(state), do: validate_state(state)
 
+  @doc "Read-only retained-generation process/lease check; does not establish cleanup or authorize reuse."
+  @spec retained_process_quiescence(state(), String.t(), pos_integer()) :: :ok | {:error, term()}
+  def retained_process_quiescence(state, issue_id, generation) when is_binary(issue_id) and is_integer(generation) and generation > 0 do
+    with :ok <- validate_state(state),
+         %{generation: ^generation} = execution <- state.executions[issue_id],
+         true <- execution.ownership == :reconciled,
+         false <- termination_unconfirmed?(execution),
+         [] <- active_lease_ids(execution) do
+      :ok
+    else
+      _ -> {:error, :retained_execution_not_quiescent}
+    end
+  end
+
+  def retained_process_quiescence(_, _, _), do: {:error, :retained_execution_not_quiescent}
+
   @doc "Marks non-cleaned executions unknown after an orchestrator restart."
   @spec mark_unreconciled_after_restart(state()) :: {:ok, state()} | {:error, :invalid_state}
   def mark_unreconciled_after_restart(state) do

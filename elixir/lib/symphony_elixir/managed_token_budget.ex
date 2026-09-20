@@ -1,7 +1,20 @@
 defmodule SymphonyElixir.ManagedTokenBudget do
   @moduledoc "Durable managed usage; one host writer, explicit initialization, and no implicit repair or renewal."
 
-  alias SymphonyElixir.ManagedTokenBudget.{Codec, Correction, Registration}
+  alias SymphonyElixir.ManagedTokenBudget.{Codec, Correction, Registration, RetainedEvidence}
+
+  @doc """
+  Reads cumulative evidence against an independently installed retained prefix.
+  The caller must hold real coordination locks and establish source quiescence
+  and ledger provenance. Integrity rechecks are not locks or execution authority.
+  """
+  @spec retained_evidence(Path.t(), map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def retained_evidence(path, identity, issue_id, floor) do
+    with :ok <- RetainedEvidence.validate_floor(floor),
+         {:ok, ledger} <- load(path, identity) do
+      RetainedEvidence.read(ledger, issue_id, floor, &verified_bytes/1)
+    end
+  end
 
   @spec load(Path.t(), map()) :: {:ok, map()} | {:error, term()}
   def load(path, identity) do

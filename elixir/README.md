@@ -39,7 +39,7 @@ tracker issue can become a dispatch candidate again after restart.
 
 1. Make sure your codebase is set up to work well with agents: see
    [Harness engineering](https://openai.com/index/harness-engineering/).
-2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
+2. Get a new personal token in Linear via Settings â†’ Security & access â†’ Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
 3. Copy this directory's `WORKFLOW.md` to your repo.
 4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
@@ -50,7 +50,7 @@ tracker issue can become a dispatch candidate again after restart.
      URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
      issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
+     Team Settings â†’ Workflow in Linear.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -410,6 +410,201 @@ physical rows fail. Pending or blocked writes prevent registration. Deploy this 
 appending registration records; older runtimes reject them. Registration is bookkeeping, not an
 execution grant, allowance renewal or automatic scheduler action. Current manifest, responsibility,
 provider claim, generation, capacity and token limits still control admission.
+
+`ManagedTokenBudget.retained_evidence/4` reads cumulative evidence without changing accounting.
+Supply the absolute ledger path, exact ledger identity, stable issue UUID and independently
+installed floor containing exactly `prefix_hash` (lowercase SHA256), positive `prefix_size`
+and nonnegative `minimum_total`. Both the full snapshot and retained prefix must replay as
+canonical ledgers with the same identity and registered issue. The retained total must meet
+the floor, and current usage must not decrease. Pending/blocked accounting, changed snapshots,
+partial prefix rows and mismatched evidence fail closed. The result reports current and minimum
+prefix hashes/sizes and cumulative usage; it contains no grant or execution authority.
+The caller must establish ledger provenance, hold actual coordination locks and keep the
+source quiescent. Repeated integrity reads are not locks. A caller-selected weaker floor
+does not authorize continuation: a privileged issuer must bind independently installed
+configuration before any proof is trusted. This API does not implement that issuer, sign
+proofs, renew allowances, consume dispositions or make retained workspaces reusable.
+
+`RetainedGrantProof.TrustedFile.load/3` is an internal file-integrity prerequisite for
+a privileged broker launcher. Only root-installed configuration may select its path,
+expected SHA256 and limit (at most 262144 bytes). It requires canonical Linux paths,
+root-owned non-writable ancestors, a root-owned regular single-link file, bounded
+reads, an exact digest and unchanged file/ancestor metadata around the read. It
+does not authorize a request or implement a signer. A privileged launcher must
+use a separately pinned root-owned code copy; never load worker-owned SDK source
+as root. Actual process/key separation and broker installation remain separate
+qualification requirements.
+
+`RetainedGrantProof.GrantEvidence.load/5` composes that pinned file loader with
+the existing full `ManagedResponsibility.decode/3` validator. Installed bindings
+provide the exact pool/repository/profile/runner context and stable issue UUID.
+The result derives original manifest digest, authority reference, owner, scope,
+pair identities and the minimum paired allowance/expiry from the validated bytes.
+Its internal byte decoder is evidence preparation, not issuer authority. Current
+revocation, claim/history/archive, cumulative ledger, native owner and profile
+checks are still required before a privileged issuer or provider trusts a proof.
+
+`RetainedGrantProof.GrantBudgetEvidence.load_config/3` joins the original grant
+and cumulative ledger from digest-pinned root-owned configuration. Version 1
+accepts only `schema_version` and `binding`; the binding contains exactly
+`manifest_path`, `manifest_sha256`, `ledger_path`, `context`, `issue_id`,
+`owner_id`, `accountable_id`, `responsible_id`, `scope`, `floor`,
+`ledger_checkpoint_sha256` and `ledger_checkpoint_size`. It checks the exact
+validated responsibility pair, owner, scope, routing context, retained floor
+and full current ledger checkpoint, and denies exhausted or expired grants.
+The launcher must supply the trusted clock and installed paths/digests; these
+are never request overrides. A checkpoint is evidence, not another accounting
+ledger or an allowance renewal. Actual locks, quiescence, revocation and
+claim/history/archive/native checks remain mandatory before signing. The
+collector returns inert facts and does not implement signing or admission.
+Its prepared root configuration tests use `HGS600_BUDGET_FIXTURE` and explicitly
+skip without that fixture; synthetic tests do not qualify an installed issuer.
+
+For exact checkpoint validation, `ExecutionFence.Persistence.decode_bytes/1` and
+`ResponsibilityGraph.Persistence.decode_bytes/1` reuse their existing snapshot
+validators on authenticated immutable bytes. They do not look up paths or recover
+another file. Successful decoding establishes snapshot structure, not freshness,
+provenance, current authority or permission to act on a stale copy.
+
+`RetainedGrantProof.SnapshotEvidence.decode/3` verifies independently installed
+`fence_sha256` and `graph_sha256` checkpoints before invoking those exact-byte
+validators. Each snapshot is bounded to 262144 bytes. It returns the validated
+fence, responsibility graph and checkpoint hashes, with no path lookup or
+recovery fallback. The launcher must read current original snapshots under the
+actual quiescent locks; a stale authenticated copy is not live revocation or
+claim evidence. Cross-snapshot issue/generation/grant/history/archive matching
+and current native authority remain required before signing.
+
+`SnapshotEvidence.match_retained/4` checks the decoded states against the full
+original delegation pair and an installed retained-generation binding. It
+requires exact immutable delegation fields, active unexpired authority, the
+original terminal record, branch/worktree and responsible worker lease, and
+matching issue/repository/generation. `ExecutionFence.retained_process_quiescence/3`
+uses the existing termination and active-lease predicates without modifying the
+cleanup/reuse predicate. It establishes only persisted process/lease consistency;
+the privileged launcher must independently observe live OS quiescence. Pending
+cleanup remains pending, and the ordinary exact-head cleanup guard still applies.
+No consistency result releases a reservation or authorizes a successor.
+
+`SnapshotEvidence.match_claim/5` validates bounded digest-pinned original claim
+journal bytes with the existing `WorkPackageClaim.Journal.decode_bytes/1`.
+Installed bindings select the exact original reservation, nonce, projection,
+scope keys, runner, responsibility, fence token and runtime lease. They must
+match the grant routing context and retained worker tuple at its generation.
+The canonical generation-scoped journal key must exist, and duplicate entries
+for that same issue/profile/repository/generation deny. Optional cleanup
+receipts are returned as journal evidence only; their provider acknowledgement,
+signature and immutable history require independent verification. No caller
+may provide the checkpoint hash or expected claim as authority.
+
+`RetainedGrantProof.NonceRequest.decode/1` bounds the broker request to exactly
+43 canonical unpadded base64url bytes encoding one 32-byte nonce. It rejects
+padding, aliases, extra frames, whitespace and authority-bearing maps. The
+trusted transport must enforce bounded reads/timeouts and reject appended
+frames. Paths, keys, facts, hashes, issue context and clocks remain installed
+launcher inputs; nonce decoding neither proves freshness nor consumes replay.
+
+`RetainedGrantProof.Envelope` is an internal Ed25519 primitive for the separately
+pinned root launcher, not an SDK signing service. The wire purpose is
+`hypergrid.retained-grant-evidence.v1`, version 1. Its separately installed issuer
+fingerprint is lowercase hex SHA256 of the raw 32-byte public key, distinct from
+the recovery SPKI fingerprint. The signer derives its public key from the installed
+32-byte seed and checks that fingerprint before signing; it accepts no public-key
+override. The signed bytes are the UTF-8 purpose plus NUL, raw public key, raw
+32-byte nonce, unsigned big-endian 64-bit observed/expiry milliseconds, and SHA256
+of the exact collected fact bytes. Facts are bounded to 262144 bytes, clocks to
+JavaScript safe integers, and proof lifetime to at most 60000 milliseconds.
+The exact wire fields are `version`, `purpose`, `issuer_fingerprint`, `nonce`,
+`observed_at_ms`, `expires_at_ms`, `facts`, `signature`; binary fields use canonical
+unpadded base64url. Verification requires independent installed public key and
+fingerprint, the expected nonce and trusted clock. It authenticates bytes only:
+grant expiry, current authority, native graph, replay consumption and disposition
+remain separate checks. No key belongs in SDK/controller/worker environment;
+actual root-owned service/process/key isolation and provider installation remain
+unqualified. The module reads no files or environment and allocates no keys/grants.
+
+`RetainedGrantProof.ChallengeEnvelope.verify/5` separately authenticates the
+fixed `hypergrid.retained-grant-challenge.v1` purpose with an independently
+installed raw public key and fingerprint, the expected 32-byte nonce and a
+trusted clock. It uses the same eight-field envelope and signed-byte layout,
+but cannot verify an evidence-purpose or recovery-purpose signature as a
+challenge. It has no signing API and reads no files, environment or clock.
+Returned facts remain opaque bounded bytes; typed provider snapshot validation
+and original grant/path bindings are separate prerequisites. Re-verifying the
+same valid unexpired challenge is read-only and succeeds without a replay store.
+
+`ChallengeEnvelope.verify_with_digest/5` preserves `verify/5` and adds a lowercase
+hex SHA256 digest of the exact authenticated signing message to its successful
+result. It authenticates once before hashing, using the independently installed
+public key, expected nonce, verified times and exact decoded fact bytes.
+It does not hash a reserialized JSON envelope or normalize opaque facts.
+The digest binds bytes; it does not establish current native authority.
+
+`RetainedGrantProof.ReceiptEvidence.validate_stored_readonly/2` validates a
+stored cleanup receipt against an independently validated exact claim map.
+It checks strict field types, the existing semantic receipt identity, and the
+provider acknowledgement, refusing unknown keys and duplicate wire/atom aliases
+before normalization. A termination acknowledgement may release execution while
+retaining the repository scope; repository-cleanup acknowledgement requires both
+scope and reservation released. Failed and blocked terminal outcomes remain valid.
+This pure check authenticates no signer and creates no grant, release or admission.
+Its focused tests use an independently encoded receipt identity and cover valid
+atom/camel acknowledgements plus malformed claims, receipt values and aliases.
+
+`RetainedGrantProof.JournalCleanupEvidence.new/1` composes the independently
+matched original claim journal with `ReceiptEvidence`. It requires acknowledged
+termination, validates every optional repository cleanup receipt, and rejects
+unknown outer kinds or a key/receipt-kind mismatch. Original acknowledgement
+states and accepted heads remain inert facts; the journal digest is checked for
+syntax only. No signature, current authority, scope release or admission is granted.
+The constructor cannot authenticate snapshot provenance. Its trusted caller must
+first use `SnapshotEvidence.match_claim/5` with independently pinned original
+journal bytes. Optional repository cleanup permits observing a termination that
+retains a held scope; its absence proves neither cleanup nor scope release.
+
+The challenge must not choose local manifest, ledger, snapshot or key paths.
+A later broker must collect those facts under actual local quiescent
+coordination and bind the exact authenticated challenge signing-message digest
+to its proof. The provider must reacquire its canonical observation/admission
+locks and check current native ownership, revocation, claim, routing, receipt
+acknowledgements and original grant/floor authority after proof verification.
+Local observation intervals do not make guest filesystem and provider database
+locks atomic. Fresh local revalidation before HGS-593 consumption remains
+required. The combined facts schema, collectors, broker installation and
+independent signing-key confinement remain incomplete; challenge verification
+alone creates no grant, reservation, scope release, worker or disposition.
+
+The focused challenge tests are
+`test/symphony_elixir/retained_grant_proof/challenge_envelope_test.exs`.
+They cover fresh opaque facts and repeated verification, distinct purposes,
+key pinning, nonce substitution, malformed shapes, canonical encoding,
+signature/fact corruption, input bounds and safe-integer freshness. Passing
+these tests is source evidence, not full quality, installation or admission
+acceptance.
+
+`TrustedFile.load_seed/2` is an internal root-launcher prerequisite, never a
+remote file interface. It requires exactly 32 bytes, root ownership, a single
+regular-file link and exact mode 0400 or 0600 at both metadata snapshots. Both
+public and seed reads also compare the opened descriptor's metadata before and
+after the bounded read with the pinned pathname snapshot. The launcher must
+never return seed bytes or accept a request-selected path/digest. Linux POSIX
+ACL group masks are zero for those seed modes, excluding effective named-user
+reads; a confidential seed positive still requires real root-runtime qualification.
+
+A privileged launcher must use separately authenticated root-owned executables,
+libraries and module search paths. The currently observed worker-owned mise
+Elixir/Erlang installation is unsuitable for root execution. Copying it into a
+root directory does not establish provenance. Historical TrustedFile root tests
+through that runtime are preserved synthetic observations, not trusted-runtime
+isolation evidence; current source tests explicitly execute as the worker UID.
+
+The trusted-file OS tests require real prepared fixtures via
+`HGS600_TRUSTED_FILE_FIXTURE` and `HGS600_ACL_FIXTURE`; full manifest-loader tests
+use `HGS600_GRANT_FIXTURE`. Without those fixtures, the corresponding tests are
+explicitly skipped. CI skips must not be reported as OS or privileged-broker
+qualification. Linux POSIX ACL masks are reflected in group mode bits; tested
+named-user effective writes fail the mode checks, including directory ancestors.
+Other filesystem/ACL semantics and Windows deployment are not qualified here.
 
 The historical portfolio capacity is shared by bootstrap, replay and registration.
 It does not increase worker concurrency, per-issue token grants or the separate
