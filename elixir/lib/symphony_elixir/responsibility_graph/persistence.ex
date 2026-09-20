@@ -15,6 +15,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   @enforcements [:manual, :enforced]
   @actions [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
   @efforts [:none, :minimal, :low, :medium, :high, :xhigh, :max, :ultra]
+  @budget_modes [:finite, :progress_scoped]
   @classes [:routine_engineering, :coordination, :read_only, :exception]
   @scope_identifiers [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
   @scope_collections [:paths, :modules, :environments, :actions]
@@ -29,7 +30,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
     with true <- input_keys?(payload, fields),
          true <- input_keys?(payload["scope"], Enum.map(@scope_identifiers ++ @scope_collections, &Atom.to_string/1)),
          true <- input_keys?(payload["authority"], ~w(class capabilities environments)),
-         true <- input_keys?(payload["budget"], ~w(model effort max_tokens max_children)),
+         true <- input_keys?(payload["budget"], ~w(model effort mode max_tokens max_children)),
          true <- input_keys?(payload["return_to_parent"], ~w(owner_id contract)),
          {:ok, id} <- required_string(payload, "id"),
          {:ok, parent_id} <- optional_string(payload, "parent_delegation_id"),
@@ -163,6 +164,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
     %{
       "model" => budget.model,
       "effort" => Atom.to_string(budget.effort),
+      "mode" => Atom.to_string(Map.get(budget, :mode, :finite)),
       "max_tokens" => budget.max_tokens,
       "max_children" => budget.max_children
     }
@@ -308,10 +310,11 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp decode_authority(_payload), do: {:error, :invalid_authority}
 
-  defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children}) do
+  defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children} = payload) do
     with {:ok, effort} <- decode_atom(effort, @efforts),
+         {:ok, mode} <- decode_atom(Map.get(payload, "mode", "finite"), @budget_modes),
          true <- is_binary(model) and model != "" and is_integer(max_tokens) and max_tokens > 0 and is_integer(max_children) and max_children >= 0 do
-      {:ok, %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}}
+      {:ok, %{model: model, effort: effort, mode: mode, max_tokens: max_tokens, max_children: max_children}}
     else
       false -> {:error, :invalid_budget}
       {:error, _reason} = error -> error
