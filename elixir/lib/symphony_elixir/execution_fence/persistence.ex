@@ -133,6 +133,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
       "ownership" => Atom.to_string(execution.ownership),
       "leases" => Map.new(execution.leases, fn {session_id, lease} -> {session_id, encode_lease(lease)} end),
       "terminal" => encode_terminal(execution.terminal),
+      "retirement" => encode_retirement(Map.get(execution, :retirement)),
       "cleanup" => Atom.to_string(execution.cleanup),
       "cleanup_receipt" => encode_cleanup_receipt(Map.get(execution, :cleanup_receipt)),
       "termination_unconfirmed" => Map.get(execution, :termination_unconfirmed, false),
@@ -231,11 +232,12 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
          {:ok, generation} <- required(payload, "generation"),
          {:ok, branch} <- required(payload, "branch"),
          {:ok, worktree} <- required(payload, "worktree"),
-         {:ok, status} <- decode_status(Map.get(payload, "status"), [:active, :terminal]),
+         {:ok, status} <- decode_status(Map.get(payload, "status"), [:active, :terminal, :retired]),
          {:ok, ownership} <-
            decode_status(Map.get(payload, "ownership"), [:reconciled, :unknown, :contradictory]),
          {:ok, leases} <- decode_map(Map.get(payload, "leases"), &decode_lease/1),
          {:ok, terminal} <- decode_terminal(Map.get(payload, "terminal")),
+         {:ok, retirement} <- decode_retirement(Map.get(payload, "retirement")),
          {:ok, cleanup} <- decode_status(Map.get(payload, "cleanup"), [:pending, :cleaned]),
          {:ok, cleanup_receipt} <- decode_cleanup_receipt(Map.get(payload, "cleanup_receipt")),
          {:ok, admitted_at_ms} <- required(payload, "admitted_at_ms") do
@@ -264,6 +266,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
           admitted_at_ms: admitted_at_ms
         }
 
+        execution = maybe_put_decoded(execution, :retirement, retirement)
         {:ok, maybe_put_decoded(execution, :cleaned_at_ms, Map.get(payload, "cleaned_at_ms"))}
       else
         {:error, :invalid_termination_unconfirmed}
@@ -476,6 +479,35 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
   end
 
   defp decode_terminal(_payload), do: {:error, :invalid_terminal}
+
+  defp encode_retirement(nil), do: nil
+
+  defp encode_retirement(retirement) do
+    retirement
+    |> Map.new(fn {key, value} -> {Atom.to_string(key), if(is_atom(value), do: Atom.to_string(value), else: value)} end)
+  end
+
+  defp decode_retirement(nil), do: {:ok, nil}
+
+  defp decode_retirement(payload) when is_map(payload) do
+    keys = ~w(active_process evidence_ref generation issue_id linear_state local_claim provider_claim provider_projection_id retired_at_ms workspace)
+
+    if Enum.sort(Map.keys(payload)) == keys do
+      {:ok,
+       payload
+       |> Map.new(fn {key, value} -> {String.to_existing_atom(key), value} end)
+       |> Map.update!(:active_process, &decode_absence/1)
+       |> Map.update!(:local_claim, &decode_absence/1)
+       |> Map.update!(:provider_claim, &decode_absence/1)
+       |> Map.update!(:workspace, &decode_absence/1)}
+    else
+      {:error, :invalid_retirement}
+    end
+  end
+
+  defp decode_retirement(_payload), do: {:error, :invalid_retirement}
+  defp decode_absence("absent"), do: :absent
+  defp decode_absence(value), do: value
 
   defp encode_cleanup_receipt(nil), do: nil
 

@@ -347,6 +347,20 @@ the old issue. A distinct current-manifest successor can pass the repository gat
 only after the retained receipt, unchanged grants, journal absence and workspace
 absence are reverified. Normal admission and same-issue generation fencing still apply.
 
+When the canonical Linear issue is now terminal and an independently observed
+provider projection has no claim, `WorkPackageClaim.Unsubmitted.retire_terminal/6`
+can additionally close the never-submitted local generation. A trusted operator
+must retain the exact Linear status/UUID, provider projection and claim absence,
+process census, claim journal, immutable grant and fence snapshots, and absent
+canonical workspace under one evidence reference. The API rechecks the local
+journal, workspace, grant lifecycle and untouched lease before recording a
+distinct `retired` fence with that reference. This has no accepted Git head or
+synthetic cleanup receipt; `cleanup: cleaned` records that there was no local
+checkout to remove. It does not terminate a worker, release provider capacity,
+close a provider projection, or clear a separate failed cleanup hold. Persist
+the graph and fence candidates together under the existing exclusive writer/CAS
+recovery contract; a partial write is not admission authority.
+
 To enable this managed runtime on a Linux runner, the host must provide the complete tuple below;
 the service rejects a partial tuple during supervisor startup and leaves the adapter disabled when
 all five values are absent. A host that declares `SYMPHONY_POOL_KEY` or

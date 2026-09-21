@@ -52,6 +52,95 @@ defmodule SymphonyElixir.UnsubmittedSuccessorTest do
     assert {:ok, state.responsibility_graph} == Admission.prepare(state.responsibility_graph, nil, nil, nil, nil, now)
   end
 
+  test "terminal never-submitted authority retires without a fabricated Git head and survives restart", context do
+    state = context.admitted
+    entry = hd(state.work_package_runtime.managed_delegations.entries)
+    observation = terminal_observation(context)
+    runtime = state.work_package_runtime
+    prior_fence = state.execution_fence
+    prior_graph = state.responsibility_graph
+
+    assert {:ok, fence, graph} =
+             Unsubmitted.retire_terminal(runtime, prior_fence, prior_graph, entry, observation, context.now)
+
+    execution = fence.executions[entry.issue_id]
+    assert execution.status == :retired
+    assert execution.cleanup == :cleaned
+    assert execution.terminal == nil
+    assert execution.cleanup_receipt == nil
+    assert execution.retirement.evidence_ref == "test:independent-terminal-absence"
+    assert graph.delegations[entry.responsible.id].runtime_lease == nil
+    assert :ok = ExecutionFence.validate(fence)
+    path = Path.join(context.root, "terminal-retired-fence.json")
+    assert :ok = ExecutionFence.Persistence.save(path, fence)
+    assert {:ok, persisted} = ExecutionFence.Persistence.load(path)
+    assert :ok = ExecutionFence.validate(persisted)
+    assert persisted.executions[entry.issue_id].retirement == execution.retirement
+
+    assert {:ok, ^persisted, ^graph} =
+             Unsubmitted.retire_terminal(runtime, persisted, graph, entry, observation, context.now + 1)
+
+    assert {:error, :terminal_unsubmitted_retirement_not_proven} =
+             Unsubmitted.retire_terminal(runtime, persisted, prior_graph, entry, observation, context.now + 1)
+
+    retired_state = %{state | execution_fence: persisted, responsibility_graph: graph}
+
+    assert {:ok, _next, _token, _, "responsible-2", _} =
+             Orchestrator.admit_execution_for_test(retired_state, Fixture.issue(2), nil)
+  end
+
+  test "expired terminal never-submitted authority retains graph retirement and closes only the local fence", context do
+    state = context.admitted
+    entry = hd(state.work_package_runtime.managed_delegations.entries)
+    now = entry.responsible.expires_at_ms + 1
+    {:ok, graph} = ResponsibilityGraph.mark_unreconciled_after_restart(state.responsibility_graph)
+    runtime = state.work_package_runtime
+    prior_fence = state.execution_fence
+
+    assert {:ok, fence, graph} =
+             Unsubmitted.retire_terminal(runtime, prior_fence, graph, entry, terminal_observation(context), now)
+
+    assert fence.executions[entry.issue_id].status == :retired
+    assert graph.delegations[entry.responsible.id].status == :expired
+    assert graph.delegations[entry.responsible.id].terminal_reason == :expired_never_submitted
+
+    payload = update_in(Fixture.payload(now), ["entries"], &Enum.reject(&1, fn item -> item["issue_id"] == entry.issue_id end))
+    {:ok, manifest} = ManagedResponsibility.decode(payload, Fixture.context(), now)
+    runtime = %{state.work_package_runtime | managed_delegations: manifest}
+    assert {:ok, _} = Admission.prepare(graph, fence, manifest, Fixture.issue(2), nil, now, runtime)
+  end
+
+  test "terminal retirement fails closed on provider, tracker, process, journal, or workspace uncertainty", context do
+    state = context.admitted
+    entry = hd(state.work_package_runtime.managed_delegations.entries)
+    observation = terminal_observation(context)
+
+    retire = fn runtime, fence, graph, proof ->
+      Unsubmitted.retire_terminal(runtime, fence, graph, entry, proof, context.now)
+    end
+
+    for changed <- [
+          Map.put(observation, "linear_state", "In Progress"),
+          Map.put(observation, "provider_claim", "claimed"),
+          Map.put(observation, "active_process", "unknown"),
+          Map.put(observation, "generation", observation["generation"] + 1)
+        ] do
+      assert {:error, :terminal_unsubmitted_retirement_not_proven} =
+               retire.(state.work_package_runtime, state.execution_fence, state.responsibility_graph, changed)
+    end
+
+    File.write!(state.work_package_runtime.journal_path, "{partial")
+
+    assert {:error, :terminal_unsubmitted_retirement_not_proven} =
+             retire.(state.work_package_runtime, state.execution_fence, state.responsibility_graph, observation)
+
+    :ok = Journal.save(state.work_package_runtime.journal_path, %{schema_version: 1, reservations: %{}})
+    File.write!(context.execution.worktree, "unexpected checkout")
+
+    assert {:error, :terminal_unsubmitted_retirement_not_proven} =
+             retire.(state.work_package_runtime, state.execution_fence, state.responsibility_graph, observation)
+  end
+
   test "expired never-submitted retirement survives manifest rotation and persistence", context do
     state = context.admitted
     entry = hd(state.work_package_runtime.managed_delegations.entries)
@@ -136,6 +225,18 @@ defmodule SymphonyElixir.UnsubmittedSuccessorTest do
       "provider_claim" => "absent",
       "active_process" => "absent",
       "evidence_ref" => "test:independent-host-provider-census"
+    }
+  end
+
+  defp terminal_observation(context) do
+    %{
+      "issue_id" => context.execution.issue_id,
+      "generation" => context.execution.generation,
+      "linear_state" => "Canceled",
+      "provider_projection_id" => "workpkg-test-terminal",
+      "provider_claim" => "absent",
+      "active_process" => "absent",
+      "evidence_ref" => "test:independent-terminal-absence"
     }
   end
 

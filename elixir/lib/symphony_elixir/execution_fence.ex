@@ -17,6 +17,17 @@ defmodule SymphonyElixir.ExecutionFence do
   @default_lease_ttl_ms 300_000
   @roles [:worker, :reviewer]
   @mutable_actions [:commit, :push, :state_mutation]
+  @retirement_evidence_keys [
+    :active_process,
+    :evidence_ref,
+    :generation,
+    :issue_id,
+    :linear_state,
+    :local_claim,
+    :provider_claim,
+    :provider_projection_id,
+    :workspace
+  ]
 
   @type token :: %{issue_id: String.t(), generation: pos_integer()}
   @type state :: %{
@@ -122,6 +133,66 @@ defmodule SymphonyElixir.ExecutionFence do
     else
       _ -> {:error, :unsubmitted_claim_not_reconcilable}
     end
+  end
+
+  @doc "Retires a never-submitted generation without inventing a Git terminal head."
+  @spec retire_unsubmitted(state(), token(), map(), non_neg_integer()) ::
+          {:ok, state(), :retired | :already_retired} | {:error, term()}
+  def retire_unsubmitted(state, token, evidence, now_ms)
+      when is_map(evidence) and is_integer(now_ms) and now_ms >= 0 do
+    with :ok <- validate_state(state),
+         {:ok, execution} <- current_execution(state, token),
+         true <- valid_unsubmitted_retirement_evidence?(evidence),
+         true <- evidence.issue_id == execution.issue_id and evidence.generation == execution.generation,
+         true <- unsubmitted_retirement_lease?(execution) do
+      finish_unsubmitted_retirement(state, execution, evidence, now_ms)
+    else
+      _ -> {:error, :unsubmitted_retirement_not_proven}
+    end
+  end
+
+  def retire_unsubmitted(_state, _token, _evidence, _now_ms),
+    do: {:error, :unsubmitted_retirement_not_proven}
+
+  defp finish_unsubmitted_retirement(state, %{status: :active, terminal: nil, cleanup: :pending, cleanup_receipt: nil} = execution, evidence, now_ms) do
+    retirement = Map.put(evidence, :retired_at_ms, now_ms)
+    updated = Map.merge(execution, %{status: :retired, cleanup: :cleaned, cleaned_at_ms: now_ms})
+    next_state = put_execution(state, Map.put(updated, :retirement, retirement))
+
+    with :ok <- validate_state(next_state),
+         do: {:ok, next_state, :retired}
+  end
+
+  defp finish_unsubmitted_retirement(state, %{status: :retired, cleanup: :cleaned, retirement: %{retired_at_ms: at_ms} = retirement}, evidence, now_ms) do
+    if Map.delete(retirement, :retired_at_ms) == evidence and at_ms <= now_ms,
+      do: {:ok, state, :already_retired},
+      else: {:error, :unsubmitted_retirement_conflict}
+  end
+
+  defp finish_unsubmitted_retirement(_state, _execution, _evidence, _now_ms),
+    do: {:error, :unsubmitted_retirement_conflict}
+
+  defp unsubmitted_retirement_lease?(execution) do
+    execution.ownership == :reconciled and not termination_unconfirmed?(execution) and
+      case Map.values(execution.leases) do
+        [lease] -> untouched_released_lease?(lease)
+        _ -> false
+      end
+  end
+
+  defp untouched_released_lease?(lease) do
+    lease.status == :released and lease.release_reason in [:claim_not_submitted, "claim_not_submitted"] and
+      lease.head == "unobserved" and lease.last_heartbeat_at == 0 and
+      is_nil(Map.get(lease, :supervisor_identity)) and not Map.get(lease, :termination_required, false)
+  end
+
+  defp valid_unsubmitted_retirement_evidence?(evidence) do
+    is_binary(Map.get(evidence, :issue_id)) and positive_integer?(Map.get(evidence, :generation)) and
+      present_string?(Map.get(evidence, :linear_state)) and
+      present_string?(Map.get(evidence, :provider_projection_id)) and
+      present_string?(Map.get(evidence, :evidence_ref)) and
+      Enum.all?([:provider_claim, :active_process, :local_claim, :workspace], &(Map.get(evidence, &1) == :absent)) and
+      Enum.sort(Map.keys(evidence)) == @retirement_evidence_keys
   end
 
   @doc "Returns a sanitized, deterministic projection for operator/API observability."
@@ -748,7 +819,7 @@ defmodule SymphonyElixir.ExecutionFence do
     valid_execution_identity?(issue_id, execution) and
       valid_execution_status?(execution) and valid_execution_leases?(execution) and
       valid_terminal_consistency?(execution) and valid_cleanup_consistency?(execution) and
-      valid_termination_consistency?(execution)
+      valid_termination_consistency?(execution) and valid_retirement_consistency?(execution)
   end
 
   defp valid_execution?(_issue_id, _execution), do: false
@@ -825,6 +896,7 @@ defmodule SymphonyElixir.ExecutionFence do
 
   defp valid_status_cleanup_pair?(:active, :pending), do: true
   defp valid_status_cleanup_pair?(:terminal, cleanup), do: cleanup in [:pending, :cleaned]
+  defp valid_status_cleanup_pair?(:retired, :cleaned), do: true
   defp valid_status_cleanup_pair?(_status, _cleanup), do: false
 
   defp valid_execution_leases?(execution) do
@@ -842,11 +914,29 @@ defmodule SymphonyElixir.ExecutionFence do
   end
 
   defp valid_terminal_consistency?(%{status: :active, terminal: nil}), do: true
+  defp valid_terminal_consistency?(%{status: :retired, terminal: nil}), do: true
 
   defp valid_terminal_consistency?(%{status: :terminal, terminal: terminal}),
     do: is_map(terminal) and valid_terminal?(terminal)
 
   defp valid_terminal_consistency?(_execution), do: false
+
+  defp valid_retirement_consistency?(%{status: :retired, retirement: retirement} = execution)
+       when is_map(retirement) do
+    evidence = Map.delete(retirement, :retired_at_ms)
+
+    valid_unsubmitted_retirement_evidence?(evidence) and
+      evidence.issue_id == execution.issue_id and evidence.generation == execution.generation and
+      non_negative_integer?(Map.get(retirement, :retired_at_ms)) and
+      execution.cleanup_receipt == nil and execution.cleaned_at_ms == retirement.retired_at_ms and
+      match?(
+        [%{status: :released, release_reason: reason}] when reason in [:claim_not_submitted, "claim_not_submitted"],
+        Map.values(execution.leases)
+      )
+  end
+
+  defp valid_retirement_consistency?(%{status: :retired}), do: false
+  defp valid_retirement_consistency?(execution), do: is_nil(Map.get(execution, :retirement))
 
   defp valid_lease?(session_id, lease) when is_binary(session_id) and is_map(lease) do
     valid_lease_identity?(session_id, lease) and valid_lease_scope?(lease) and
@@ -1102,6 +1192,7 @@ defmodule SymphonyElixir.ExecutionFence do
       :cleaned_at_ms
     ])
     |> Map.put(:terminal, sanitize_terminal(execution.terminal))
+    |> Map.put(:retirement, Map.get(execution, :retirement))
     |> Map.put(:cleanup_receipt, sanitize_cleanup_receipt(Map.get(execution, :cleanup_receipt)))
     |> Map.put(
       :sessions,
@@ -1223,7 +1314,7 @@ defmodule SymphonyElixir.ExecutionFence do
     execution.ownership == :reconciled and not termination_unconfirmed?(execution) and
       active_lease_ids(execution) == [] and
       (execution.status == :active or
-         (execution.status == :terminal and execution.cleanup == :cleaned))
+         (execution.status in [:terminal, :retired] and execution.cleanup == :cleaned))
   end
 
   defp archive_previous_execution(state, nil), do: state

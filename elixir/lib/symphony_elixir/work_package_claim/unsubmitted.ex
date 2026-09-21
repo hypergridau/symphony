@@ -55,6 +55,83 @@ defmodule SymphonyElixir.WorkPackageClaim.Unsubmitted do
   def retire_expired(_runtime, _fence, _graph, _entry, _observation, _now_ms),
     do: {:error, :expired_unsubmitted_retirement_not_proven}
 
+  @doc "Retires a terminal issue that never acquired a provider claim or checkout."
+  @spec retire_terminal(map(), map(), map(), map(), map(), non_neg_integer()) ::
+          {:ok, map(), map()} | {:error, term()}
+  def retire_terminal(
+        runtime,
+        fence,
+        graph,
+        %{issue_id: _, responsible: %{expires_at_ms: _}} = entry,
+        observation,
+        now_ms
+      )
+      when is_map(runtime) and is_map(observation) and
+             is_integer(now_ms) and now_ms >= 0 do
+    with :ok <- ExecutionFence.validate(fence),
+         :ok <- ResponsibilityGraph.validate(graph),
+         %{issue_id: issue_id, generation: generation} = execution <- fence.executions[entry.issue_id],
+         true <- observation["issue_id"] == issue_id and observation["generation"] == generation,
+         state when is_binary(state) <- observation["linear_state"],
+         true <- String.downcase(state) in ~w(closed cancelled canceled duplicate done),
+         true <- observation["provider_claim"] == "absent" and observation["active_process"] == "absent",
+         projection_id when is_binary(projection_id) and projection_id != "" <- observation["provider_projection_id"],
+         ref when is_binary(ref) and ref != "" <- observation["evidence_ref"],
+         true <- absent_local_workspace?(execution),
+         :absent <- current_claim(runtime, execution),
+         {:ok, released_fence, released_graph} <-
+           release_terminal_authority(runtime, fence, graph, entry, execution, observation, now_ms),
+         evidence = %{
+           issue_id: issue_id,
+           generation: generation,
+           linear_state: state,
+           provider_projection_id: projection_id,
+           provider_claim: :absent,
+           active_process: :absent,
+           local_claim: :absent,
+           workspace: :absent,
+           evidence_ref: ref
+         },
+         token = %{issue_id: issue_id, generation: generation},
+         {:ok, retired_fence, _} <- ExecutionFence.retire_unsubmitted(released_fence, token, evidence, now_ms) do
+      {:ok, retired_fence, released_graph}
+    else
+      _ -> {:error, :terminal_unsubmitted_retirement_not_proven}
+    end
+  end
+
+  def retire_terminal(_runtime, _fence, _graph, _entry, _observation, _now_ms),
+    do: {:error, :terminal_unsubmitted_retirement_not_proven}
+
+  defp release_terminal_authority(runtime, fence, graph, entry, execution, observation, now_ms) do
+    cond do
+      execution.status == :retired ->
+        if settled_terminal_authority?(runtime, fence, graph, entry, execution),
+          do: {:ok, fence, graph},
+          else: {:error, :terminal_unsubmitted_partial_recovery}
+
+      entry.responsible.expires_at_ms <= now_ms ->
+        retire_expired(runtime, fence, graph, entry, observation, now_ms)
+
+      true ->
+        case prepare(runtime, fence, graph, execution, now_ms) do
+          {:new, next_fence, next_graph} -> {:ok, next_fence, next_graph}
+          _ -> {:error, :unsubmitted_claim_not_released}
+        end
+    end
+  end
+
+  defp settled_terminal_authority?(runtime, fence, graph, entry, execution) do
+    accountable = graph.delegations[entry.accountable.id]
+    responsible = graph.delegations[entry.responsible.id]
+
+    immutable_match?(accountable, entry.accountable) and
+      immutable_match?(responsible, entry.responsible) and
+      is_nil(accountable.runtime_lease) and is_nil(responsible.runtime_lease) and
+      ((accountable.status == :active and responsible.status == :active) or
+         retired_authorization?(runtime, fence, graph, execution))
+  end
+
   defp grant_digest(grant) do
     grant |> Map.take(@grant_fields) |> :erlang.term_to_binary([:deterministic]) |> then(&:crypto.hash(:sha256, &1)) |> Base.encode16(case: :lower)
   end
@@ -100,25 +177,42 @@ defmodule SymphonyElixir.WorkPackageClaim.Unsubmitted do
 
     with :absent <- current_claim(runtime, execution),
          true <- absent_local_workspace?(execution),
+         :ok <- ExecutionFence.validate(fence),
          true <- execution.ownership == :reconciled,
-         {:ok, ^fence} <- ExecutionFence.release_unsubmitted_claim(fence, token, worker.session_id) do
+         true <-
+           retired_terminal_execution?(execution) or
+             match?({:ok, ^fence}, ExecutionFence.release_unsubmitted_claim(fence, token, worker.session_id)) do
       {:ok, execution}
     else
       _ -> {:error, :retired_execution_changed}
     end
   end
 
+  defp retired_terminal_execution?(%{status: :retired, cleanup: :cleaned, retirement: retirement} = execution)
+       when is_map(retirement) do
+    retirement.issue_id == execution.issue_id and retirement.generation == execution.generation and
+      retirement.provider_claim == :absent and retirement.local_claim == :absent and
+      retirement.workspace == :absent and retirement.active_process == :absent
+  end
+
+  defp retired_terminal_execution?(_execution), do: false
+
   @doc "Proves an already released local generation has no claim or workspace blocking another issue."
   @spec released_without_workspace?(map() | nil, map(), map(), map(), non_neg_integer()) :: boolean()
   def released_without_workspace?(runtime, fence, graph, %{worker_host: nil, worktree: path} = execution, now_ms)
       when is_map(runtime) and is_binary(path) do
-    with true <- Path.type(path) == :absolute and Path.expand(path) == path,
+    with :ok <- ExecutionFence.validate(fence),
+         :ok <- ResponsibilityGraph.validate(graph),
+         ^execution <- fence.executions[execution.issue_id],
+         true <- Path.type(path) == :absolute and Path.expand(path) == path,
          false <- String.starts_with?(path, ["//", "\\\\"]),
          {:error, :enoent} <- File.lstat(path),
          true <- plain_directory_ancestors?(Path.dirname(path)),
          true <- matching_authorization?(runtime, graph, execution),
          :absent <- current_claim(runtime, execution),
-         {:new, ^fence, ^graph} <- prepare(runtime, fence, graph, execution, now_ms) do
+         true <-
+           retired_terminal_execution?(execution) or
+             match?({:new, ^fence, ^graph}, prepare(runtime, fence, graph, execution, now_ms)) do
       true
     else
       _ -> retired_authorization?(runtime, fence, graph, execution)
