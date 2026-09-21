@@ -224,7 +224,9 @@ Managed review handoff remains discoverable from the persisted execution fence a
 stops or the orchestrator restarts. The ordinary poll confirms the exact execution session and
 retains the repository claim while review is pending. A blocked worker that moves to a non-active
 review state keeps its blocked entry and cleanup authority until a terminal tracker transition;
-the review handoff cannot discard the only generation-bound path to the provider receipts.
+the review handoff cannot discard the only generation-bound path to the provider receipts. A
+terminal tracker transition also retains that claim until signed termination and repository
+cleanup acknowledgements for the exact generation are present in the durable journal.
 Restart reconciliation confirms termination at or after the supervisor evidence timestamp, so an
 observation captured after the restart's initial clock snapshot remains valid. Process termination
 alone emits no terminal receipt. A fresh terminal tracker state and a merged GitHub PR matching the clean workspace's

@@ -988,6 +988,33 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(updated_state.claimed, issue_id)
   end
 
+  test "terminal blocked issue retains its claim while managed cleanup acknowledgements are absent" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue_id = "blocked-terminal-pending-cleanup"
+    token = %{issue_id: issue_id, generation: 1, repository_ref: "hypergridau/midgard"}
+
+    state = %Orchestrator.State{
+      blocked: %{
+        issue_id => %{
+          identifier: "MT-567",
+          execution_token: token,
+          error: "token budget exhausted",
+          worker_host: nil,
+          issue: %Issue{id: issue_id, identifier: "MT-567", state: "In Review", labels: ["symphony"]}
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      work_package_runtime: %{journal_path: "unavailable", managed_project_profile_id: "profile"}
+    }
+
+    issue = %Issue{id: issue_id, identifier: "MT-567", state: "Done", labels: ["symphony"]}
+    updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+    assert updated_state.blocked[issue_id].issue == issue
+    assert MapSet.member?(updated_state.claimed, issue_id)
+  end
+
   test "retry releases its claim when a required label is removed" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
 
