@@ -164,13 +164,17 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   end
 
   defp encode_budget(budget) do
-    %{
+    encoded = %{
       "model" => budget.model,
       "effort" => Atom.to_string(budget.effort),
-      "mode" => Atom.to_string(Map.get(budget, :mode, :finite)),
       "max_tokens" => budget.max_tokens,
       "max_children" => budget.max_children
     }
+
+    case Map.fetch(budget, :mode) do
+      {:ok, mode} -> Map.put(encoded, "mode", Atom.to_string(mode))
+      :error -> encoded
+    end
   end
 
   defp encode_runtime_lease(nil), do: nil
@@ -315,10 +319,11 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children} = payload) do
     with {:ok, effort} <- decode_atom(effort, @efforts),
-         {:ok, mode} <- decode_atom(Map.get(payload, "mode", "finite"), @budget_modes),
+         {:ok, mode, explicit_mode?} <- decode_budget_mode(payload),
          true <- is_binary(model) and model != "" and is_integer(max_tokens) and max_tokens > 0 and is_integer(max_children) and max_children >= 0,
          true <- valid_budget_model?(mode, model) do
-      {:ok, %{model: model, effort: effort, mode: mode, max_tokens: max_tokens, max_children: max_children}}
+      budget = %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}
+      {:ok, if(explicit_mode?, do: Map.put(budget, :mode, mode), else: budget)}
     else
       false -> {:error, :invalid_budget}
       {:error, _reason} = error -> error
@@ -327,6 +332,17 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   end
 
   defp decode_budget(_payload), do: {:error, :invalid_budget}
+
+  defp decode_budget_mode(payload) do
+    case Map.fetch(payload, "mode") do
+      :error -> {:ok, :finite, false}
+      {:ok, mode} ->
+        case decode_atom(mode, @budget_modes) do
+          {:ok, decoded} -> {:ok, decoded, true}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
 
   defp validate_budget_modes(%{delegations: delegations}) when is_map(delegations) do
     if Enum.all?(delegations, fn {_id, delegation} -> valid_encoded_budget?(Map.get(delegation, :budget)) end),
