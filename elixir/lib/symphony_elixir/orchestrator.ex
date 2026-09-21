@@ -806,7 +806,7 @@ defmodule SymphonyElixir.Orchestrator do
         blocked_entry = Map.get(state.blocked, issue.id, %{})
         state = maybe_fence_terminal_execution(state, Map.put(blocked_entry, :issue, issue), true)
         state = cleanup_fenced_workspace_or_legacy(state, issue, blocked_entry)
-        release_issue_claim(state, issue.id)
+        release_terminal_block_after_cleanup(state, issue, blocked_entry)
 
       !issue_routable?(issue) ->
         Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
@@ -899,6 +899,28 @@ defmodule SymphonyElixir.Orchestrator do
         state
     end
   end
+
+  defp release_terminal_block_after_cleanup(%State{work_package_runtime: nil} = state, issue, _entry),
+    do: release_issue_claim(state, issue.id)
+
+  defp release_terminal_block_after_cleanup(%State{} = state, issue, %{execution_token: token}) do
+    execution = get_in(state.execution_fence, [:executions, token.issue_id])
+
+    receipts_accepted? =
+      is_map(execution) and execution.generation == token.generation and execution.cleanup == :cleaned and
+        not cleanup_receipt_pending?(state.work_package_runtime, token, "repository_cleanup_verified") and
+        Enum.all?(execution.leases, fn {_session_id, lease} ->
+          is_integer(Map.get(lease, :termination_confirmed_at_ms))
+        end) and
+        not cleanup_receipt_pending?(state.work_package_runtime, token, "termination_confirmed")
+
+    if receipts_accepted?,
+      do: release_issue_claim(state, issue.id),
+      else: refresh_blocked_issue_state(state, issue)
+  end
+
+  defp release_terminal_block_after_cleanup(%State{} = state, issue, _entry),
+    do: release_issue_claim(state, issue.id)
 
   defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
