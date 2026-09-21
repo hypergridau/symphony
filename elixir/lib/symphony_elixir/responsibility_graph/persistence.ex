@@ -67,18 +67,26 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   defp input_keys?(payload, fields) when is_map(payload), do: Map.keys(payload) -- fields == []
   defp input_keys?(_payload, _fields), do: false
 
+  @doc "Decodes exact authenticated graph bytes without reading or writing a filesystem path."
+  @spec decode_bytes(binary()) :: {:ok, ResponsibilityGraph.state()} | {:error, term()}
+  def decode_bytes(contents) when is_binary(contents) do
+    with {:ok, payload} <- Jason.decode(contents),
+         {:ok, state} <- decode_state(payload),
+         :ok <- ResponsibilityGraph.validate(state) do
+      {:ok, state}
+    else
+      {:error, reason} -> {:error, {:invalid_snapshot, reason}}
+      other -> {:error, {:invalid_snapshot, other}}
+    end
+  end
+
+  def decode_bytes(_contents), do: {:error, {:invalid_snapshot, :invalid_snapshot_bytes}}
+
   @spec load(Path.t()) :: load_result()
   def load(path) when is_binary(path) do
     case File.read(path) do
       {:ok, contents} ->
-        with {:ok, payload} <- Jason.decode(contents),
-             {:ok, state} <- decode_state(payload),
-             :ok <- ResponsibilityGraph.validate(state) do
-          {:ok, state}
-        else
-          {:error, reason} -> {:error, {:invalid_snapshot, reason}}
-          other -> {:error, {:invalid_snapshot, other}}
-        end
+        decode_bytes(contents)
 
       {:error, :enoent} ->
         :missing
