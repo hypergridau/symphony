@@ -71,7 +71,7 @@ defmodule SymphonyElixir.ManagedTokenBudget.Limit do
   end
 
   defp valid_entry(%{issue_id: issue_id, responsible: %{id: id, budget: %{max_tokens: maximum}} = grant})
-      when is_binary(issue_id) and byte_size(issue_id) > 0 and is_binary(id) and byte_size(id) > 0 and
+       when is_binary(issue_id) and byte_size(issue_id) > 0 and is_binary(id) and byte_size(id) > 0 and
               is_integer(maximum) and maximum > 0 do
     with {:ok, mode} <- budget_mode(grant.budget),
          :ok <- valid_progress_model(mode, grant.budget) do
