@@ -1,0 +1,540 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "b2ca242e99c5f8c4fc3e474b298c57fc9004fd7d",
+  "credo": [
+    {
+      "identity": "[\"lib/symphony_elixir/cli.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.CLI.maybe_activate_responsibility_graph\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Codex.AppServer.receive_loop\",\"Line is too long (max is 120, was 129).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Codex.AppServer.run_turn\",\"Line is too long (max is 120, was 121).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Codex.AppServer.approve_or_require\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Codex.AppServer.handle_turn_method\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Codex.AppServer.maybe_auto_answer_tool_request_user_input\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/codex/app_server.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Codex.AppServer.maybe_handle_approval_request\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 7
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.prepare_cleanup\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.supervised_evidence_matches?\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.valid_execution_identity?\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.valid_termination_evidence?\",\"Function is too complex (cyclomatic complexity is 12, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.valid_triage_record?\",\"Function is too complex (cyclomatic complexity is 12, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.add_unconfirmed_reasons\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.confirm_termination\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.mark_unreconciled_after_restart\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.prepare_cleanup\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.record_head_divergence\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.release\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence/persistence.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ExecutionFence.Persistence.decode_supervisor_identity_attestation\",\"Function is too complex (cyclomatic complexity is 14, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence/persistence.ex\",\"Credo.Check.Refactor.NegatedConditionsWithElse\",\"SymphonyElixir.ExecutionFence.Persistence.decode_lease\",\"Avoid negated conditions in if-else blocks.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence/persistence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionFence.Persistence.recover_missing_snapshot\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_fence/persistence.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.ExecutionFence.Persistence.atomic_write\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_supervisor.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionSupervisor.normalize_processes\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/execution_supervisor.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ExecutionSupervisor.terminate_loaded_unit\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/linear/rate_limiter.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Linear.RateLimiter.open_advisory_lock\",\"Line is too long (max is 120, was 148).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/linear/rate_limiter.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Linear.RateLimiter.graphql_rate_limit_duration_ms\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/linear/rate_limiter.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Linear.RateLimiter.observe_response\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/linear/rate_limiter.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Linear.RateLimiter.reserve\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Orchestrator.handle_call\",\"Line is too long (max is 120, was 127).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Orchestrator.persist_fenced_cleanup\",\"Line is too long (max is 120, was 135).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.Orchestrator.replay_persisted_cleanup_receipts\",\"Line is too long (max is 120, was 151).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.cleanup_fenced_execution\",\"Function is too complex (cyclomatic complexity is 11, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.cleanup_verified_workspace\",\"Function is too complex (cyclomatic complexity is 12, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.reconcile_persisted_supervisor\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.replay_persisted_cleanup\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.restart_stalled_issue\",\"Function is too complex (cyclomatic complexity is 13, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.Orchestrator.valid_replayed_ack?\",\"Function is too complex (cyclomatic complexity is 12, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Orchestrator.spawn_fenced_issue\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.Orchestrator.stall_diagnostic\",\"Function takes too many parameters (arity is 10, max is 8).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.cleanup_fenced_execution\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.cleanup_verified_workspace\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.handle_call\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.init\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.maybe_confirm_execution_supervisor\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.observe_worker_runtime_head\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.prepare_cleanup_evidence\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.reconcile_persisted_supervisor\",\"Function body is nested too deep (max depth is 2, was 5).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.replay_persisted_cleanup_receipts\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.replay_persisted_cleanup\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.restart_stalled_issue\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.spawn_fenced_issue\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/orchestrator.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Orchestrator.spawn_issue_on_worker_host\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_bootstrap.ex\",\"Credo.Check.Refactor.CondStatements\",\"SymphonyElixir.ResponsibilityBootstrap.managed_runtime_ready\",\"Cond statements should contain at least two conditions besides `true`, consider using `if` instead.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraph.validate_runtime_lease\",\"Line is too long (max is 120, was 175).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Readability.PredicateFunctionNames\",\"SymphonyElixir.ResponsibilityGraph.is_descendant?\",\"Predicate function names should not start with 'is', and should end in a question mark.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ResponsibilityGraph.valid_delegation?\",\"Function is too complex (cyclomatic complexity is 13, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.ResponsibilityGraph.valid_parent_links?\",\"Function is too complex (cyclomatic complexity is 12, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ResponsibilityGraph.block\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ResponsibilityGraph.mark_unreconciled_after_restart\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ResponsibilityGraph.parent_scope_available\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ResponsibilityGraph.terminalize\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.ResponsibilityGraph.parent_constraints\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.ResponsibilityGraph.validate_remediation_attrs\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph/persistence.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraph.Persistence.decode_budget\",\"Line is too long (max is 120, was 147).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph/persistence.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraph.Persistence.encode_scope\",\"Line is too long (max is 120, was 125).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph/persistence.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.ResponsibilityGraph.Persistence.decode_scope_collections\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph/persistence.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.ResponsibilityGraph.Persistence.atomic_write\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/responsibility_graph/persistence.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.ResponsibilityGraph.Persistence.replace_file\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/startup_maintenance.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.StartupMaintenance.run\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_claim.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkPackageClaim.ensure_reservation\",\"Line is too long (max is 120, was 124).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_claim/journal.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageClaim.Journal.decode_cleanup_receipt\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.WorkPackageCleanupReceipt.acknowledgement_key\",\"Function is too complex (cyclomatic complexity is 13, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.WorkPackageCleanupReceipt.valid_canonical_fields?\",\"Function is too complex (cyclomatic complexity is 10, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.WorkPackageCleanupReceipt.submit_or_replay\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.FunctionArity\",\"SymphonyElixir.WorkPackageCleanupReceipt.submit_unacknowledged\",\"Function takes too many parameters (arity is 9, max is 8).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanupReceipt.reservation_for\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanupReceipt.semantic_receipt\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanupReceipt.submit_or_replay\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanupReceipt.valid_canonical_fields?\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup_receipt.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.WorkPackageCleanupReceipt.submit\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup.ex\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkPackageCleanup.archive_content_entry\",\"Line is too long (max is 120, was 164).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanup.archive_content_entries\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkPackageCleanup.read_json\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.WorkPackageCleanup.prepare\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_cleanup.ex\",\"Credo.Check.Refactor.RedundantWithClauseResult\",\"SymphonyElixir.WorkPackageCleanup.verify_published_archive\",\"Last clause in `with` is redundant.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/work_package_runtime.ex\",\"Credo.Check.Readability.PreferImplicitTry\",\"SymphonyElixir.WorkPackageRuntime.default_journal_path\",\"Prefer using an implicit `try` rather than explicit `try`.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/workspace.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Workspace.remove_issue_workspaces\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/workspace.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Workspace.remove_startup_workspace\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"lib/symphony_elixir/workspace.ex\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.Workspace.remove_valid_issue_workspaces_for_startup\",\"Function body is nested too deep (max depth is 2, was 3).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/execution_supervisor_test.exs\",\"Credo.Check.Readability.AliasOrder\",\"SymphonyElixir.ExecutionSupervisorTest\",\"The alias `SymphonyElixir.ExecutionSupervisor` is not alphabetically ordered among its group.\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/execution_supervisor_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ExecutionSupervisorTest\",\"Line is too long (max is 120, was 127).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/execution_supervisor_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ExecutionSupervisorTest\",\"Line is too long (max is 120, was 130).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/execution_supervisor_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ExecutionSupervisorTest\",\"Line is too long (max is 120, was 132).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/orchestrator_responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.OrchestratorResponsibilityGraphTest.authority\",\"Line is too long (max is 120, was 129).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/orchestrator_responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.OrchestratorResponsibilityGraphTest.scope\",\"Line is too long (max is 120, was 123).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/orchestrator_responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.OrchestratorResponsibilityGraphTest\",\"Line is too long (max is 120, was 137).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_persistence_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphPersistenceTest\",\"Line is too long (max is 120, was 121).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_persistence_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphPersistenceTest\",\"Line is too long (max is 120, was 127).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphTest\",\"Line is too long (max is 120, was 121).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphTest\",\"Line is too long (max is 120, was 127).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphTest\",\"Line is too long (max is 120, was 160).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"test/symphony_elixir/responsibility_graph_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.ResponsibilityGraphTest\",\"Line is too long (max is 120, was 167).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/runner_observation_reporter_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.RunnerObservationReporterTest\",\"Line is too long (max is 120, was 172).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/runtime_identity_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.RuntimeIdentityTest.enforced_graph\",\"Line is too long (max is 120, was 123).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/work_package_cleanup_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkPackageCleanupTest\",\"Line is too long (max is 120, was 121).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/work_package_cleanup_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkPackageCleanupTest\",\"Line is too long (max is 120, was 141).\"]",
+      "count": 2
+    },
+    {
+      "identity": "[\"test/symphony_elixir/work_package_cleanup_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkPackageCleanupTest\",\"Line is too long (max is 120, was 142).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/workspace_and_config_test.exs\",\"Credo.Check.Readability.MaxLineLength\",\"SymphonyElixir.WorkspaceAndConfigTest\",\"Line is too long (max is 120, was 138).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/workspace_and_config_test.exs\",\"Credo.Check.Refactor.CyclomaticComplexity\",\"SymphonyElixir.WorkspaceAndConfigTest.create_directory_link_for_test\",\"Function is too complex (cyclomatic complexity is 11, max is 9).\"]",
+      "count": 1
+    },
+    {
+      "identity": "[\"test/symphony_elixir/workspace_and_config_test.exs\",\"Credo.Check.Refactor.Nesting\",\"SymphonyElixir.WorkspaceAndConfigTest.create_directory_link_for_test\",\"Function body is nested too deep (max depth is 2, was 4).\"]",
+      "count": 1
+    }
+  ],
+  "dialyzer": [
+    {
+      "identity": "lib/mix/tasks/pr_body.check.ex:pattern_match The pattern can never match the type nil | [binary() | {integer(), integer()}].",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/codex/app_server.ex:pattern_match_cov The pattern variable _other@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_fence.ex:pattern_match_cov The pattern variable _ can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_fence.ex:pattern_match_cov The pattern variable __execution@1 can never match the type, because it is covered by previous clauses.",
+      "count": 2
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_fence.ex:pattern_match_cov The pattern variable __records@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_fence/persistence.ex:pattern_match_cov The pattern pattern <__identity@1, __payload@1> can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_fence/persistence.ex:pattern_match_cov The pattern variable _other@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_supervisor.ex:guard_fail The guard clause can never succeed.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/execution_supervisor.ex:pattern_match_cov The pattern variable __output@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/orchestrator.ex:pattern_match_cov The pattern pattern <__running_entry@1, _fallback@1> can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/orchestrator.ex:pattern_match_cov The pattern pattern <_state@1, __running_entry@1> can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/orchestrator.ex:pattern_match_cov The pattern variable __running_entry@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/orchestrator.ex:pattern_match_cov The pattern variable _other@1 can never match the type, because it is covered by previous clauses.",
+      "count": 2
+    },
+    {
+      "identity": "lib/symphony_elixir/orchestrator.ex:pattern_match_cov The pattern variable _path@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_bootstrap.ex:pattern_match_cov The pattern variable _result@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_graph.ex:call_without_opaque Type mismatch in call without opaque term in member?.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_graph.ex:pattern_match_cov The pattern variable _ can never match the type, because it is covered by previous clauses.",
+      "count": 2
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_graph/persistence.ex:pattern_match_cov The pattern variable _ can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_graph/persistence.ex:pattern_match_cov The pattern variable __state@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/responsibility_graph/persistence.ex:pattern_match_cov The pattern variable _other@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/work_package_claim.ex:pattern_match_cov The pattern pattern <__data@1, __authority@1> can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/work_package_claim/journal.ex:pattern_match_cov The pattern variable __receipt@1 can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    },
+    {
+      "identity": "lib/symphony_elixir/work_package_cleanup_receipt.ex:pattern_match_cov The pattern pattern <__data@1, __authority@1, __reservation@1, __receipt@1> can never match the type, because it is covered by previous clauses.",
+      "count": 1
+    }
+  ]
+}

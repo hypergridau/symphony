@@ -907,6 +907,17 @@ The observability UI now runs on a minimal Phoenix stack:
 make all
 ```
 
+The quality gate keeps a pinned warning baseline from main commit
+`b2ca242e99c5f8c4fc3e474b298c57fc9004fd7d` in
+`config/quality-baseline.json`. `mix lint` still enforces public specs and rejects
+new or increased Credo warning identities; `make dialyzer` rejects new or
+increased Dialyzer warnings. Line-number shifts do not count as new warnings,
+but duplicate counts do. Fixing old warnings reduces the current count without
+changing the recorded baseline. The coverage floor is 85.95%, the measured
+Linux baseline; a lower result fails `make all`. The baseline is not permission
+to introduce new lint or type debt, and changing it requires a separately
+reviewed quality-policy change.
+
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
 resources and launch a real `codex app-server` session:
 
