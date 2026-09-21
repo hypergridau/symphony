@@ -222,13 +222,20 @@ entry is present; termination and repository-cleanup receipts never fall back to
 
 Managed review handoff remains discoverable from the persisted execution fence after the worker
 stops or the orchestrator restarts. The ordinary poll confirms the exact execution session and
-retains the repository claim while review is pending. Process termination alone emits no terminal
-receipt. A fresh terminal tracker state and a merged GitHub PR matching the clean workspace's
+retains the repository claim while review is pending. A blocked worker that moves to a non-active
+review state keeps its blocked entry and cleanup authority until a terminal tracker transition;
+the review handoff cannot discard the only generation-bound path to the provider receipts.
+Restart reconciliation confirms termination at or after the supervisor evidence timestamp, so an
+observation captured after the restart's initial clock snapshot remains valid. Process termination
+alone emits no terminal receipt. A fresh terminal tracker state and a merged GitHub PR matching the clean workspace's
 current commit are required before successful fencing and cleanup. The qualified local Linux path
 checks the actual branch, repository origin, merge commit and absence of an open PR on that branch;
 the tracker-derived branch and the worker's initial checkout head are not acceptance evidence.
 Missing or conflicting evidence keeps the workspace and capacity held. Portable archive/restore
-verification and signed provider acknowledgements remain separate required cleanup steps.
+verification and signed provider acknowledgements remain separate required cleanup steps. If a
+cleaned fence no longer has readable independent archive evidence, the repository-receipt replay
+is quarantined for the remainder of that process instead of retrying on every poll. Repair remains
+fail-closed and a controlled restart provides one fresh replay attempt.
 
 The journal records `submitted`, `confirmed`, and `spawn_started` separately. The last marker is
 synced before attempting a worker task, so a restart can replay a submitted claim only when its
