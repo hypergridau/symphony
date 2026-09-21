@@ -743,6 +743,13 @@ Distinct terminal reasons are important because retry logic and logs differ.
   when its readable journal has no same-or-newer claim, its exact operator grants still match,
   and its canonical local workspace is absent with no linked ancestors. The check MUST preserve
   historical claims and MUST NOT fabricate terminal completion or repository cleanup.
+- A canonical terminal issue with a never-submitted local generation MAY retire that local fence
+  only after independently evidenced provider-claim and process absence, exact terminal tracker
+  identity, no journal claim, immutable grant reconciliation, and absent canonical workspace.
+  The retained retirement is distinct from a Git terminal fence: it has no accepted head or
+  synthetic Git cleanup receipt. It MUST NOT release provider capacity or clear a separate
+  failed-cleanup hold. Candidate graph and fence persistence remains an exclusive, fail-closed
+  operator recovery operation.
 
 ## 8. Polling, Scheduling, and Reconciliation
 
