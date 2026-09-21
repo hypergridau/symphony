@@ -123,7 +123,11 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
 
   test "progress mode does not disable genuine no-progress controls" do
     assert Config.settings!().codex.max_no_progress_tokens == 10
-    assert {:ok, @grant_limit, _} = Limit.resolve(@local_limit, %{managed_delegations: %{entries: [grant("issue-stall", :progress_scoped)]}}, "issue-stall")
+
+    manifest = %{managed_delegations: %{entries: [grant("issue-stall", :progress_scoped)]}}
+
+    assert {:ok, @grant_limit, _} =
+             Limit.resolve(@local_limit, manifest, "issue-stall")
   end
 
   test "model, scope, child, and parent-mode boundaries remain stable", c do
