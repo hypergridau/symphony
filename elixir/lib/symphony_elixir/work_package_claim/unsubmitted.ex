@@ -110,6 +110,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Unsubmitted do
           do: {:ok, fence, graph},
           else: {:error, :terminal_unsubmitted_partial_recovery}
 
+      retired_authorization?(runtime, fence, graph, execution) ->
+        {:ok, fence, graph}
+
       entry.responsible.expires_at_ms <= now_ms ->
         retire_expired(runtime, fence, graph, entry, observation, now_ms)
 

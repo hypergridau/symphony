@@ -110,6 +110,38 @@ defmodule SymphonyElixir.UnsubmittedSuccessorTest do
     assert {:ok, _} = Admission.prepare(graph, fence, manifest, Fixture.issue(2), nil, now, runtime)
   end
 
+  test "terminal recovery preserves an already retired grant receipt with a different evidence reference", context do
+    state = context.admitted
+    entry = hd(state.work_package_runtime.managed_delegations.entries)
+    now = entry.responsible.expires_at_ms + 1
+    {:ok, restart_graph} = ResponsibilityGraph.mark_unreconciled_after_restart(state.responsibility_graph)
+
+    assert {:ok, released_fence, retired_graph} =
+             Unsubmitted.retire_expired(
+               state.work_package_runtime,
+               state.execution_fence,
+               restart_graph,
+               entry,
+               retirement_observation(context),
+               now
+             )
+
+    retained_receipt = retired_graph.delegations[entry.responsible.id].terminal_evidence
+
+    assert {:ok, fence, ^retired_graph} =
+             Unsubmitted.retire_terminal(
+               state.work_package_runtime,
+               released_fence,
+               retired_graph,
+               entry,
+               terminal_observation(context),
+               now + 1
+             )
+
+    assert fence.executions[entry.issue_id].status == :retired
+    assert retired_graph.delegations[entry.responsible.id].terminal_evidence == retained_receipt
+  end
+
   test "terminal retirement fails closed on provider, tracker, process, journal, or workspace uncertainty", context do
     state = context.admitted
     entry = hd(state.work_package_runtime.managed_delegations.entries)

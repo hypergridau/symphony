@@ -359,7 +359,9 @@ synthetic cleanup receipt; `cleanup: cleaned` records that there was no local
 checkout to remove. It does not terminate a worker, release provider capacity,
 close a provider projection, or clear a separate failed cleanup hold. Persist
 the graph and fence candidates together under the existing exclusive writer/CAS
-recovery contract; a partial write is not admission authority.
+recovery contract; a partial write is not admission authority. If an expired
+grant pair was already retired under a prior evidence reference, retain that
+original graph receipt and append the distinct terminal-local fence evidence.
 
 To enable this managed runtime on a Linux runner, the host must provide the complete tuple below;
 the service rejects a partial tuple during supervisor startup and leaves the adapter disabled when
