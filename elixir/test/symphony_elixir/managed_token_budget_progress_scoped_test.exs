@@ -79,6 +79,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "mode"], "unbounded"))
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "mode"], nil))
     assert {:error, _} = Persistence.decode_delegation_input(put_in(raw, ["budget", "max_children"], -1))
+
     assert {:error, _} =
              Persistence.decode_delegation_input(
                raw
@@ -87,6 +88,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
              )
 
     invalid_model = grant("issue-limit", :progress_scoped, "gpt-5.6-sol")
+
     assert Limit.resolve(@local_limit, %{managed_delegations: %{entries: [invalid_model]}}, "issue-limit") ==
              {:error, :managed_token_budget_unavailable_or_exhausted}
   end
@@ -114,6 +116,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert Runtime.admission(restarted, issue.id) == :ok
 
     exhausted = observe!(reloaded, issue.id, @grant_limit)
+
     assert Runtime.admission(%{restarted | managed_token_budget: exhausted, codex_issue_totals: exhausted.issue_totals}, issue.id) ==
              {:error, :managed_token_budget_unavailable_or_exhausted}
   end

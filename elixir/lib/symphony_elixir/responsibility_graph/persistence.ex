@@ -335,7 +335,9 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp decode_budget_mode(payload) do
     case Map.fetch(payload, "mode") do
-      :error -> {:ok, :finite, false}
+      :error ->
+        {:ok, :finite, false}
+
       {:ok, mode} ->
         case decode_atom(mode, @budget_modes) do
           {:ok, decoded} -> {:ok, decoded, true}
