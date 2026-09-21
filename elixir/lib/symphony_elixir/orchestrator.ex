@@ -19,6 +19,7 @@ defmodule SymphonyElixir.Orchestrator do
     RuntimeIdentity,
     StartupMaintenance,
     StatusDashboard,
+    TerminalOutcome,
     Tracker,
     WorkPackageClaim,
     WorkPackageCleanupReceipt,
@@ -592,7 +593,7 @@ defmodule SymphonyElixir.Orchestrator do
       evidence = %{
         accepted_head: head,
         merge_identity: merge,
-        terminal_outcome: :completed,
+        terminal_outcome: TerminalOutcome.for_tracker_state(entry.issue.state),
         review_merge_verified: true
       }
 
@@ -2172,9 +2173,11 @@ defmodule SymphonyElixir.Orchestrator do
   defp normalize_release_reason(_reason), do: :orchestrator_stop
 
   defp terminal_outcome_for(entry, reason) do
+    tracker_state = Map.get(Map.get(entry, :issue) || %{}, :state)
+
     terminal? =
-      case Map.get(entry, :issue) do
-        %{state: state} when is_binary(state) ->
+      case tracker_state do
+        state when is_binary(state) ->
           try do
             terminal_issue_state?(state, terminal_state_set())
           rescue
@@ -2186,7 +2189,7 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     cond do
-      terminal? and reason == :normal -> :completed
+      terminal? and reason == :normal -> TerminalOutcome.for_tracker_state(tracker_state)
       reason in [:orchestrator_stop, :global_pause] -> :blocked
       true -> :failed
     end
@@ -2199,7 +2202,9 @@ defmodule SymphonyElixir.Orchestrator do
 
       %{terminal: %{state: terminal_state}} when is_binary(terminal_state) ->
         try do
-          if terminal_issue_state?(terminal_state, terminal_state_set()), do: :completed, else: :blocked
+          if terminal_issue_state?(terminal_state, terminal_state_set()),
+            do: TerminalOutcome.for_tracker_state(terminal_state),
+            else: :blocked
         rescue
           _ -> :blocked
         end

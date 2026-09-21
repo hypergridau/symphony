@@ -213,6 +213,19 @@ defmodule SymphonyElixir.OrchestratorReviewHandoffTest do
     assert head == c.head
   end
 
+  test "a canceled budget-stopped generation never submits a completed outcome", c do
+    issue = %{c.issue | state: "Canceled"}
+    next = Orchestrator.reconcile_review_handoff_issues_for_test(c.state, [issue])
+    execution = next.execution_fence.executions[@id]
+
+    assert execution.terminal.state == "Canceled"
+    assert execution.terminal.accepted_head == c.head
+    assert execution.cleanup == :pending
+    assert File.dir?(c.workspace)
+    assert_received {:receipt, %{"receiptKind" => "termination_confirmed", "terminalOutcome" => "failed"}}
+    refute_received {:receipt, %{"terminalOutcome" => "completed"}}
+  end
+
   test "missing merge evidence preserves an active fence after native Done", c do
     state = %{c.state | review_handoff_evidence: fn _ -> {:error, :not_merged} end}
     next = Orchestrator.reconcile_review_handoff_issues_for_test(state, [%{c.issue | state: "Done"}])
