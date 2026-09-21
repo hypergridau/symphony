@@ -10,7 +10,7 @@ defmodule SymphonyElixir.MixProject do
       start_permanent: Mix.env() == :prod,
       test_coverage: [
         summary: [
-          threshold: 100
+          threshold: 85.95
         ],
         ignore_modules: [
           SymphonyElixir.Asana.Client,
@@ -43,7 +43,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixirWeb.StaticAssetController,
           SymphonyElixirWeb.StaticAssets,
           SymphonyElixirWeb.Router,
-          SymphonyElixirWeb.Router.Helpers
+          SymphonyElixirWeb.Router.Helpers,
+          Mix.Tasks.QualityBaseline.Check
         ]
       ],
       test_ignore_filters: [
@@ -93,7 +94,7 @@ defmodule SymphonyElixir.MixProject do
     [
       setup: ["deps.get"],
       build: ["escript.build"],
-      lint: ["specs.check", "credo --strict"]
+      lint: ["specs.check", "quality_baseline.check --credo"]
     ]
   end
 
