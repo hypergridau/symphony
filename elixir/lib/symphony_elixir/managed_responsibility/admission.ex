@@ -28,6 +28,7 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
          :ok <- prior_repository_cleanup(fence, graph, manifest.repository_ref, issue.id, runtime, now_ms),
          {:ok, next_graph} <- ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
          {:ok, delegation} <- ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
+         :ok <- matching_budget_modes(next_graph, delegation),
          :ok <- route_budget(delegation.budget, ModelRouter.resolve(issue, attempt)) do
       {:ok, next_graph}
     else
@@ -64,6 +65,19 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
       :ok
     else
       {:error, :managed_responsibility_budget_exceeded}
+    end
+  end
+
+  defp matching_budget_modes(_graph, %{parent_delegation_id: nil}), do: :ok
+
+  defp matching_budget_modes(graph, %{parent_delegation_id: parent_id, budget: budget}) do
+    with %{budget: parent_budget} <- Map.get(graph.delegations, parent_id),
+         {:ok, parent_mode} <- Limit.budget_mode(parent_budget),
+         {:ok, child_mode} <- Limit.budget_mode(budget),
+         true <- parent_mode == child_mode do
+      :ok
+    else
+      _ -> {:error, :managed_responsibility_budget_mode_mismatch}
     end
   end
 end

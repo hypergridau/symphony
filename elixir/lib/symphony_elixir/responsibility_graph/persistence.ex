@@ -15,6 +15,8 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   @enforcements [:manual, :enforced]
   @actions [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
   @efforts [:none, :minimal, :low, :medium, :high, :xhigh, :max, :ultra]
+  @budget_modes [:finite, :progress_scoped]
+  @progress_model "gpt-5.6-luna"
   @classes [:routine_engineering, :coordination, :read_only, :exception]
   @scope_identifiers [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
   @scope_collections [:paths, :modules, :environments, :actions]
@@ -29,7 +31,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
     with true <- input_keys?(payload, fields),
          true <- input_keys?(payload["scope"], Enum.map(@scope_identifiers ++ @scope_collections, &Atom.to_string/1)),
          true <- input_keys?(payload["authority"], ~w(class capabilities environments)),
-         true <- input_keys?(payload["budget"], ~w(model effort max_tokens max_children)),
+         true <- input_keys?(payload["budget"], ~w(model effort mode max_tokens max_children)),
          true <- input_keys?(payload["return_to_parent"], ~w(owner_id contract)),
          {:ok, id} <- required_string(payload, "id"),
          {:ok, parent_id} <- optional_string(payload, "parent_delegation_id"),
@@ -110,12 +112,14 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   end
 
   defp encode_state(state) do
-    Jason.encode(%{
-      "schema_version" => @schema_version,
-      "enforcement" => Atom.to_string(Map.get(state, :enforcement, :manual)),
-      "delegations" => Map.new(state.delegations, fn {id, delegation} -> {id, encode_delegation(delegation)} end),
-      "events" => Enum.map(state.events, &encode_value/1)
-    })
+    with :ok <- validate_budget_modes(state) do
+      Jason.encode(%{
+        "schema_version" => @schema_version,
+        "enforcement" => Atom.to_string(Map.get(state, :enforcement, :manual)),
+        "delegations" => Map.new(state.delegations, fn {id, delegation} -> {id, encode_delegation(delegation)} end),
+        "events" => Enum.map(state.events, &encode_value/1)
+      })
+    end
   end
 
   defp encode_delegation(delegation) do
@@ -160,12 +164,17 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   end
 
   defp encode_budget(budget) do
-    %{
+    encoded = %{
       "model" => budget.model,
       "effort" => Atom.to_string(budget.effort),
       "max_tokens" => budget.max_tokens,
       "max_children" => budget.max_children
     }
+
+    case Map.fetch(budget, :mode) do
+      {:ok, mode} -> Map.put(encoded, "mode", Atom.to_string(mode))
+      :error -> encoded
+    end
   end
 
   defp encode_runtime_lease(nil), do: nil
@@ -308,10 +317,13 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp decode_authority(_payload), do: {:error, :invalid_authority}
 
-  defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children}) do
+  defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children} = payload) do
     with {:ok, effort} <- decode_atom(effort, @efforts),
-         true <- is_binary(model) and model != "" and is_integer(max_tokens) and max_tokens > 0 and is_integer(max_children) and max_children >= 0 do
-      {:ok, %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}}
+         {:ok, mode, explicit_mode?} <- decode_budget_mode(payload),
+         true <- is_binary(model) and model != "" and is_integer(max_tokens) and max_tokens > 0 and is_integer(max_children) and max_children >= 0,
+         true <- valid_budget_model?(mode, model) do
+      budget = %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}
+      {:ok, if(explicit_mode?, do: Map.put(budget, :mode, mode), else: budget)}
     else
       false -> {:error, :invalid_budget}
       {:error, _reason} = error -> error
@@ -320,6 +332,41 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   end
 
   defp decode_budget(_payload), do: {:error, :invalid_budget}
+
+  defp decode_budget_mode(payload) do
+    case Map.fetch(payload, "mode") do
+      :error ->
+        {:ok, :finite, false}
+
+      {:ok, mode} ->
+        case decode_atom(mode, @budget_modes) do
+          {:ok, decoded} -> {:ok, decoded, true}
+          {:error, _reason} = error -> error
+        end
+    end
+  end
+
+  defp validate_budget_modes(%{delegations: delegations}) when is_map(delegations) do
+    if Enum.all?(delegations, fn {_id, delegation} -> valid_encoded_budget?(Map.get(delegation, :budget)) end),
+      do: :ok,
+      else: {:error, :invalid_budget}
+  end
+
+  defp validate_budget_modes(_state), do: {:error, :invalid_budget}
+
+  defp valid_encoded_budget?(budget) when is_map(budget) do
+    case Map.fetch(budget, :mode) do
+      :error -> true
+      {:ok, mode} when mode in @budget_modes -> valid_budget_model?(mode, Map.get(budget, :model))
+      _ -> false
+    end
+  end
+
+  defp valid_encoded_budget?(_budget), do: false
+
+  defp valid_budget_model?(:progress_scoped, @progress_model), do: true
+  defp valid_budget_model?(:progress_scoped, _model), do: false
+  defp valid_budget_model?(:finite, _model), do: true
 
   defp decode_runtime_lease(nil), do: {:ok, nil}
 
