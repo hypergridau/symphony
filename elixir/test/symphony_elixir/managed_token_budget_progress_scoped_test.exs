@@ -57,8 +57,8 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert {:ok, @grant_limit, grant} =
              Limit.resolve(@local_limit, c.state.work_package_runtime, issue.id)
 
-    assert grant.responsible.budget.mode == :progress_scoped
-    assert grant.responsible.budget.max_tokens == @grant_limit
+    assert grant.budget.mode == :progress_scoped
+    assert grant.budget.max_tokens == @grant_limit
   end
 
   test "finite grants retain the configured ceiling while progress grants retain their declared limit" do
