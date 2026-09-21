@@ -69,8 +69,9 @@ defmodule SymphonyElixir.RetainedGrantProof.JournalCleanupEvidenceTest do
     body =
       map
       |> Enum.sort_by(fn {key, _} -> Atom.to_string(key) end)
-      |> Enum.map(fn {key, value} -> Jason.encode!(Atom.to_string(key)) <> ":" <> Jason.encode!(value) end)
-      |> Enum.join(",")
+      |> Enum.map_join(",", fn {key, value} ->
+        Jason.encode!(Atom.to_string(key)) <> ":" <> Jason.encode!(value)
+      end)
 
     "{" <> body <> "}"
   end

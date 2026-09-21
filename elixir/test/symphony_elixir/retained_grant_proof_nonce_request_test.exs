@@ -13,10 +13,22 @@ defmodule SymphonyElixir.RetainedGrantProof.NonceRequestTest do
   test "rejects padding, aliases, concatenation, whitespace and arbitrary request shapes" do
     canonical = Base.url_encode64(<<0::256>>, padding: false)
 
-    for invalid <- [canonical <> "=", canonical <> "\n", " " <> canonical, canonical <> canonical,
-                    String.slice(canonical, 0, 42) <> "B", String.duplicate("A", 42), String.duplicate("A", 44),
-                    Jason.encode!(%{nonce: canonical}), %{nonce: canonical}, [canonical], nil,
-                    String.pad_trailing("/etc/issuer-key", 43), String.duplicate("!", 43), <<255>> <> String.duplicate("A", 42)] do
+    for invalid <- [
+          canonical <> "=",
+          canonical <> "\n",
+          " " <> canonical,
+          canonical <> canonical,
+          String.slice(canonical, 0, 42) <> "B",
+          String.duplicate("A", 42),
+          String.duplicate("A", 44),
+          Jason.encode!(%{nonce: canonical}),
+          %{nonce: canonical},
+          [canonical],
+          nil,
+          String.pad_trailing("/etc/issuer-key", 43),
+          String.duplicate("!", 43),
+          <<255>> <> String.duplicate("A", 42)
+        ] do
       assert {:error, :invalid_retained_nonce_request} = NonceRequest.decode(invalid)
     end
   end
