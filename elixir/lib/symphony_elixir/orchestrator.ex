@@ -95,7 +95,8 @@ defmodule SymphonyElixir.Orchestrator do
       managed_token_budget: nil,
       managed_token_budget_error: nil,
       codex_rate_limits: nil,
-      startup_maintenance: nil
+      startup_maintenance: nil,
+      cleanup_receipt_quarantine: MapSet.new()
     ]
   end
 
@@ -815,8 +816,9 @@ defmodule SymphonyElixir.Orchestrator do
         refresh_blocked_issue_state(state, issue)
 
       true ->
-        Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        release_issue_claim(state, issue.id)
+        Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; retaining cleanup authority")
+
+        refresh_blocked_issue_state(state, issue)
     end
   end
 
@@ -2493,12 +2495,25 @@ defmodule SymphonyElixir.Orchestrator do
         end
 
       {:error, reason} ->
-        Logger.warning("Repository cleanup evidence was not sent without an independent verification record for issue_id=#{token.issue_id}: #{inspect(reason)}")
-        state
+        quarantine? = cleanup_evidence_missing_archive?(reason)
+
+        Logger.warning(
+          "Repository cleanup evidence was not sent without an independent verification record " <>
+            "for issue_id=#{token.issue_id}: #{inspect(reason)}" <>
+            if(quarantine?, do: "; quarantining replay until restart", else: "")
+        )
+
+        if quarantine?,
+          do: quarantine_cleanup_receipt(state, token, "repository_cleanup_verified"),
+          else: state
     end
   end
 
   defp submit_repository_cleanup_receipt(state, _token, _head, _terminal_outcome), do: state
+
+  defp cleanup_evidence_missing_archive?({:cleanup_manifest_unreadable, :enoent}), do: true
+  defp cleanup_evidence_missing_archive?(:cleanup_archive_missing_workspace), do: true
+  defp cleanup_evidence_missing_archive?(_reason), do: false
 
   defp cleanup_evidence_ref(runtime, state, token, head) do
     case Map.get(runtime, :cleanup_evidence_fun) do
@@ -2863,6 +2878,7 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     actions
+    |> Enum.reject(&cleanup_receipt_quarantined?(state, &1))
     |> Enum.filter(&cleanup_receipt_pending?(runtime, &1))
     |> Enum.take(@cleanup_receipt_replay_limit)
     |> Enum.reduce(state, fn
@@ -2883,6 +2899,39 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp replay_persisted_cleanup_receipts(state), do: state
+
+  defp cleanup_receipt_quarantined?(%State{} = state, action) do
+    case cleanup_receipt_replay_key(action) do
+      nil -> false
+      key -> MapSet.member?(state.cleanup_receipt_quarantine, key)
+    end
+  end
+
+  defp cleanup_receipt_replay_key({:termination, token, _session_id, _evidence, _issue, _outcome}),
+    do: cleanup_receipt_replay_key(token, "termination_confirmed")
+
+  defp cleanup_receipt_replay_key({:repository, token, _head, _outcome}),
+    do: cleanup_receipt_replay_key(token, "repository_cleanup_verified")
+
+  defp cleanup_receipt_replay_key(_action), do: nil
+
+  defp cleanup_receipt_replay_key(token, receipt_kind)
+       when is_map(token) and is_binary(receipt_kind) do
+    case {Map.get(token, :issue_id), Map.get(token, :generation)} do
+      {issue_id, generation} when is_binary(issue_id) and is_integer(generation) and generation > 0 ->
+        {issue_id, generation, receipt_kind}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp quarantine_cleanup_receipt(%State{} = state, token, receipt_kind) do
+    case cleanup_receipt_replay_key(token, receipt_kind) do
+      nil -> state
+      key -> %{state | cleanup_receipt_quarantine: MapSet.put(state.cleanup_receipt_quarantine, key)}
+    end
+  end
 
   # Acknowledged receipts are durable and need no further provider call.  Filter
   # them before taking the bounded replay batch; otherwise a large historical
@@ -4017,14 +4066,18 @@ defmodule SymphonyElixir.Orchestrator do
         state = release_restarted_supervisor_lease(state, token, session_id)
 
         if is_nil(Map.get(lease, :termination_confirmed_at_ms)) do
-          case ExecutionSupervisor.terminate(identity, opts) do
+          terminate = Keyword.get(opts, :termination_fun, &ExecutionSupervisor.terminate/2)
+
+          case terminate.(identity, opts) do
             {:ok, evidence} ->
+              confirmation_now_ms = max(now_ms, Map.get(evidence, :observed_at_ms, now_ms))
+
               case ExecutionFence.confirm_termination(
                      state,
                      token,
                      session_id,
                      evidence,
-                     now_ms
+                     confirmation_now_ms
                    ) do
                 {:ok, fence_state, _result} ->
                   case ExecutionFence.validate(fence_state) do

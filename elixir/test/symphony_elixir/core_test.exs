@@ -949,6 +949,45 @@ defmodule SymphonyElixir.CoreTest do
     refute MapSet.member?(updated_state.claimed, issue_id)
   end
 
+  test "reconcile retains a blocked issue through non-active review handoff" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    issue_id = "blocked-in-review"
+
+    state = %Orchestrator.State{
+      blocked: %{
+        issue_id => %{
+          identifier: "MT-566",
+          error: "token budget exhausted",
+          worker_host: nil,
+          issue: %Issue{
+            id: issue_id,
+            identifier: "MT-566",
+            state: "In Progress",
+            labels: ["symphony"],
+            dispatchable: true
+          }
+        }
+      },
+      claimed: MapSet.new([issue_id]),
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: issue_id,
+      identifier: "MT-566",
+      title: "Blocked implementation in review",
+      state: "In Review",
+      labels: ["symphony"],
+      dispatchable: true
+    }
+
+    updated_state = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+
+    assert updated_state.blocked[issue_id].issue == issue
+    assert MapSet.member?(updated_state.claimed, issue_id)
+  end
+
   test "retry releases its claim when a required label is removed" do
     write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
 

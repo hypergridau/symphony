@@ -409,6 +409,81 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
     assert Process.get(:starvation_receipt_calls) == 1
   end
 
+  test "ordinary replay quarantines missing cleanup evidence instead of hot polling" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      max_concurrent_agents: 1
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+    on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_issues) end)
+
+    journal_path =
+      Path.join(System.tmp_dir!(), "symphony-cleanup-quarantine-#{System.unique_integer([:positive])}.json")
+
+    on_exit(fn -> File.rm(journal_path) end)
+
+    {fence_state, details} = replay_cleaned_execution(ExecutionFence.new(), 99)
+    profile = "profile-350-quarantine"
+    reservation = replay_reservation(details, profile)
+    key = Journal.reservation_key(details.issue_id, profile, details.repository, 1)
+    {:ok, journal} = Journal.put(Journal.new(), key, reservation)
+
+    {:ok, journal} =
+      Journal.put_cleanup_receipt(journal, key, "termination_confirmed", %{
+        receipt_id: "termination-quarantine",
+        receipt_kind: "termination_confirmed",
+        generation: 1,
+        evidence_ref: details.evidence_ref,
+        accepted_head: details.head
+      })
+
+    {:ok, journal} =
+      Journal.put_cleanup_receipt_ack(journal, key, "termination_confirmed", %{
+        projection_id: reservation.projection_id,
+        reservation_id: reservation.reservation_id,
+        receipt_id: "termination-quarantine",
+        receipt_kind: "termination_confirmed",
+        execution_capacity_state: "released",
+        scope_state: "held",
+        reservation_state: "claimed",
+        generation: 1,
+        evidence_ref: details.evidence_ref,
+        accepted_head: details.head,
+        replayed: false
+      })
+
+    assert :ok = Journal.save(journal_path, journal)
+    Process.put(:cleanup_evidence_attempts, 0)
+
+    runtime = %{
+      base_url: "http://provider.test",
+      runner_token: "runner-token",
+      attestation_key: "attestation-key",
+      runner_id: reservation.runner_id,
+      managed_project_profile_id: profile,
+      journal_path: journal_path,
+      request_fun: fn _url, _options -> flunk("provider must not be called without cleanup evidence") end,
+      cleanup_evidence_fun: fn _state, _token, _head ->
+        Process.put(:cleanup_evidence_attempts, Process.get(:cleanup_evidence_attempts, 0) + 1)
+        {:error, {:cleanup_manifest_unreadable, :enoent}}
+      end
+    }
+
+    state = %Orchestrator.State{
+      poll_interval_ms: 30_000,
+      max_concurrent_agents: 0,
+      execution_fence: fence_state,
+      work_package_runtime: runtime
+    }
+
+    assert {:noreply, after_first_poll} = Orchestrator.handle_info(:run_poll_cycle, state)
+    assert Process.get(:cleanup_evidence_attempts) == 1
+
+    assert {:noreply, _after_second_poll} = Orchestrator.handle_info(:run_poll_cycle, after_first_poll)
+    assert Process.get(:cleanup_evidence_attempts) == 1
+  end
+
   test "restart reconciliation stops and confirms persisted supervisor ownership" do
     admission = admission()
     {:ok, fence_state, token} = ExecutionFence.admit(ExecutionFence.new(), admission, 100)
@@ -462,6 +537,59 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
     assert reconciled.executions["HGS-294"].ownership == :reconciled
     assert {:ok, _next_state, next_token} = ExecutionFence.admit(reconciled, admission, 210)
     assert next_token.generation == 2
+  end
+
+  test "restart reconciliation accepts termination evidence observed after its initial clock snapshot" do
+    admission = admission()
+    {:ok, fence_state, token} = ExecutionFence.admit(ExecutionFence.new(), admission, 100)
+    {:ok, fence_state, :registered} = ExecutionFence.register(fence_state, token, :worker, session(), 100)
+
+    identity =
+      ExecutionSupervisor.identity("HGS-294", 1, "worker-1", "logical-process-1", 100)
+      |> Map.merge(%{control_group: "/user.slice/symphony.scope", launch_processes: [111], main_pid: 111})
+
+    {:ok, fence_state} = ExecutionFence.record_supervisor(fence_state, token, "worker-1", identity)
+
+    runner = fn _executable, args, _opts ->
+      case args do
+        ["--user", "show", "--property=LoadState,ActiveState,ControlGroup,MainPID", _unit] ->
+          {"LoadState=loaded\nActiveState=inactive\nControlGroup=/user.slice/symphony.scope\nMainPID=0\n", 0}
+
+        ["--user", "show", "--property=ControlGroup", _unit] ->
+          {"ControlGroup=/user.slice/symphony.scope\n", 0}
+      end
+    end
+
+    {:ok, reconciled} =
+      Orchestrator.reconcile_persisted_supervisors_for_test(
+        fence_state,
+        command_runner: runner,
+        cgroup_reader: fn _path -> {:ok, []} end,
+        termination_fun: fn identity, _opts ->
+          {:ok,
+           %{
+             process_tree: :terminated,
+             supervisor: :systemd_user,
+             unit: identity.unit,
+             session_id: identity.session_id,
+             process_id: identity.process_id,
+             pre_active_state: "active",
+             pre_control_group: identity.control_group,
+             pre_processes: identity.launch_processes,
+             main_pid: identity.main_pid,
+             active_state: "inactive",
+             control_group: identity.control_group,
+             remaining_processes: 0,
+             observed_at_ms: 201,
+             evidence_ref: "systemd:observed-after-restart-snapshot"
+           }}
+        end,
+        now_ms: 200
+      )
+
+    lease = reconciled.executions["HGS-294"].leases["worker-1"]
+    assert lease.termination_confirmed_at_ms == 201
+    assert lease.termination_evidence.observed_at_ms == 201
   end
 
   test "orchestrator mutation guard follows the current generation snapshot" do
