@@ -58,54 +58,52 @@ defmodule SymphonyElixir.RetainedGrantProof.ChallengeEnvelope do
         expected_nonce32,
         trusted_now_ms
       ) do
-    try do
-      with :ok <-
-             validate_inputs(
-               independently_installed_raw_public32,
-               installed_fingerprint_hex64,
-               expected_nonce32,
-               trusted_now_ms
-             ),
-           :ok <- validate_wire_map(envelope_map),
-           true <- Map.get(envelope_map, "version") === 1,
-           true <- Map.get(envelope_map, "purpose") === @purpose,
-           true <- Map.get(envelope_map, "issuer_fingerprint") === installed_fingerprint_hex64,
-           {:ok, nonce} <- decode_canonical(Map.get(envelope_map, "nonce"), 32, 32),
-           true <- nonce === expected_nonce32,
-           {:ok, signature} <- decode_canonical(Map.get(envelope_map, "signature"), 64, 64),
-           {:ok, facts} <- decode_canonical(Map.get(envelope_map, "facts"), 1, @max_facts_bytes),
-           observed_at_ms <- Map.get(envelope_map, "observed_at_ms"),
-           expires_at_ms <- Map.get(envelope_map, "expires_at_ms"),
-           true <- safe_integer?(observed_at_ms),
-           true <- safe_integer?(expires_at_ms),
-           true <- observed_at_ms <= trusted_now_ms,
-           true <- trusted_now_ms < expires_at_ms,
-           true <- expires_at_ms > observed_at_ms,
-           true <- expires_at_ms - observed_at_ms <= 60_000,
-           message <-
-             signing_message(
-               independently_installed_raw_public32,
-               nonce,
-               observed_at_ms,
-               expires_at_ms,
-               facts
-             ),
-           true <-
-             :crypto.verify(
-               :eddsa,
-               :none,
-               message,
-               signature,
-               [independently_installed_raw_public32, :ed25519]
-             ) do
-        {:ok, %{facts: facts, observed_at_ms: observed_at_ms, expires_at_ms: expires_at_ms}}
-      else
-        _ -> invalid()
-      end
-    rescue
-      ArgumentError -> invalid()
-      ErlangError -> invalid()
+    with :ok <-
+           validate_inputs(
+             independently_installed_raw_public32,
+             installed_fingerprint_hex64,
+             expected_nonce32,
+             trusted_now_ms
+           ),
+         :ok <- validate_wire_map(envelope_map),
+         true <- Map.get(envelope_map, "version") === 1,
+         true <- Map.get(envelope_map, "purpose") === @purpose,
+         true <- Map.get(envelope_map, "issuer_fingerprint") === installed_fingerprint_hex64,
+         {:ok, nonce} <- decode_canonical(Map.get(envelope_map, "nonce"), 32, 32),
+         true <- nonce === expected_nonce32,
+         {:ok, signature} <- decode_canonical(Map.get(envelope_map, "signature"), 64, 64),
+         {:ok, facts} <- decode_canonical(Map.get(envelope_map, "facts"), 1, @max_facts_bytes),
+         observed_at_ms <- Map.get(envelope_map, "observed_at_ms"),
+         expires_at_ms <- Map.get(envelope_map, "expires_at_ms"),
+         true <- safe_integer?(observed_at_ms),
+         true <- safe_integer?(expires_at_ms),
+         true <- observed_at_ms <= trusted_now_ms,
+         true <- trusted_now_ms < expires_at_ms,
+         true <- expires_at_ms > observed_at_ms,
+         true <- expires_at_ms - observed_at_ms <= 60_000,
+         message <-
+           signing_message(
+             independently_installed_raw_public32,
+             nonce,
+             observed_at_ms,
+             expires_at_ms,
+             facts
+           ),
+         true <-
+           :crypto.verify(
+             :eddsa,
+             :none,
+             message,
+             signature,
+             [independently_installed_raw_public32, :ed25519]
+           ) do
+      {:ok, %{facts: facts, observed_at_ms: observed_at_ms, expires_at_ms: expires_at_ms}}
+    else
+      _ -> invalid()
     end
+  rescue
+    ArgumentError -> invalid()
+    ErlangError -> invalid()
   end
 
   defp validate_inputs(public, fingerprint, nonce, trusted_now_ms) do
@@ -145,30 +143,31 @@ defmodule SymphonyElixir.RetainedGrantProof.ChallengeEnvelope do
   defp decode_canonical(value, min_bytes, max_bytes) when is_binary(value) do
     max_encoded_bytes = div(max_bytes * 4 + 2, 3)
 
-    cond do
-      byte_size(value) < 1 or byte_size(value) > max_encoded_bytes ->
-        :error
-
-      not Regex.match?(@base64url, value) ->
-        :error
-
-      true ->
-        case Base.url_decode64(value, padding: false) do
-          {:ok, decoded} ->
-            if byte_size(decoded) >= min_bytes and byte_size(decoded) <= max_bytes and
-                 Base.url_encode64(decoded, padding: false) === value do
-              {:ok, decoded}
-            else
-              :error
-            end
-
-          :error ->
-            :error
-        end
+    if byte_size(value) >= 1 and byte_size(value) <= max_encoded_bytes and
+         Regex.match?(@base64url, value) do
+      decode_canonical_value(value, min_bytes, max_bytes)
+    else
+      :error
     end
   end
 
   defp decode_canonical(_, _, _), do: :error
+
+  defp decode_canonical_value(value, min_bytes, max_bytes) do
+    case Base.url_decode64(value, padding: false) do
+      {:ok, decoded} -> validate_decoded_value(value, decoded, min_bytes, max_bytes)
+      :error -> :error
+    end
+  end
+
+  defp validate_decoded_value(encoded, decoded, min_bytes, max_bytes) do
+    if byte_size(decoded) >= min_bytes and byte_size(decoded) <= max_bytes and
+         Base.url_encode64(decoded, padding: false) === encoded do
+      {:ok, decoded}
+    else
+      :error
+    end
+  end
 
   defp signing_message(public, nonce, observed_at_ms, expires_at_ms, facts) do
     @purpose <>

@@ -36,18 +36,26 @@ defmodule SymphonyElixir.RetainedGrantProof.JournalCleanupEvidence do
 
     if Map.has_key?(receipts, "termination_confirmed") and
          Enum.all?(keys, &(&1 in @outer_kinds)) do
-      Enum.reduce_while(Enum.sort(keys), {:ok, %{}}, fn kind, {:ok, acc} ->
-        case validate_one(kind, Map.fetch!(receipts, kind), claim) do
-          {:ok, validated} -> {:cont, {:ok, Map.put(acc, kind, validated)}}
-          _ -> {:halt, invalid()}
-        end
-      end)
+      validate_receipts(Enum.sort(keys), receipts, claim)
     else
       invalid()
     end
   end
 
   defp validate_cleanup(_, _), do: invalid()
+
+  defp validate_receipts(keys, receipts, claim) do
+    Enum.reduce_while(keys, {:ok, %{}}, fn kind, {:ok, acc} ->
+      validate_receipt(kind, receipts, claim, acc)
+    end)
+  end
+
+  defp validate_receipt(kind, receipts, claim, acc) do
+    case validate_one(kind, Map.fetch!(receipts, kind), claim) do
+      {:ok, validated} -> {:cont, {:ok, Map.put(acc, kind, validated)}}
+      _ -> {:halt, invalid()}
+    end
+  end
 
   defp validate_one(kind, receipt, claim) do
     with {:ok, %{receipt: original} = validated} <-
