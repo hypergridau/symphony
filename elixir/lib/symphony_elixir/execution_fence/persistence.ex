@@ -494,12 +494,18 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
 
     if Enum.sort(Map.keys(payload)) == keys do
       {:ok,
-       payload
-       |> Map.new(fn {key, value} -> {String.to_existing_atom(key), value} end)
-       |> Map.update!(:active_process, &decode_absence/1)
-       |> Map.update!(:local_claim, &decode_absence/1)
-       |> Map.update!(:provider_claim, &decode_absence/1)
-       |> Map.update!(:workspace, &decode_absence/1)}
+       %{
+         active_process: decode_absence(payload["active_process"]),
+         evidence_ref: payload["evidence_ref"],
+         generation: payload["generation"],
+         issue_id: payload["issue_id"],
+         linear_state: payload["linear_state"],
+         local_claim: decode_absence(payload["local_claim"]),
+         provider_claim: decode_absence(payload["provider_claim"]),
+         provider_projection_id: payload["provider_projection_id"],
+         retired_at_ms: payload["retired_at_ms"],
+         workspace: decode_absence(payload["workspace"])
+       }}
     else
       {:error, :invalid_retirement}
     end

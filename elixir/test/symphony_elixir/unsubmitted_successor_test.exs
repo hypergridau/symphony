@@ -73,6 +73,8 @@ defmodule SymphonyElixir.UnsubmittedSuccessorTest do
     assert :ok = ExecutionFence.validate(fence)
     path = Path.join(context.root, "terminal-retired-fence.json")
     assert :ok = ExecutionFence.Persistence.save(path, fence)
+    cold_read = "case SymphonyElixir.ExecutionFence.Persistence.load(#{inspect(path)}) do {:ok, _} -> :ok; other -> raise inspect(other) end"
+    assert {_output, 0} = System.cmd(System.find_executable("mix"), ["run", "--no-start", "-e", cold_read], cd: File.cwd!(), stderr_to_stdout: true)
     assert {:ok, persisted} = ExecutionFence.Persistence.load(path)
     assert :ok = ExecutionFence.validate(persisted)
     assert persisted.executions[entry.issue_id].retirement == execution.retirement
