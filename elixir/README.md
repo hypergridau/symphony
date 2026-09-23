@@ -91,6 +91,18 @@ while polling, before retry dispatch, before execution-fence admission, and
 immediately before spawning a worker. Existing workers are not terminated by the
 gate.
 
+On the Linux runner, the trusted root setter places a root-owned
+`global-mutable-pause.transition` marker beside the gate while it persists
+`paused` and waits for every active pool's fresh `/api/v1/state` reply. A
+configured pool treats any malformed marker as paused; a valid marker reports
+its exact epoch in `pause_gate.transition_epoch`. The state endpoint is
+uncached and obtains the snapshot synchronously from the same orchestrator
+GenServer that makes the final Task spawn decision. The root setter must not
+report a completed pause until it has epoch-matched replies from every active
+pool or proof the service is stopped. Already-running workers continue; this
+protocol fences new Task spawns, not ongoing work. A failed or interrupted
+barrier leaves the marker in place and admission closed for supported recovery.
+
 Startup terminal-workspace cleanup is fence-aware: a terminal issue with no
 recorded execution generation in the current pool, or a generation already
 marked cleaned, can use the existing path-safe cleanup path. Any recorded

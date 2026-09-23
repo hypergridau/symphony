@@ -1887,14 +1887,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_claimed_worker(%State{work_package_runtime: nil} = state, _issue, worker),
-    do: Task.Supervisor.start_child(state.task_supervisor, worker)
+    do: spawn_if_unpaused(state, worker)
 
   defp start_claimed_worker(state, issue, worker) do
     with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-      if GlobalPause.paused?(),
-        do: {:error, :global_pause},
-        else: Task.Supervisor.start_child(state.task_supervisor, worker)
+      spawn_if_unpaused(state, worker)
     end
+  end
+
+  # Keep the final gate read and Task start in this GenServer callback. A
+  # synchronous :snapshot call then drains any start already past the gate.
+  defp spawn_if_unpaused(state, worker) do
+    if GlobalPause.paused?(),
+      do: {:error, :global_pause},
+      else: Task.Supervisor.start_child(state.task_supervisor, worker)
   end
 
   defp handle_claim_failure(state, _issue, {:claim_indeterminate, _reason}, _entry), do: state

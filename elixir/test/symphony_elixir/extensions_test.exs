@@ -261,6 +261,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     conn = get(build_conn(), "/api/v1/state")
+    assert Plug.Conn.get_resp_header(conn, "cache-control") == ["no-store"]
     state_payload = json_response(conn, 200)
 
     assert state_payload == %{
@@ -603,6 +604,14 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert before_activation["readiness"]["ready?"] == false
     assert "execution_authority_unavailable" in before_activation["readiness"]["reasons"]
     assert before_activation["pause_gate"]["state"] == "paused"
+
+    epoch = String.duplicate("b", 32)
+    transition_path = Path.join(Path.dirname(pause_path), "global-mutable-pause.transition")
+    File.write!(transition_path, "pausing:#{epoch}\n")
+    transition_ack = json_response(get(build_conn(), "/api/v1/state"), 200)
+    assert transition_ack["pause_gate"]["transition_epoch"] == epoch
+    assert transition_ack["pause_gate"]["reason"] == "pause_transition"
+    File.rm!(transition_path)
 
     assert {:ok, :activated} =
              SymphonyElixir.Orchestrator.activate_responsibility_graph(

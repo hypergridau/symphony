@@ -130,6 +130,10 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 
 ## Default posture
 
+- The host-owned global mutable pause file and its same-directory transition
+  marker are admission controls, not worker artifacts. Never edit, remove, or
+  repair either from a worker session; an interrupted transition stays paused
+  until the trusted operator route reconciles it.
 - Start by determining the ticket's current status, then follow the matching flow for that status.
 - Start every task by opening the tracking workpad comment and bringing it up to date before doing new implementation work.
 - Spend extra effort up front on planning and verification design before implementation.
