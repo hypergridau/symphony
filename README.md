@@ -26,6 +26,10 @@ It creates responsibility only for the exact freshly eligible issue, through the
 owner, and keeps successor admission behind predecessor cleanup and provider claims. A ready label
 does not grant execution authority. See [responsibility delegation](docs/responsibility-delegation.md).
 
+Model selection is also subject to that authority: an explicit `model:gpt-6-luna` issue label
+selects the GPT-6 Luna-only retry ladder, but cannot start a managed worker without a matching
+operator-issued model and effort grant. Existing issue routes remain unchanged until migrated.
+
 A generation released before claim submission does not reserve the repository indefinitely.
 Another eligible issue may proceed only after the journal, exact delegation and absent local
 workspace prove that the released generation has no remaining mutable authority.
