@@ -4,6 +4,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.{ExecutionFence, ManagedResponsibility, ManagedTokenBudget, Orchestrator, ResponsibilityGraph}
+  alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.ManagedResponsibility.Admission
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.ManagedTokenBudget.{Limit, Runtime}
@@ -62,6 +63,36 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
 
     assert grant.budget.mode == :progress_scoped
     assert grant.budget.max_tokens == nil
+  end
+
+  test "GPT-6 Luna route and progress-scoped grant remain aligned across retry and ledger reload", c do
+    issue = %{Fixture.issue(1) | labels: ["model:gpt-6-luna"]}
+    {:ok, manifest} = ManagedResponsibility.decode(progress_payload(c.now, "gpt-6-luna"), Fixture.context(), c.now)
+    state = %{c.state | work_package_runtime: %{managed_delegations: manifest}}
+
+    for attempt <- [nil, 1, 2, 3] do
+      assert ModelRouter.resolve(issue, attempt).model == "gpt-6-luna"
+
+      assert {:ok, admitted} =
+               Admission.prepare(
+                 state.responsibility_graph,
+                 state.execution_fence,
+                 manifest,
+                 issue,
+                 attempt,
+                 c.now
+               )
+
+      assert admitted.delegations["responsible-1"].budget.model == "gpt-6-luna"
+      assert admitted.delegations["responsible-1"].budget.max_tokens == nil
+    end
+
+    assert {:ok, :unbounded, _} = Limit.resolve(@local_limit, state.work_package_runtime, issue.id)
+
+    ledger = observe!(state.managed_token_budget, issue.id, @grant_limit + 100_000)
+    {:ok, reloaded} = ManagedTokenBudget.load(ledger.path, ledger.identity)
+    restarted = %{state | managed_token_budget: reloaded, codex_issue_totals: reloaded.issue_totals}
+    assert Runtime.admission(restarted, issue.id) == :ok
   end
 
   test "finite grants retain the configured ceiling while progress grants have no task count" do
