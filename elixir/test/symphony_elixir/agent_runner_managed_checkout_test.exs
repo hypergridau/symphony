@@ -165,6 +165,88 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     refute File.exists?(ctx.started)
   end
 
+  test "a persisted failed turn escalates the next real app-server launch", ctx do
+    root = Path.dirname(ctx.trace)
+    journal_path = Path.join(root, "managed-retry-claims.json")
+    argv_path = Path.join(root, "managed-retry-argv")
+    executable = Path.join(root, "managed-retry-codex")
+    key = Journal.reservation_key(ctx.issue.id, "profile-test", "example/repository")
+
+    reservation = %{
+      issue_id: ctx.issue.id,
+      managed_project_profile_id: "profile-test",
+      repository_ref: "example/repository",
+      projection_id: "projection-test",
+      reservation_id: "reservation-test",
+      reservation_nonce: "nonce-test",
+      scope_keys: ["repository:example/repository"],
+      runner_id: "runner-test",
+      generation: 1,
+      session_id: ctx.identity.session_id,
+      process_id: "process-test",
+      responsible_delegation_id: "delegation-test",
+      execution_fence_token: "fence-test",
+      runtime_lease_id: "lease-test"
+    }
+
+    evidence = %{
+      thread_id: "previous-thread",
+      turn_id: "previous-turn",
+      observed_at_ms: 1_790_000_000_000,
+      payload_sha256: String.duplicate("a", 64)
+    }
+
+    assert {:ok, journal} = Journal.put(Journal.new(), key, reservation)
+
+    assert {:ok, journal} =
+             Journal.put_failed_worker_turn(journal, key, "previous-thread:previous-turn", evidence)
+
+    assert :ok = Journal.save(journal_path, journal)
+
+    File.write!(executable, """
+    #!/bin/bash
+    printf '%s\\n' "$@" > #{quote_path(argv_path)}
+    n=0
+    while IFS= read -r line; do
+      n=$((n+1))
+      case "$n" in
+        1) printf '%s\\n' '{"id":1,"result":{}}' ;;
+        2) ;;
+        3) printf '%s\\n' '{"id":2,"result":{"thread":{"id":"retry-thread"}}}' ;;
+        4) printf '%s\\n' '{"id":3,"result":{"turn":{"id":"retry-turn"}}}'
+           printf '%s\\n' '{"method":"turn/completed"}' ;;
+      esac
+    done
+    """)
+
+    File.chmod!(executable, 0o755)
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      Keyword.put(ctx.workflow, :codex_command, "#{quote_path(executable)} app-server")
+    )
+
+    assert :ok =
+             AgentRunner.run(ctx.issue, self(),
+               execution_checkout: ctx.identity,
+               execution_fence_guard: fn -> :ok end,
+               execution_token: %{issue_id: ctx.issue.id, generation: 1},
+               execution_session_id: ctx.identity.session_id,
+               managed_model_route: true,
+               managed_model_runtime: %{
+                 journal_path: journal_path,
+                 managed_project_profile_id: "profile-test",
+                 repository_ref: "example/repository"
+               },
+               attempt: 0,
+               issue_state_fetcher: fn [_id] -> {:ok, [%{ctx.issue | state: "Done"}]} end
+             )
+
+    assert File.read!(argv_path) =~ "model=\"gpt-6-luna\""
+    assert File.read!(argv_path) =~ "model_reasoning_effort=xhigh"
+    refute File.read!(argv_path) =~ "gpt-5.6"
+  end
+
   test "silent turn stays alive until observed durable checkout progress", ctx do
     root = Path.dirname(ctx.trace)
     ack = Path.join(root, "silent-turn-ack")
