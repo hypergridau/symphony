@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.WorkPackageClaimTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias SymphonyElixir.Codex.ModelRouter
-  alias SymphonyElixir.{ExecutionFence, ResponsibilityGraph, WorkPackageClaim}
+  alias SymphonyElixir.{ExecutionFence, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.Journal
 
@@ -11,6 +11,84 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   @profile "profile-349"
 
   @canonical_json_fixture ~s({"contractVersion":"work-package-runtime-attestation.v1","runnerId":"runner-349","managedProjectProfileId":"profile-349","reservationId":"reservation-349","reservationNonce":"nonce-349","issueId":"issue-349","generation":1,"sessionId":"worker-349","processId":"process-349","responsibleDelegationId":"delegation-349","executionFenceToken":"issue-349:1","runtimeLeaseId":"worker-349","repositoryRef":"hypergridau/symphony","scopeKeys":["repo:hypergridau/symphony","work:349"],"attestedAt":"2026-09-06T10:00:00.000Z"})
+
+  test "a global pause after confirmed managed claim blocks the prospective spawn" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input, token: token, lease: lease} = authority_fixture(path)
+
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    pause_root = Path.join(System.tmp_dir!(), "symphony-claim-pause-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+    File.write!(pause_path, "running\n")
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path), do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path), else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+      File.rm_rf(pause_root)
+    end)
+
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    state = %Orchestrator.State{execution_fence: input.fence_state, responsibility_graph: input.responsibility_graph, work_package_runtime: runtime}
+    task_supervisor = start_supervised!({Task.Supervisor, name: Module.concat(__MODULE__, "ClaimPause#{System.unique_integer([:positive])}")})
+    state = %{state | task_supervisor: task_supervisor}
+    children_before = Task.Supervisor.children(task_supervisor)
+    Process.put(:claim_pause_requests, 0)
+
+    request_fun = fn url, _options ->
+      Process.put(:claim_pause_requests, Process.get(:claim_pause_requests) + 1)
+
+      if String.ends_with?(url, "/reservations/by-issue") do
+        {:ok, response(%{"data" => reservation_payload()})}
+      else
+        File.write!(pause_path, "paused\n")
+        {:ok, response(%{"data" => claim_result_payload()})}
+      end
+    end
+
+    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun)
+    assert Process.get(:claim_pause_requests) == 2
+    assert SymphonyElixir.GlobalPause.paused?()
+    assert {:ok, journal} = Journal.load(path)
+    journal_bytes_before_pause = File.read!(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "confirmed"
+
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Pause race", state: "Todo"}
+
+    after_pause =
+      Orchestrator.spawn_fenced_issue_for_test(
+        state,
+        issue,
+        token,
+        lease.session_id,
+        "delegation-349",
+        lease
+      )
+
+    assert Task.Supervisor.children(task_supervisor) == children_before
+    assert after_pause.running == %{}
+
+    assert Map.has_key?(after_pause.blocked, @issue_id),
+           "confirmed managed claim was left active without explicit blocking or reconciliation"
+
+    assert %{error: error, execution_token: ^token} = after_pause.blocked[@issue_id]
+    assert String.contains?(error, ":global_pause")
+    assert MapSet.member?(after_pause.claimed, @issue_id)
+
+    assert after_pause.execution_fence == input.fence_state
+    assert after_pause.responsibility_graph == input.responsibility_graph
+    assert File.read!(path) == journal_bytes_before_pause
+    assert {:ok, journal_after_pause} = Journal.load(path)
+    [{_key, reservation_after_pause}] = Map.to_list(journal_after_pause.reservations)
+    assert journal_after_pause == journal
+    assert reservation_after_pause.dispatch.phase == "confirmed"
+
+    # This test qualifies the same-process fail-closed hold only. Recovery or
+    # resumption from this in-memory blocked entry after an orchestrator restart
+    # is not qualified by this test.
+  end
 
   test "claims a reservation and replays the same journaled tuple after restart" do
     path = temp_path()
@@ -371,7 +449,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       journal_path: path
     }
 
-    %{input: input, fence_state: fence_state, graph: graph}
+    %{input: input, fence_state: fence_state, graph: graph, token: token, lease: lease}
   end
 
   defp delegation(id, role, scope, authority, budget, extras \\ []) do

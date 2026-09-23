@@ -729,6 +729,20 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec spawn_fenced_issue_for_test(term(), Issue.t(), term(), String.t(), String.t() | nil, term()) ::
+          term()
+  def spawn_fenced_issue_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        token,
+        session_id,
+        delegation_id,
+        runtime_lease
+      ) do
+    spawn_fenced_issue(state, issue, nil, self(), nil, token, session_id, delegation_id, runtime_lease)
+  end
+
+  @doc false
   @spec handle_claim_failure_for_test(term(), Issue.t(), term(), map()) :: term()
   def handle_claim_failure_for_test(%State{} = state, %Issue{} = issue, reason, entry) do
     handle_claim_failure(state, issue, reason, entry)
@@ -1631,7 +1645,22 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.debug("Global mutable admission paused immediately before worker spawn for #{issue_context(issue)}")
 
       if is_map(state.work_package_runtime) do
-        state
+        # A confirmed provider claim may already hold capacity and scope here.
+        # Preserve its exact generation for the supported pre-spawn recovery;
+        # silently returning would leave the claim active without an operator
+        # visible blocked issue.
+        block_issue_from_entry(
+          state,
+          issue.id,
+          %{
+            issue: issue,
+            identifier: issue.identifier,
+            worker_host: worker_host,
+            execution_token: token,
+            execution_session_id: session_id
+          },
+          "Claim recovery requires reconciliation: :global_pause"
+        )
       else
         release_execution_lease(
           state,
