@@ -2,10 +2,11 @@ defmodule SymphonyElixir.GlobalPause do
   @moduledoc """
   Reads the operator-controlled global mutable-admission gate.
 
-  A configured gate is fail-closed: only an exact `running` file value with no
-  pause-transition marker permits new mutable workers. The root-owned marker
-  carries an epoch that a synchronous state snapshot echoes for the operator's
-  pause barrier. Missing, unreadable, or invalid state is reported as paused.
+  A configured gate is fail-closed: only an exact `running` value in a regular
+  file with no pause-transition marker permits new mutable workers. The
+  root-owned marker carries an epoch that a synchronous state snapshot echoes
+  for the operator's pause barrier. Missing, unreadable, or invalid state is
+  reported as paused.
   An unset path preserves the upstream runtime's unconfigured/test behavior;
   production pool launchers always provide the path.
   """
@@ -77,6 +78,14 @@ defmodule SymphonyElixir.GlobalPause do
   end
 
   defp read_state(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} -> read_regular_state(path)
+      {:ok, _} -> paused_status(path, "invalid_pause_file_type")
+      {:error, reason} -> paused_status(path, Atom.to_string(reason))
+    end
+  end
+
+  defp read_regular_state(path) do
     case File.read(path) do
       {:ok, @running_state <> "\n"} -> running_status(path)
       {:ok, @running_state} -> running_status(path)

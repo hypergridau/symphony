@@ -46,6 +46,22 @@ defmodule SymphonyElixir.GlobalPauseTest do
     assert GlobalPause.snapshot().reason == "invalid_pause_file_state"
   end
 
+  test "non-regular state paths fail closed even if a symlink target says running", %{path: path} do
+    File.mkdir!(path)
+    assert GlobalPause.snapshot().reason == "invalid_pause_file_type"
+    assert GlobalPause.paused?()
+    File.rmdir!(path)
+
+    if match?({:unix, _}, :os.type()) do
+      target = Path.join(Path.dirname(path), "running-target")
+      File.write!(target, "running\n")
+      File.ln_s!(target, path)
+      assert GlobalPause.snapshot().reason == "invalid_pause_file_type"
+      assert GlobalPause.paused?()
+      File.rm!(path)
+    end
+  end
+
   test "a root transition epoch pauses admission and is echoed by the barrier", %{path: path, transition: transition} do
     epoch = String.duplicate("a", 32)
     File.write!(path, "running\n")
