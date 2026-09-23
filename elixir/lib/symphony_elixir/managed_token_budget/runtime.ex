@@ -39,7 +39,7 @@ defmodule SymphonyElixir.ManagedTokenBudget.Runtime do
          {:ok, total} <- Map.fetch(ledger.issue_totals, issue_id),
          {:ok, threshold} <- effective_limit(state, issue_id),
          true <- is_integer(total) and total >= 0,
-         true <- total < threshold do
+         true <- threshold == :unbounded or total < threshold do
       :ok
     else
       _ -> {:error, :managed_token_budget_unavailable_or_exhausted}
@@ -48,7 +48,7 @@ defmodule SymphonyElixir.ManagedTokenBudget.Runtime do
 
   def admission(_state, _issue_id), do: {:error, :managed_token_budget_unavailable_or_exhausted}
 
-  @spec effective_limit(map(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  @spec effective_limit(map(), String.t()) :: {:ok, non_neg_integer() | :unbounded} | {:error, term()}
   def effective_limit(%{work_package_runtime: nil}, issue_id) do
     with {:ok, limit, nil} <- Limit.resolve(Config.settings!().codex.max_total_tokens, nil, issue_id),
          do: {:ok, limit}
