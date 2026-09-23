@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
 
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.ManagedTokenBudget.Limit
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.Unsubmitted
 
   @efforts ~w(none minimal low medium high xhigh max ultra)
@@ -20,11 +21,14 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
 
   @spec prepare(map(), map(), map() | nil, map(), non_neg_integer() | nil, non_neg_integer(), map() | nil) ::
           {:ok, map()} | {:error, term()}
-  def prepare(graph, _fence, nil, issue, attempt, _now_ms, _runtime) do
+  def prepare(graph, _fence, nil, %Issue{} = issue, attempt, _now_ms, _runtime) do
     if ModelRouter.resolve(issue, attempt).model == "gpt-6-luna",
       do: {:error, :managed_responsibility_required_for_gpt6_luna},
       else: {:ok, graph}
   end
+
+  def prepare(graph, _fence, nil, nil, _attempt, _now_ms, _runtime), do: {:ok, graph}
+  def prepare(_graph, _fence, nil, _issue, _attempt, _now_ms, _runtime), do: {:error, :invalid_issue}
 
   def prepare(graph, fence, manifest, issue, attempt, now_ms, runtime) do
     with true <- ResponsibilityGraph.enforced?(graph),
