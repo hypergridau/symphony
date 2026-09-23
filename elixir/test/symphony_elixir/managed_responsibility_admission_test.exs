@@ -81,6 +81,7 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
 
   test "GPT-6 Luna opt-in requires a matching grant and retry effort ceiling", %{graph: graph, now: now} do
     issue = %{Fixture.issue(1) | labels: ["symphony-ready", "model:gpt-6-luna"]}
+
     assert {:error, :managed_responsibility_required_for_gpt6_luna} =
              Admission.prepare(graph, ExecutionFence.new(), nil, issue, nil, now)
 
