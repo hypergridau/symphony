@@ -38,6 +38,7 @@ defmodule SymphonyElixir.Codex.ModelRouter do
     normalized_labels = labels |> List.wrap() |> Enum.map(&normalize_label/1) |> MapSet.new()
     gpt6_luna? = MapSet.member?(normalized_labels, "model:gpt-6-luna")
     ladder = if gpt6_luna?, do: @gpt6_luna_ladder, else: @legacy_ladder
+
     {base_tier, reason} =
       if gpt6_luna?,
         do: {"gpt6-luna-high", "explicit model:gpt-6-luna label"},
