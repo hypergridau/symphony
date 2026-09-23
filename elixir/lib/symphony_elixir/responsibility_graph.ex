@@ -1021,12 +1021,15 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   end
 
   defp token_budget_subset?(%{mode: :progress_scoped, max_tokens: nil}, %{mode: :progress_scoped, max_tokens: nil}), do: true
+
   defp token_budget_subset?(%{max_tokens: maximum} = child, %{mode: :progress_scoped, max_tokens: nil})
        when is_integer(maximum) and maximum > 0,
        do: Map.get(child, :mode, :finite) == :finite
+
   defp token_budget_subset?(%{max_tokens: child}, %{max_tokens: parent})
        when is_integer(child) and is_integer(parent),
        do: child <= parent
+
   defp token_budget_subset?(_child, _parent), do: false
 
   defp effort_rank(effort), do: Enum.find_index(@efforts, &(&1 == effort)) || -1

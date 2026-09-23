@@ -356,11 +356,15 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp valid_encoded_budget?(budget) when is_map(budget) do
     case Map.fetch(budget, :mode) do
-      :error -> valid_budget_limit?(:finite, Map.get(budget, :max_tokens))
+      :error ->
+        valid_budget_limit?(:finite, Map.get(budget, :max_tokens))
+
       {:ok, mode} when mode in @budget_modes ->
         valid_budget_model?(mode, Map.get(budget, :model)) and
           valid_budget_limit?(mode, Map.get(budget, :max_tokens))
-      _ -> false
+
+      _ ->
+        false
     end
   end
 
