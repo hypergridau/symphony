@@ -4,7 +4,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.Tracker.Issue
-  alias SymphonyElixir.WorkPackageClaim.Journal
+  alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery}
 
   @repository "hypergridau/symphony"
   @issue_id "issue-349"
@@ -35,6 +35,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     state = %{state | task_supervisor: task_supervisor}
     children_before = Task.Supervisor.children(task_supervisor)
     Process.put(:claim_pause_requests, 0)
+    claim_time = ~U[2026-09-06 10:00:00.000Z]
 
     request_fun = fn url, _options ->
       Process.put(:claim_pause_requests, Process.get(:claim_pause_requests) + 1)
@@ -47,7 +48,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       end
     end
 
-    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun)
+    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> claim_time end)
     assert Process.get(:claim_pause_requests) == 2
     assert SymphonyElixir.GlobalPause.paused?()
     assert {:ok, journal} = Journal.load(path)
@@ -85,9 +86,32 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert journal_after_pause == journal
     assert reservation_after_pause.dispatch.phase == "confirmed"
 
-    # This test qualifies the same-process fail-closed hold only. Recovery or
-    # resumption from this in-memory blocked entry after an orchestrator restart
-    # is not qualified by this test.
+    # Simulate restart reconciliation of the retained authority snapshots.
+    # It deliberately makes the live execution unknown and its delegations
+    # blocked; the confirmed journal must remain held until provider recovery
+    # is eligible, not be replayed or replaced immediately.
+    assert {:ok, restarted_fence} = ExecutionFence.mark_unreconciled_after_restart(after_pause.execution_fence)
+    assert {:ok, restarted_graph} = ResponsibilityGraph.mark_unreconciled_after_restart(after_pause.responsibility_graph)
+    assert restarted_fence.executions[@issue_id].ownership == :unknown
+    assert restarted_graph.delegations["delegation-349"].status == :blocked
+    assert restarted_graph.delegations["delegation-349"].blocked_on == :restart_reconciliation
+
+    claim_time_ms = DateTime.to_unix(claim_time, :millisecond)
+
+    assert Recovery.held?(restarted_fence, @issue_id)
+    assert {:ok, [retained_claim]} = Recovery.unstarted_claims(runtime, restarted_fence)
+    assert retained_claim.dispatch.phase == "confirmed"
+
+    assert {:error, :claim_recovery_backoff} =
+             Recovery.prepare(runtime, restarted_fence, restarted_graph, issue, nil, claim_time_ms)
+
+    assert restarted_fence.executions[@issue_id].ownership == :unknown
+    assert restarted_graph.delegations["delegation-349"].blocked_on == :restart_reconciliation
+    assert {:ok, journal_after_restart} = Journal.load(path)
+    assert journal_after_restart == journal
+    assert File.read!(path) == journal_bytes_before_pause
+    assert Process.get(:claim_pause_requests) == 2
+    assert Task.Supervisor.children(task_supervisor) == children_before
   end
 
   test "claims a reservation and replays the same journaled tuple after restart" do
