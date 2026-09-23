@@ -100,6 +100,143 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation_after_spawn.dispatch.phase == "spawn_started"
   end
 
+  test "real orchestrator snapshot waits for a managed spawn already past its final gate" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input, token: token, lease: lease} = authority_fixture(path)
+
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    pause_root = Path.join(System.tmp_dir!(), "symphony-managed-barrier-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    transition_path = Path.join(pause_root, "global-mutable-pause.transition")
+    File.write!(pause_path, "running\n")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path), do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path), else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+      File.rm_rf(pause_root)
+    end)
+
+    previous_workflow_path = Application.get_env(:symphony_elixir, :workflow_file_path)
+    previous_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    workflow_path = Path.join(pause_root, "WORKFLOW.md")
+
+    SymphonyElixir.TestSupport.write_workflow_file!(workflow_path,
+      tracker_kind: "memory",
+      workspace_root: pause_root,
+      poll_interval_ms: 60_000
+    )
+
+    SymphonyElixir.Workflow.set_workflow_file_path(workflow_path)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    on_exit(fn ->
+      if is_binary(previous_workflow_path), do: SymphonyElixir.Workflow.set_workflow_file_path(previous_workflow_path), else: SymphonyElixir.Workflow.clear_workflow_file_path()
+      if is_nil(previous_issues), do: Application.delete_env(:symphony_elixir, :memory_tracker_issues), else: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+    end)
+
+    claim_time = ~U[2026-09-06 10:00:00.000Z]
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue") do
+        {:ok, response(%{"data" => reservation_payload()})}
+      else
+        {:ok, response(%{"data" => claim_result_payload()})}
+      end
+    end
+
+    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> claim_time end)
+
+    # The real supervisor's zero-child capacity makes release fail before an
+    # AgentRunner closure can execute. Suspension holds the synchronous start.
+    held_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
+    on_exit(fn -> if Process.alive?(held_supervisor), do: :sys.resume(held_supervisor) end)
+
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier", state: "Todo"}
+    name = Module.concat(__MODULE__, "ManagedBarrier#{System.unique_integer([:positive])}")
+    {:ok, orchestrator} = Orchestrator.start_link(name: name)
+    Process.unlink(orchestrator)
+    on_exit(fn -> if Process.alive?(orchestrator), do: Process.exit(orchestrator, :kill) end)
+
+    assert Enum.any?(1..200, fn _ ->
+             case Orchestrator.snapshot(name, 1_000).startup_maintenance do
+               %{status: "succeeded"} ->
+                 true
+
+               _ ->
+                 Process.sleep(5)
+                 false
+             end
+           end)
+
+    assert :ok = :sys.suspend(held_supervisor)
+
+    :sys.replace_state(orchestrator, fn state ->
+      %{state | execution_fence: input.fence_state, responsibility_graph: input.responsibility_graph, work_package_runtime: runtime, task_supervisor: held_supervisor}
+    end)
+
+    dispatch =
+      Task.async(fn ->
+        :sys.replace_state(orchestrator, fn state ->
+          Orchestrator.spawn_fenced_issue_for_test(state, issue, token, lease.session_id, "delegation-349", lease)
+        end)
+      end)
+
+    assert Enum.any?(1..200, fn _ ->
+             case Process.info(held_supervisor, :messages) do
+               {:messages, messages} ->
+                 if Enum.any?(messages, &match?({:"$gen_call", _, {:start_task, _, _, _}}, &1)),
+                   do: true,
+                   else:
+                     (
+                       Process.sleep(5)
+                       false
+                     )
+
+               _ ->
+                 false
+             end
+           end)
+
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "spawn_started"
+
+    epoch = String.duplicate("d", 32)
+    File.write!(transition_path, "pausing:#{epoch}\n")
+    File.write!(pause_path, "paused\n")
+    snapshot = Task.async(fn -> Orchestrator.snapshot(name, 10_000) end)
+
+    assert Enum.any?(1..200, fn _ ->
+             case Process.info(orchestrator, :messages) do
+               {:messages, messages} ->
+                 if Enum.any?(messages, &match?({:"$gen_call", _, :snapshot}, &1)),
+                   do: true,
+                   else:
+                     (
+                       Process.sleep(5)
+                       false
+                     )
+
+               _ ->
+                 false
+             end
+           end)
+
+    assert Task.yield(snapshot, 0) == nil
+    assert :ok = :sys.resume(held_supervisor)
+    assert %Orchestrator.State{running: running_state, blocked: blocked_state} = Task.await(dispatch, 5_000)
+    assert running_state == %{}
+    assert Map.has_key?(blocked_state, @issue_id)
+    assert %{pause_gate: gate, running: running} = Task.await(snapshot, 5_000)
+    assert gate.transition_epoch == epoch
+    assert gate.paused?
+    assert running == []
+  end
+
   test "a global pause after confirmed managed claim blocks the prospective spawn" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
