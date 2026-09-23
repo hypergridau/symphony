@@ -320,7 +320,9 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children} = payload) do
     with {:ok, effort} <- decode_atom(effort, @efforts),
          {:ok, mode, explicit_mode?} <- decode_budget_mode(payload),
-         true <- is_binary(model) and model != "" and valid_budget_limit?(mode, max_tokens) and is_integer(max_children) and max_children >= 0,
+         true <-
+           is_binary(model) and model != "" and valid_budget_limit?(mode, max_tokens) and
+             is_integer(max_children) and max_children >= 0,
          true <- valid_budget_model?(mode, model) do
       budget = %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}
       {:ok, if(explicit_mode?, do: Map.put(budget, :mode, mode), else: budget)}
