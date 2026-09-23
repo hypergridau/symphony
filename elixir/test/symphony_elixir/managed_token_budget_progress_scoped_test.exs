@@ -68,7 +68,8 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
   test "GPT-6 Luna route and progress-scoped grant remain aligned across retry and ledger reload", c do
     issue = %{Fixture.issue(1) | labels: ["model:gpt-6-luna"]}
     {:ok, manifest} = ManagedResponsibility.decode(progress_payload(c.now, "gpt-6-luna"), Fixture.context(), c.now)
-    state = %{c.state | work_package_runtime: %{managed_delegations: manifest}}
+    runtime = %{c.state.work_package_runtime | managed_delegations: manifest}
+    state = %{c.state | work_package_runtime: runtime}
 
     for attempt <- [nil, 1, 2, 3] do
       assert ModelRouter.resolve(issue, attempt).model == "gpt-6-luna"
