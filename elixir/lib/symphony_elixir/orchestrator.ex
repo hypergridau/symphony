@@ -1625,6 +1625,7 @@ defmodule SymphonyElixir.Orchestrator do
              AgentRunner.run(issue, recipient,
                attempt: attempt,
                managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
+               managed_model_runtime: managed_worker_model_runtime(state.work_package_runtime),
                worker_host: worker_host,
                execution_token: token,
                execution_session_id: session_id,
@@ -1714,6 +1715,16 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end
   end
+
+  defp managed_worker_model_runtime(%{managed_delegations: %{repository_ref: repository_ref}} = runtime) do
+    %{
+      journal_path: Map.get(runtime, :journal_path),
+      managed_project_profile_id: Map.get(runtime, :managed_project_profile_id),
+      repository_ref: repository_ref
+    }
+  end
+
+  defp managed_worker_model_runtime(_runtime), do: nil
 
   defp execution_supervisor_identity(%State{execution_supervisor: :systemd_user}, issue, token, session_id, nil) do
     ExecutionSupervisor.identity(issue.id, token.generation, session_id, session_id, execution_fence_now_ms())
@@ -3627,7 +3638,49 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp persist_managed_failed_turn(state, issue_id, update, sender) do
+    runtime = state.work_package_runtime
+    entry = Map.get(state.running, issue_id)
+
+    with %{pid: ^sender, codex_session_identity: %{thread_id: thread_id, turn_id: turn_id}} <- entry,
+         true <- runtime_info_belongs_to_entry?(update, entry),
+         true <- is_binary(thread_id) and thread_id != "" and is_binary(turn_id) and turn_id != "",
+         %{journal_path: path, managed_project_profile_id: profile_id, managed_delegations: %{repository_ref: repository_ref}} <- runtime,
+         true <- is_binary(path) and is_binary(profile_id) and is_binary(repository_ref),
+         %{issue_id: ^issue_id, generation: generation} <- entry.execution_token,
+         %{status: :active, generation: ^generation, repository: ^repository_ref, leases: leases} <-
+           Map.get(state.execution_fence.executions, issue_id),
+         %{status: :active} <- Map.get(leases, entry.execution_session_id),
+         {:ok, journal} <- Journal.load(path),
+         key <- Journal.reservation_key(issue_id, profile_id, repository_ref, generation),
+         %{session_id: session_id, responsible_delegation_id: delegation_id, execution_fence_token: fence_token} <-
+           Map.get(journal.reservations, key),
+         true <-
+           session_id == entry.execution_session_id and delegation_id == entry.responsibility_delegation_id and
+             fence_token == "#{issue_id}:#{generation}",
+         true <- is_map(Map.get(update, :payload)),
+         {:ok, encoded} <- Jason.encode(Map.get(update, :payload)),
+         evidence <- %{
+           thread_id: thread_id,
+           turn_id: turn_id,
+           observed_at_ms: execution_fence_now_ms(),
+           payload_sha256: Base.encode16(:crypto.hash(:sha256, encoded), case: :lower)
+         },
+         {:ok, next_journal} <- Journal.put_failed_worker_turn(journal, key, "#{thread_id}:#{turn_id}", evidence),
+         :ok <- Journal.save(path, next_journal) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :managed_failed_turn_identity_mismatch}
+    end
+  end
+
   @impl true
+  def handle_call({:managed_failed_turn, issue_id, %{event: :turn_failed} = update}, {sender, _tag}, %State{} = state) do
+    reply = persist_managed_failed_turn(state, issue_id, update, sender)
+    {:reply, reply, state}
+  end
+
   def handle_call({:execution_checkout_progress, issue_id, checkpoint}, {sender, _tag}, %State{} = state) do
     case Checkpoint.accept(state, issue_id, sender, checkpoint, DateTime.utc_now()) do
       {:ok, entry} -> {:reply, :ok, %{state | running: Map.put(state.running, issue_id, entry)}}

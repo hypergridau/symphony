@@ -268,7 +268,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
          {:ok, fence} <- ExecutionFence.reconcile_unstarted_claim(fence, reservation),
          lease = runtime_lease(reservation),
          {:ok, graph} <- reconcile_graph(graph, reservation.responsible_delegation_id, lease, now_ms),
-         {:ok, graph} <- Admission.prepare(graph, fence, runtime[:managed_delegations], issue, attempt, now_ms),
+         {:ok, graph} <- Admission.prepare(graph, fence, runtime[:managed_delegations], issue, attempt, now_ms, runtime),
          {:ok, delegation} <- ResponsibilityGraph.admission_delegation(graph, issue.id, issue.identifier, execution.repository),
          true <- delegation.id == reservation.responsible_delegation_id and delegation.runtime_lease == lease do
       {:ok, fence, graph, %{token: %{issue_id: issue.id, generation: reservation.generation}, session_id: reservation.session_id, delegation_id: delegation.id, runtime_lease: lease}}

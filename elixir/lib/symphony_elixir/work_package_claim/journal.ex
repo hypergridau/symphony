@@ -14,6 +14,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   @type reservation :: %{
           optional(:dispatch) => map(),
           optional(:cleanup_receipts) => %{optional(String.t()) => map()},
+          optional(:failed_worker_turns) => %{optional(String.t()) => map()},
           issue_id: String.t(),
           managed_project_profile_id: String.t(),
           repository_ref: String.t(),
@@ -66,6 +67,58 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       when is_binary(key) and is_map(reservation) do
     {:ok, %{state | reservations: Map.put(reservations, key, reservation)}}
   end
+
+  @doc "Records an explicit Codex `turn/failed` event once for its admitted turn identity."
+  @spec put_failed_worker_turn(state(), String.t(), String.t(), map()) ::
+          {:ok, state()} | {:error, term()}
+  def put_failed_worker_turn(%{schema_version: @schema_version, reservations: reservations} = state, key, turn_key, evidence)
+      when is_binary(key) and is_binary(turn_key) and is_map(evidence) do
+    case Map.get(reservations, key) do
+      reservation when is_map(reservation) ->
+        turns = Map.get(reservation, :failed_worker_turns, %{})
+
+        cond do
+          not valid_failed_worker_turns?(%{turn_key => evidence}) ->
+            {:error, :invalid_failed_worker_turn}
+
+          same_failed_turn?(Map.get(turns, turn_key), evidence) ->
+            {:ok, state}
+
+          Map.has_key?(turns, turn_key) ->
+            {:error, :failed_worker_turn_conflict}
+
+          true ->
+            next_reservation = Map.put(reservation, :failed_worker_turns, Map.put(turns, turn_key, evidence))
+            {:ok, %{state | reservations: Map.put(reservations, key, next_reservation)}}
+        end
+
+      nil ->
+        {:error, :reservation_missing}
+    end
+  end
+
+  def put_failed_worker_turn(_state, _key, _turn_key, _evidence), do: {:error, :invalid_failed_worker_turn}
+
+  @doc "Counts only persisted protocol failures for one exact managed issue and repository."
+  @spec failed_worker_turn_count(state(), String.t(), String.t(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def failed_worker_turn_count(%{schema_version: @schema_version, reservations: reservations} = state, issue_id, profile_id, repository_ref)
+      when is_binary(issue_id) and is_binary(profile_id) and is_binary(repository_ref) do
+    with :ok <- validate(state) do
+      count =
+        reservations
+        |> Map.values()
+        |> Enum.filter(fn reservation ->
+          reservation.issue_id == issue_id and
+            reservation.managed_project_profile_id == profile_id and
+            reservation.repository_ref == repository_ref
+        end)
+        |> Enum.reduce(0, fn reservation, total -> total + map_size(Map.get(reservation, :failed_worker_turns, %{})) end)
+
+      {:ok, count}
+    end
+  end
+
+  def failed_worker_turn_count(_state, _issue_id, _profile_id, _repository_ref), do: {:error, :invalid_journal}
 
   @doc "Stores one immutable cleanup receipt semantic under its reservation journal entry."
   @spec put_cleanup_receipt(state(), String.t(), String.t(), map()) ::
@@ -241,8 +294,13 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
          true <- is_integer(values.generation) and values.generation > 0,
          true <- is_list(values.scope_keys) and values.scope_keys != [] and Enum.all?(values.scope_keys, &present_string?/1),
          {:ok, cleanup_receipts} <- decode_cleanup_receipts(Map.get(payload, "cleanup_receipts")),
+         {:ok, failed_worker_turns} <- decode_failed_worker_turns(Map.get(payload, "failed_worker_turns")),
          {:ok, dispatch} <- Dispatch.decode(Map.get(payload, "dispatch")) do
-      {:ok, values |> maybe_put_decoded(:cleanup_receipts, cleanup_receipts) |> maybe_put_decoded(:dispatch, dispatch)}
+      {:ok,
+       values
+       |> maybe_put_decoded(:cleanup_receipts, cleanup_receipts)
+       |> maybe_put_decoded(:failed_worker_turns, failed_worker_turns)
+       |> maybe_put_decoded(:dispatch, dispatch)}
     else
       false -> {:error, :invalid_reservation}
       error -> error
@@ -250,6 +308,29 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   end
 
   defp decode_reservation(_payload), do: {:error, :invalid_reservation}
+
+  defp decode_failed_worker_turns(nil), do: {:ok, nil}
+
+  defp decode_failed_worker_turns(turns) when is_map(turns) do
+    decoded =
+      Map.new(turns, fn {key, evidence} ->
+        if is_map(evidence) and Enum.sort(Map.keys(evidence)) == ~w(observed_at_ms payload_sha256 thread_id turn_id) do
+          {key,
+           %{
+             thread_id: Map.get(evidence, "thread_id"),
+             turn_id: Map.get(evidence, "turn_id"),
+             observed_at_ms: Map.get(evidence, "observed_at_ms"),
+             payload_sha256: Map.get(evidence, "payload_sha256")
+           }}
+        else
+          {key, evidence}
+        end
+      end)
+
+    if valid_failed_worker_turns?(decoded), do: {:ok, decoded}, else: {:error, :invalid_failed_worker_turns}
+  end
+
+  defp decode_failed_worker_turns(_turns), do: {:error, :invalid_failed_worker_turns}
 
   defp decode_cleanup_receipts(nil), do: {:ok, nil}
 
@@ -375,6 +456,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
       Enum.all?(reservation[:scope_keys], &present_string?/1) and
       valid_cleanup_receipts?(Map.get(reservation, :cleanup_receipts, %{})) and
+      valid_failed_worker_turns?(Map.get(reservation, :failed_worker_turns, %{})) and
       Dispatch.valid?(Map.get(reservation, :dispatch))
   end
 
@@ -388,6 +470,28 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   end
 
   defp valid_cleanup_receipts?(_receipts), do: false
+
+  defp valid_failed_worker_turns?(turns) when is_map(turns) do
+    Enum.all?(turns, fn {key, evidence} ->
+      is_binary(key) and byte_size(key) > 0 and byte_size(key) <= 512 and
+        is_map(evidence) and map_size(evidence) == 4 and
+        present_string?(Map.get(evidence, :thread_id)) and
+        present_string?(Map.get(evidence, :turn_id)) and
+        key == "#{Map.get(evidence, :thread_id)}:#{Map.get(evidence, :turn_id)}" and
+        is_integer(Map.get(evidence, :observed_at_ms)) and Map.get(evidence, :observed_at_ms) > 0 and
+        is_binary(Map.get(evidence, :payload_sha256)) and
+        String.match?(Map.get(evidence, :payload_sha256), ~r/\A[0-9a-f]{64}\z/)
+    end)
+  end
+
+  defp valid_failed_worker_turns?(_turns), do: false
+
+  defp same_failed_turn?(existing, evidence) when is_map(existing) and is_map(evidence) do
+    Map.take(existing, [:thread_id, :turn_id, :payload_sha256]) ==
+      Map.take(evidence, [:thread_id, :turn_id, :payload_sha256])
+  end
+
+  defp same_failed_turn?(_existing, _evidence), do: false
 
   defp put_cleanup_receipt_entry(state, key, reservation, receipts, receipt_kind, receipt) do
     case Map.get(receipts, receipt_kind) do

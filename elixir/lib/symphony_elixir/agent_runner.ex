@@ -132,7 +132,16 @@ defmodule SymphonyElixir.AgentRunner do
     }
 
     fn message ->
-      send_codex_update(recipient, issue, Map.merge(message, identity))
+      update = Map.merge(message, identity)
+
+      if Keyword.get(opts, :managed_model_route, false) and update[:event] == :turn_failed do
+        case GenServer.call(recipient, {:managed_failed_turn, issue.id, update}, 60_000) do
+          :ok -> :ok
+          {:error, reason} -> raise RuntimeError, "Managed failed-turn evidence was not persisted: #{inspect(reason)}"
+        end
+      end
+
+      send_codex_update(recipient, issue, update)
     end
   end
 
@@ -187,7 +196,7 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     route_result =
       if Keyword.get(opts, :managed_model_route, false),
-        do: ModelRouter.resolve_managed(issue, Keyword.get(opts, :attempt)),
+        do: ModelRouter.resolve_managed_from_journal(issue, Keyword.get(opts, :managed_model_runtime)),
         else: {:ok, ModelRouter.resolve(issue, Keyword.get(opts, :attempt))}
 
     case route_result do

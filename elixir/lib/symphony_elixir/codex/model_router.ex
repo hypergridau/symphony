@@ -8,6 +8,7 @@ defmodule SymphonyElixir.Codex.ModelRouter do
   """
 
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.WorkPackageClaim.Journal
 
   @legacy_ladder [
     %{tier: "luna-high", model: "gpt-5.6-luna", effort: "high"},
@@ -87,6 +88,34 @@ defmodule SymphonyElixir.Codex.ModelRouter do
   end
 
   def resolve_managed(_issue, _attempt), do: {:error, :invalid_issue}
+
+  @doc "Loads the durable failed-turn count used for a managed worker route."
+  @spec resolve_managed_from_journal(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def resolve_managed_from_journal(
+        %Issue{} = issue,
+        %{
+          journal_path: path,
+          managed_project_profile_id: profile_id,
+          repository_ref: repository_ref
+        } = runtime
+      )
+      when is_binary(path) and is_binary(profile_id) and is_binary(repository_ref) do
+    with {:ok, journal} <- load_managed_journal(path, Map.get(runtime, :allow_missing_initial, false)),
+         {:ok, failed_turn_count} <- Journal.failed_worker_turn_count(journal, issue.id, profile_id, repository_ref) do
+      resolve_managed(issue, failed_turn_count)
+    end
+  end
+
+  def resolve_managed_from_journal(_issue, _runtime), do: {:error, :invalid_managed_model_runtime}
+
+  defp load_managed_journal(path, allow_missing_initial) do
+    case Journal.load(path) do
+      {:ok, journal} -> {:ok, journal}
+      :missing when allow_missing_initial -> {:ok, Journal.new()}
+      :missing -> {:error, :managed_journal_missing}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp base_route(labels) do
     explicit = Enum.find(@explicit_labels, fn {label, _tier} -> MapSet.member?(labels, label) end)

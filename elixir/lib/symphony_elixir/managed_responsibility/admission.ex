@@ -30,10 +30,10 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
   def prepare(graph, _fence, nil, nil, _attempt, _now_ms, _runtime), do: {:ok, graph}
   def prepare(_graph, _fence, nil, _issue, _attempt, _now_ms, _runtime), do: {:error, :invalid_issue}
 
-  def prepare(graph, fence, manifest, issue, attempt, now_ms, runtime) do
+  def prepare(graph, fence, manifest, issue, _attempt, now_ms, runtime) do
     with true <- ResponsibilityGraph.enforced?(graph),
          :ok <- ExecutionFence.validate(fence),
-         {:ok, route} <- ModelRouter.resolve_managed(issue, attempt),
+         {:ok, route} <- ModelRouter.resolve_managed_from_journal(issue, managed_model_runtime(runtime, manifest, fence, issue)),
          :ok <- prior_repository_cleanup(fence, graph, manifest.repository_ref, issue.id, runtime, now_ms),
          {:ok, next_graph} <- ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
          {:ok, delegation} <- ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
@@ -44,6 +44,24 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
       false -> {:error, :managed_responsibility_requires_enforcement}
       {:error, _reason} = error -> error
     end
+  end
+
+  defp managed_model_runtime(nil, manifest, fence, issue) do
+    %{
+      journal_path: Config.execution_fence_state_path() <> ".work-package",
+      managed_project_profile_id: manifest.managed_project_profile_id,
+      repository_ref: manifest.repository_ref,
+      allow_missing_initial: not Map.has_key?(fence.executions, issue.id)
+    }
+  end
+
+  defp managed_model_runtime(runtime, manifest, fence, issue) when is_map(runtime) do
+    %{
+      journal_path: Map.get(runtime, :journal_path),
+      managed_project_profile_id: Map.get(runtime, :managed_project_profile_id),
+      repository_ref: manifest.repository_ref,
+      allow_missing_initial: not Map.has_key?(fence.executions, issue.id)
+    }
   end
 
   defp prior_repository_cleanup(%{executions: executions} = fence, graph, repository, issue_id, runtime, now_ms) do
