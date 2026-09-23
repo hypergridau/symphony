@@ -27,11 +27,12 @@ Linear serves `linear_graphql`, GitHub Issues serves `github_api`, Jira Cloud se
 tools with configured host-side auth and removes declared tracker-token environment variables from
 the Codex child, so the agent does not need a second tracker login.
 
-For a deliberately opted-in issue, `model:gpt-6-luna` routes the initial attempt to GPT-6 Luna
-high. Later failed attempts can escalate only to GPT-6 Luna xhigh and max; this route never falls
-back to another model. Managed admission still requires a matching host-controlled delegation
-grant for the exact model and maximum effort, in addition to the normal issue, repository, and
-execution controls. The label by itself does not authorize a worker.
+Manifest-managed issues route the initial attempt to GPT-6 Luna high by default. Later failed
+attempts can escalate only to GPT-6 Luna xhigh and max; this route never falls back to another
+model. `model:gpt-6-luna` is accepted but unnecessary, while legacy or conflicting `model:*`
+labels fail managed admission. A matching host-controlled delegation grant for the exact model
+and maximum effort remains necessary alongside the normal issue, repository, and execution
+controls. Unmanaged legacy routing remains separate.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.

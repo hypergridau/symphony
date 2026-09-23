@@ -1,11 +1,10 @@
 defmodule SymphonyElixir.Codex.ModelRouter do
   @moduledoc """
-  Selects the least-capable Codex model admitted for a Linear issue and retry.
+  Selects a Codex model for a Linear issue and retry.
 
-  The legacy retry ladder is Luna high -> Luna xhigh -> Luna max -> Sol xhigh.
-  An explicit `model:gpt-6-luna` label selects a separate GPT-6 Luna-only ladder.
-  Failed worker attempts escalate one rung at a time and never wrap around the
-  selected ladder.
+  Managed workers default to GPT-6 Luna high and may escalate to xhigh and max
+  after failed attempts. The older resolver remains available for unmanaged
+  operation and historical compatibility; it is never a managed fallback.
   """
 
   alias SymphonyElixir.Tracker.Issue
@@ -21,6 +20,7 @@ defmodule SymphonyElixir.Codex.ModelRouter do
     %{tier: "gpt6-luna-xhigh", model: "gpt-6-luna", effort: "xhigh"},
     %{tier: "gpt6-luna-max", model: "gpt-6-luna", effort: "max"}
   ]
+  @managed_model_label "model:gpt-6-luna"
   @explicit_labels %{
     "model:luna" => "luna-high",
     "model:luna-high" => "luna-high",
@@ -56,6 +56,37 @@ defmodule SymphonyElixir.Codex.ModelRouter do
       reason: if(selected_index > base_index, do: "#{reason}; escalated after worker attempt #{retry_count}", else: reason)
     })
   end
+
+  @doc """
+  Resolves the operator-granted managed worker route. Legacy or unknown model
+  labels are rejected instead of silently changing the requested model.
+  """
+  @spec resolve_managed(Issue.t(), non_neg_integer() | nil) :: {:ok, map()} | {:error, atom()}
+  def resolve_managed(%Issue{labels: labels}, attempt) do
+    normalized_labels = labels |> List.wrap() |> Enum.map(&normalize_label/1) |> MapSet.new()
+
+    if Enum.any?(normalized_labels, &(String.starts_with?(&1, "model:") and &1 != @managed_model_label)) do
+      {:error, :unsupported_managed_model_label}
+    else
+      retry_count = if is_integer(attempt) and attempt > 0, do: attempt, else: 0
+      selected_index = min(retry_count, length(@gpt6_luna_ladder) - 1)
+      route = Enum.at(@gpt6_luna_ladder, selected_index)
+
+      {:ok,
+       Map.merge(route, %{
+         base_tier: "gpt6-luna-high",
+         attempt: retry_count,
+         escalated: selected_index > 0,
+         reason:
+           if(selected_index > 0,
+             do: "managed GPT-6 Luna default; escalated after worker attempt #{retry_count}",
+             else: "managed GPT-6 Luna default"
+           )
+       })}
+    end
+  end
+
+  def resolve_managed(_issue, _attempt), do: {:error, :invalid_issue}
 
   defp base_route(labels) do
     explicit = Enum.find(@explicit_labels, fn {label, _tier} -> MapSet.member?(labels, label) end)

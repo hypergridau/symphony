@@ -185,9 +185,20 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_put_runtime_head(runtime_info, _result), do: runtime_info
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    route_result =
+      if Keyword.get(opts, :managed_model_route, false),
+        do: ModelRouter.resolve_managed(issue, Keyword.get(opts, :attempt)),
+        else: {:ok, ModelRouter.resolve(issue, Keyword.get(opts, :attempt))}
+
+    case route_result do
+      {:ok, route} -> start_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp start_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
-    route = ModelRouter.resolve(issue, Keyword.get(opts, :attempt))
 
     Logger.info(
       "Codex model route selected for #{issue_context(issue)} model=#{route.model} tier=#{route.tier} effort=#{route.effort} attempt=#{route.attempt} escalated=#{route.escalated} reason=#{inspect(route.reason)}"

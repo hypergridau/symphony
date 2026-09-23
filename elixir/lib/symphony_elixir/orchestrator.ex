@@ -1624,6 +1624,7 @@ defmodule SymphonyElixir.Orchestrator do
       case start_claimed_worker(state, issue, fn ->
              AgentRunner.run(issue, recipient,
                attempt: attempt,
+               managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
                worker_host: worker_host,
                execution_token: token,
                execution_session_id: session_id,

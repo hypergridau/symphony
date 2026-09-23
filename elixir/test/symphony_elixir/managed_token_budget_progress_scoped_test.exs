@@ -65,14 +65,14 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert grant.budget.max_tokens == nil
   end
 
-  test "GPT-6 Luna route and progress-scoped grant remain aligned across retry and ledger reload", c do
-    issue = %{Fixture.issue(1) | labels: ["model:gpt-6-luna"]}
-    {:ok, manifest} = ManagedResponsibility.decode(progress_payload(c.now, "gpt-6-luna"), Fixture.context(), c.now)
+  test "default GPT-6 Luna route and progress-scoped grant remain aligned across retry and ledger reload", c do
+    issue = Fixture.issue(1)
+    {:ok, manifest} = ManagedResponsibility.decode(progress_payload(c.now), Fixture.context(), c.now)
     runtime = %{c.state.work_package_runtime | managed_delegations: manifest}
     state = %{c.state | work_package_runtime: runtime}
 
     for attempt <- [nil, 1, 2, 3] do
-      assert ModelRouter.resolve(issue, attempt).model == "gpt-6-luna"
+      assert {:ok, %{model: "gpt-6-luna"}} = ModelRouter.resolve_managed(issue, attempt)
 
       assert {:ok, admitted} =
                Admission.prepare(
@@ -181,11 +181,15 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
   test "model, scope, child, and parent-mode boundaries remain stable", c do
     issue = Fixture.issue(1)
     assert c.manifest.entries |> hd() |> get_in([:responsible, :scope, :issue_id]) == issue.id
-    assert c.manifest.entries |> hd() |> get_in([:responsible, :budget, :model]) == "gpt-5.6-luna"
+    assert c.manifest.entries |> hd() |> get_in([:responsible, :budget, :model]) == "gpt-6-luna"
     assert c.manifest.entries |> hd() |> get_in([:responsible, :budget, :max_children]) == 0
 
+    assert {:ok, _} = Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, c.manifest, issue, 3, c.now)
+
+    {:ok, stale_manifest} = ManagedResponsibility.decode(progress_payload(c.now, "gpt-5.6-luna"), Fixture.context(), c.now)
+
     assert {:error, :managed_responsibility_budget_exceeded} =
-             Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, c.manifest, issue, 3, c.now)
+             Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, stale_manifest, issue, nil, c.now)
 
     mixed =
       progress_payload(c.now)
@@ -207,7 +211,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert {:error, _} = ManagedResponsibility.decode(bad_scope, Fixture.context(), c.now)
   end
 
-  defp progress_payload(now, model \\ "gpt-5.6-luna") do
+  defp progress_payload(now, model \\ "gpt-6-luna") do
     Fixture.payload(now)
     |> update_in(["entries"], fn entries ->
       Enum.map(entries, fn entry ->
@@ -222,7 +226,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     end)
   end
 
-  defp grant(issue_id, mode, model \\ "gpt-5.6-luna") do
+  defp grant(issue_id, mode, model \\ "gpt-6-luna") do
     %{
       issue_id: issue_id,
       responsible: %{

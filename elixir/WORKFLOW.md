@@ -56,10 +56,10 @@ host-controlled service configuration. Workers must not edit the manifest or gra
 Loading this input grants no worker lease: fresh native eligibility, exact responsibility,
 execution fencing and the provider's durable claim remain required before a turn starts.
 
-An issue with `model:gpt-6-luna` uses a GPT-6 Luna-only high/xhigh/max retry ladder. This label
-does not override the digest-pinned managed delegation's exact model and effort ceiling; a
-mismatch fails admission. Keep the app-server command routable, without a conflicting static model
-pin, when qualifying this label in a managed pool.
+Managed workers use the GPT-6 Luna-only high/xhigh/max retry ladder by default. The optional
+`model:gpt-6-luna` label does not override the digest-pinned managed delegation's exact model
+and effort ceiling; legacy or conflicting model labels and stale grants fail admission. Keep
+the app-server command routable without a conflicting static model pin.
 
 Optional pre-spawn recovery receipts use host-only `DAHLIA_WORK_PACKAGE_RECOVERY_DIRECTORY`
 and `DAHLIA_WORK_PACKAGE_RECOVERY_PUBLIC_KEY` settings documented in `README.md`. Workers must
