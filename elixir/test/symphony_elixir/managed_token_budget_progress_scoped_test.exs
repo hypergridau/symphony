@@ -109,7 +109,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     {:ok, graph, _} = ResponsibilityGraph.delegate(c.state.responsibility_graph, accountable, c.now)
     malformed = put_in(graph.delegations[accountable.id].budget.mode, :unbounded)
 
-    assert {:error, :invalid_budget} = Persistence.save(c.state.responsibility_graph_path, malformed)
+    assert {:error, :invalid_state} = Persistence.save(c.state.responsibility_graph_path, malformed)
   end
 
   test "useful progress beyond the former local threshold remains admissible across reload", c do
@@ -160,8 +160,8 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
       |> update_in(["entries"], fn [entry | rest] ->
         changed =
           entry
-          |> put_in(["accountable", "budget", "mode"], "finite")
-          |> put_in(["accountable", "budget", "max_tokens"], @grant_limit)
+          |> put_in(["responsible", "budget", "mode"], "finite")
+          |> put_in(["responsible", "budget", "max_tokens"], @grant_limit)
 
         [changed | rest]
       end)
