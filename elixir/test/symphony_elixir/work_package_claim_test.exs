@@ -132,8 +132,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     on_exit(fn ->
-      if is_binary(previous_workflow_path), do: SymphonyElixir.Workflow.set_workflow_file_path(previous_workflow_path), else: SymphonyElixir.Workflow.clear_workflow_file_path()
-      if is_nil(previous_issues), do: Application.delete_env(:symphony_elixir, :memory_tracker_issues), else: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      if is_binary(previous_workflow_path),
+        do: SymphonyElixir.Workflow.set_workflow_file_path(previous_workflow_path),
+        else: SymphonyElixir.Workflow.clear_workflow_file_path()
+
+      if is_nil(previous_issues),
+        do: Application.delete_env(:symphony_elixir, :memory_tracker_issues),
+        else: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
     end)
 
     claim_time = ~U[2026-09-06 10:00:00.000Z]
@@ -175,7 +180,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert :ok = :sys.suspend(held_supervisor)
 
     :sys.replace_state(orchestrator, fn state ->
-      %{state | execution_fence: input.fence_state, responsibility_graph: input.responsibility_graph, work_package_runtime: runtime, task_supervisor: held_supervisor}
+      %{
+        state
+        | execution_fence: input.fence_state,
+          responsibility_graph: input.responsibility_graph,
+          work_package_runtime: runtime,
+          task_supervisor: held_supervisor
+      }
     end)
 
     dispatch =
@@ -277,8 +288,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
 
     on_exit(fn ->
-      if is_binary(previous_workflow_path), do: SymphonyElixir.Workflow.set_workflow_file_path(previous_workflow_path), else: SymphonyElixir.Workflow.clear_workflow_file_path()
-      if is_nil(previous_issues), do: Application.delete_env(:symphony_elixir, :memory_tracker_issues), else: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
+      if is_binary(previous_workflow_path),
+        do: SymphonyElixir.Workflow.set_workflow_file_path(previous_workflow_path),
+        else: SymphonyElixir.Workflow.clear_workflow_file_path()
+
+      if is_nil(previous_issues),
+        do: Application.delete_env(:symphony_elixir, :memory_tracker_issues),
+        else: Application.put_env(:symphony_elixir, :memory_tracker_issues, previous_issues)
     end)
 
     held_supervisor = start_supervised!({Task.Supervisor, max_children: 1})
@@ -304,7 +320,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert :ok = :sys.suspend(held_supervisor)
 
     :sys.replace_state(orchestrator, fn state ->
-      %{state | execution_fence: input.fence_state, responsibility_graph: input.responsibility_graph, work_package_runtime: runtime, task_supervisor: held_supervisor}
+      %{
+        state
+        | execution_fence: input.fence_state,
+          responsibility_graph: input.responsibility_graph,
+          work_package_runtime: runtime,
+          task_supervisor: held_supervisor
+      }
     end)
 
     parent = self()
