@@ -83,6 +83,7 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
     issue = %{Fixture.issue(1) | labels: ["symphony-ready", "model:gpt-6-luna"]}
 
     assert {:ok, ^graph} = Admission.prepare(graph, nil, nil, nil, nil, now)
+
     assert {:error, :invalid_issue} =
              Admission.prepare(graph, nil, nil, %{labels: ["model:gpt-6-luna"]}, nil, now)
 
