@@ -1919,13 +1919,23 @@ defmodule SymphonyElixir.Orchestrator do
     do: spawn_if_unpaused(state, worker)
 
   defp start_claimed_worker(state, issue, worker) do
-    with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-      spawn_if_unpaused(state, worker)
+    # The last pause decision must precede the durable spawn_started journal
+    # write. Once that write succeeds, a later pause read could reject the
+    # child and falsely record a never-started worker as an attempted spawn.
+    # The root setter waits for this GenServer callback's state snapshot before
+    # returning. If the child starts, it does so before that acknowledgment;
+    # begin_spawn or the supervisor can still fail without starting a child.
+    if GlobalPause.paused?() do
+      {:error, :global_pause}
+    else
+      with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
+        Task.Supervisor.start_child(state.task_supervisor, worker)
+      end
     end
   end
 
-  # Keep the final gate read and Task start in this GenServer callback. A
-  # synchronous :snapshot call then drains any start already past the gate.
+  # Keep the unmanaged final gate read and Task start in this GenServer
+  # callback. A synchronous :snapshot call drains any start past the gate.
   defp spawn_if_unpaused(state, worker) do
     if GlobalPause.paused?(),
       do: {:error, :global_pause},

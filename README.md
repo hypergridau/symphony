@@ -34,8 +34,10 @@ Historical claims and grants are not rewritten; stale GPT-5.6 grants fail closed
 
 On the Linux runner, the root-owned global pause transition fences new Task
 spawns by waiting for epoch-matched, synchronous state snapshots from every
-active repository pool. The marker denies admission while that barrier is
-pending or interrupted; it does not terminate workers already running.
+active repository pool. The marker denies new admission callbacks while the
+barrier is pending or interrupted. A callback already past its final gate may
+start a child before the setter acknowledges the pause; none may start after
+that acknowledgment. The pause does not terminate workers already running.
 
 A generation released before claim submission does not reserve the repository indefinitely.
 Another eligible issue may proceed only after the journal, exact delegation and absent local

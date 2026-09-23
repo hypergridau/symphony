@@ -12,6 +12,94 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
   @canonical_json_fixture ~s({"contractVersion":"work-package-runtime-attestation.v1","runnerId":"runner-349","managedProjectProfileId":"profile-349","reservationId":"reservation-349","reservationNonce":"nonce-349","issueId":"issue-349","generation":1,"sessionId":"worker-349","processId":"process-349","responsibleDelegationId":"delegation-349","executionFenceToken":"issue-349:1","runtimeLeaseId":"worker-349","repositoryRef":"hypergridau/symphony","scopeKeys":["repo:hypergridau/symphony","work:349"],"attestedAt":"2026-09-06T10:00:00.000Z"})
 
+  test "managed final pause read precedes the durable spawn marker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input, token: token, lease: lease} = authority_fixture(path)
+
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    pause_root = Path.join(System.tmp_dir!(), "symphony-spawn-order-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    File.write!(pause_path, "running\n")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path), do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path), else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+      File.rm_rf(pause_root)
+    end)
+
+    claim_time = ~U[2026-09-06 10:00:00.000Z]
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue") do
+        {:ok, response(%{"data" => reservation_payload()})}
+      else
+        {:ok, response(%{"data" => claim_result_payload()})}
+      end
+    end
+
+    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> claim_time end)
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "confirmed"
+
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    task_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
+
+    state = %Orchestrator.State{
+      execution_fence: input.fence_state,
+      responsibility_graph: input.responsibility_graph,
+      work_package_runtime: runtime,
+      task_supervisor: task_supervisor
+    }
+
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Spawn order", state: "Todo"}
+    pause_pattern = {SymphonyElixir.GlobalPause, :paused?, 0}
+    spawn_pattern = {WorkPackageClaim, :begin_spawn, 1}
+    parent = self()
+    tracer = spawn(fn -> forward_trace(parent) end)
+
+    :erlang.trace_pattern(pause_pattern, true, [:local])
+    :erlang.trace_pattern(spawn_pattern, true, [:local])
+    :erlang.trace(self(), true, [:call, {:tracer, tracer}])
+
+    after_spawn =
+      try do
+        Orchestrator.spawn_fenced_issue_for_test(state, issue, token, lease.session_id, "delegation-349", lease)
+      after
+        :erlang.trace(self(), false, [:call])
+        :erlang.trace_pattern(pause_pattern, false, [:local])
+        :erlang.trace_pattern(spawn_pattern, false, [:local])
+        send(tracer, :stop)
+      end
+
+    assert_receive :trace_complete
+
+    calls =
+      Stream.repeatedly(fn ->
+        receive do
+          {:trace, pid, :call, {module, function, _args}} when pid == self() -> {module, function}
+        after
+          0 -> :done
+        end
+      end)
+      |> Enum.take_while(&(&1 != :done))
+
+    final_gate = {SymphonyElixir.GlobalPause, :paused?}
+    durable_marker = {WorkPackageClaim, :begin_spawn}
+    marker_index = Enum.find_index(calls, &(&1 == durable_marker))
+    assert is_integer(marker_index), inspect({calls, after_spawn.blocked})
+    assert final_gate in Enum.take(calls, marker_index)
+    refute final_gate in Enum.drop(calls, marker_index + 1)
+
+    assert after_spawn.running == %{}
+    assert Task.Supervisor.children(task_supervisor) == []
+    assert {:ok, journal_after_spawn} = Journal.load(path)
+    [{_key, reservation_after_spawn}] = Map.to_list(journal_after_spawn.reservations)
+    assert reservation_after_spawn.dispatch.phase == "spawn_started"
+  end
+
   test "a global pause after confirmed managed claim blocks the prospective spawn" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -544,4 +632,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   defp response(body, status \\ 200), do: %Req.Response{status: status, body: body}
 
   defp temp_path, do: Path.join(System.tmp_dir!(), "symphony-work-package-#{System.unique_integer([:positive])}.json")
+
+  defp forward_trace(parent) do
+    receive do
+      :stop ->
+        send(parent, :trace_complete)
+
+      {:trace, _pid, :call, _call} = event ->
+        send(parent, event)
+        forward_trace(parent)
+    end
+  end
 end

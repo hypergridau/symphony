@@ -99,8 +99,11 @@ its exact epoch in `pause_gate.transition_epoch`. The state endpoint is
 uncached and obtains the snapshot synchronously from the same orchestrator
 GenServer that makes the final Task spawn decision. The root setter must not
 report a completed pause until it has epoch-matched replies from every active
-pool or proof the service is stopped. Already-running workers continue; this
-protocol fences new Task spawns, not ongoing work. A failed or interrupted
+pool or proof the service is stopped. A dispatch callback that passed its
+final gate before marker creation can still start a child while the barrier
+waits for its snapshot; the setter returns only after that callback finishes.
+Already-running workers continue; this protocol fences new Task spawns after
+pause completion, not ongoing work. A failed or interrupted
 barrier leaves the marker in place and admission closed for supported recovery.
 
 Startup terminal-workspace cleanup is fence-aware: a terminal issue with no
