@@ -743,6 +743,14 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec start_claimed_worker_for_test(term(), Issue.t(), (-> term())) ::
+          {:ok, pid()} | {:error, term()}
+  def start_claimed_worker_for_test(%State{} = state, %Issue{} = issue, worker)
+      when is_function(worker, 0) do
+    start_claimed_worker(state, issue, worker)
+  end
+
+  @doc false
   @spec handle_claim_failure_for_test(term(), Issue.t(), term(), map()) :: term()
   def handle_claim_failure_for_test(%State{} = state, %Issue{} = issue, reason, entry) do
     handle_claim_failure(state, issue, reason, entry)
