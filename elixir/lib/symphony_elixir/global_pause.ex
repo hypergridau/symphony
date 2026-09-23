@@ -58,15 +58,7 @@ defmodule SymphonyElixir.GlobalPause do
       {:ok, %{type: :regular, size: size}} when size <= 48 ->
         case File.read(path) do
           {:ok, "pausing:" <> epoch_and_newline} ->
-            case epoch_and_newline do
-              <<epoch::binary-size(32), "\n">> ->
-                if String.match?(epoch, ~r/\A[0-9a-f]{32}\z/),
-                  do: {:active, epoch},
-                  else: {:error, "invalid_pause_transition"}
-
-              _ ->
-                {:error, "invalid_pause_transition"}
-            end
+            parse_transition_epoch(epoch_and_newline)
 
           _ ->
             {:error, "invalid_pause_transition"}
@@ -76,6 +68,14 @@ defmodule SymphonyElixir.GlobalPause do
         {:error, "invalid_pause_transition"}
     end
   end
+
+  defp parse_transition_epoch(<<epoch::binary-size(32), "\n">>) do
+    if String.match?(epoch, ~r/\A[0-9a-f]{32}\z/),
+      do: {:active, epoch},
+      else: {:error, "invalid_pause_transition"}
+  end
+
+  defp parse_transition_epoch(_), do: {:error, "invalid_pause_transition"}
 
   defp read_state(path) do
     case File.lstat(path) do

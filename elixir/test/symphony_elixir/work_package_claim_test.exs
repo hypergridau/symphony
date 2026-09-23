@@ -429,7 +429,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     end)
 
     runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
-    state = %Orchestrator.State{execution_fence: input.fence_state, responsibility_graph: input.responsibility_graph, work_package_runtime: runtime}
+
+    state = %Orchestrator.State{
+      execution_fence: input.fence_state,
+      responsibility_graph: input.responsibility_graph,
+      work_package_runtime: runtime
+    }
+
     task_supervisor = start_supervised!({Task.Supervisor, name: Module.concat(__MODULE__, "ClaimPause#{System.unique_integer([:positive])}")})
     state = %{state | task_supervisor: task_supervisor}
     children_before = Task.Supervisor.children(task_supervisor)
@@ -490,7 +496,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     # blocked; the confirmed journal must remain held until provider recovery
     # is eligible, not be replayed or replaced immediately.
     assert {:ok, restarted_fence} = ExecutionFence.mark_unreconciled_after_restart(after_pause.execution_fence)
-    assert {:ok, restarted_graph} = ResponsibilityGraph.mark_unreconciled_after_restart(after_pause.responsibility_graph)
+
+    assert {:ok, restarted_graph} =
+             ResponsibilityGraph.mark_unreconciled_after_restart(after_pause.responsibility_graph)
+
     assert restarted_fence.executions[@issue_id].ownership == :unknown
     assert restarted_graph.delegations["delegation-349"].status == :blocked
     assert restarted_graph.delegations["delegation-349"].blocked_on == :restart_reconciliation

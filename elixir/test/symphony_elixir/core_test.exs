@@ -623,7 +623,10 @@ defmodule SymphonyElixir.CoreTest do
     restarted_pid =
       eventually_value(fn ->
         pid = Process.whereis(orchestrator_name)
-        if is_pid(pid) and pid != old_orchestrator_pid and is_map(Orchestrator.snapshot(orchestrator_name, 100)), do: pid
+
+        if is_pid(pid) and pid != old_orchestrator_pid and
+             is_map(Orchestrator.snapshot(orchestrator_name, 100)),
+           do: pid
       end)
 
     assert is_pid(restarted_pid)
