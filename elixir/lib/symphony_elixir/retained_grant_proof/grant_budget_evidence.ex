@@ -42,7 +42,7 @@ defmodule SymphonyElixir.RetainedGrantProof.GrantBudgetEvidence do
          true <-
            budget.verified_prefix_sha256 == binding.ledger_checkpoint_sha256 and
              budget.verified_prefix_size == binding.ledger_checkpoint_size,
-         true <- budget.cumulative_total < grant.max_tokens and grant.expires_at_ms > now_ms do
+         true <- (is_nil(grant.max_tokens) or budget.cumulative_total < grant.max_tokens) and grant.expires_at_ms > now_ms do
       {:ok, %{schema_version: 1, grant: grant, budget: budget, observed_at_ms: now_ms}}
     else
       _ -> {:error, :retained_grant_budget_evidence_invalid}

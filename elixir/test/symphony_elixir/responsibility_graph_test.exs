@@ -79,6 +79,54 @@ defmodule SymphonyElixir.ResponsibilityGraphTest do
              )
   end
 
+  test "explicit progress budget permits a finite child but not a wider child or invalid model" do
+    progress = Map.merge(@budget, %{mode: :progress_scoped, model: "gpt-6-luna", max_tokens: nil})
+    finite = Map.merge(@budget, %{model: "gpt-6-luna", max_tokens: 1_000})
+
+    assert {:ok, unbounded_parent, _} =
+             ResponsibilityGraph.delegate(
+               ResponsibilityGraph.new(),
+               delegation("owner", :accountable, budget: progress),
+               0
+             )
+
+    assert {:ok, _, _} =
+             ResponsibilityGraph.delegate(
+               unbounded_parent,
+               delegation("finite-child", :responsible,
+                 parent_delegation_id: "owner",
+                 budget: finite,
+                 runtime_lease: runtime_lease("finite-child")
+               ),
+               1
+             )
+
+    assert {:ok, finite_parent, _} =
+             ResponsibilityGraph.delegate(
+               ResponsibilityGraph.new(),
+               delegation("owner", :accountable, budget: finite),
+               0
+             )
+
+    assert {:error, :budget_widening} =
+             ResponsibilityGraph.delegate(
+               finite_parent,
+               delegation("wide-child", :responsible,
+                 parent_delegation_id: "owner",
+                 budget: progress,
+                 runtime_lease: runtime_lease("wide-child")
+               ),
+               1
+             )
+
+    assert {:error, :invalid_budget} =
+             ResponsibilityGraph.delegate(
+               ResponsibilityGraph.new(),
+               delegation("invalid", :accountable, budget: %{progress | model: "gpt-5.6-sol"}),
+               0
+             )
+  end
+
   test "allows disjoint workers but rejects overlapping mutable workers" do
     {:ok, graph, _owner} = ResponsibilityGraph.delegate(ResponsibilityGraph.new(), delegation("owner", :accountable), 0)
 

@@ -649,15 +649,15 @@ and changes only the replayed effective floor. Exact retries are idempotent; con
 corrections fail. The scheduler never invokes it. This uses the existing single-host-writer append
 contract; it is not concurrent-writer locking, credential authorization or an allowance increase.
 
-The scheduler loads known issue totals before startup maintenance. Each managed issue has an
-effective cumulative ceiling of the smaller of positive `codex.max_total_tokens` and its responsible
-grant's positive `budget.max_tokens`. This is a per-issue ceiling, not an aggregate pool allowance;
-one pool may host differently bounded tasks without increasing their grants. Admission, live usage
-stops, polling and diagnostic thresholds use the same ceiling. Running work must still match its
-active graph grant and exact bound lease; missing or changed authority latches accounting and stops
-the worker. Managed configuration cannot disable this ceiling with zero. Unmanaged zero retains
-the optional cap's disabled behavior. Lowering the configured ceiling takes effect on the next
-usage update or poll, while raising it never exceeds the existing grant.
+The scheduler loads known issue totals before startup maintenance. A finite managed grant has an
+effective cumulative ceiling of the smaller of positive `codex.max_total_tokens` and its positive
+`budget.max_tokens`. An explicitly authorized Luna `progress_scoped` grant instead requires
+`budget.max_tokens: null` and has no per-task token-count stop. Cumulative usage is still recorded
+monotonically across retries and restarts. Running work must still match its active graph grant and
+exact bound lease; missing or changed authority latches accounting and stops the worker. The
+configured value remains positive for managed workflows and continues to constrain finite grants.
+Expiry, scope, model, effort, provider/cash/capacity limits, and no-progress/time-stall checks remain
+independent controls. Unmanaged zero retains the optional cap's disabled behavior.
 Each execution starts a new actual Codex thread. Duplicate or lower cumulative observations add
 zero, later turns keep the same thread highwater, and later generations accumulate additional usage.
 Overshoots are retained. Managed claim release never deletes totals. If a stopped worker has queued

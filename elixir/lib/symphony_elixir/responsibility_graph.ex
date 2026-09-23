@@ -18,6 +18,7 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   @actions [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
   @authority_classes [:routine_engineering, :coordination, :read_only, :exception]
   @efforts [:none, :minimal, :low, :medium, :high, :xhigh, :max, :ultra]
+  @progress_models ["gpt-5.6-luna", "gpt-6-luna"]
   @scope_identifiers [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
   @scope_collections [:paths, :modules, :environments, :actions]
 
@@ -907,8 +908,8 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   defp valid_authority_input(_authority), do: {:error, :invalid_authority}
   defp valid_authority?(authority), do: valid_authority_input(authority) == :ok
 
-  defp valid_budget_input(%{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}) do
-    if present_string?(model) and effort in @efforts and is_integer(max_tokens) and max_tokens > 0 and
+  defp valid_budget_input(%{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children} = budget) do
+    if present_string?(model) and effort in @efforts and valid_token_limit?(Map.get(budget, :mode), model, max_tokens) and
          is_integer(max_children) and max_children >= 0 do
       :ok
     else
@@ -918,6 +919,10 @@ defmodule SymphonyElixir.ResponsibilityGraph do
 
   defp valid_budget_input(_budget), do: {:error, :invalid_budget}
   defp valid_budget?(budget), do: valid_budget_input(budget) == :ok
+
+  defp valid_token_limit?(:progress_scoped, model, nil) when model in @progress_models, do: true
+  defp valid_token_limit?(mode, _model, maximum) when mode in [nil, :finite], do: is_integer(maximum) and maximum > 0
+  defp valid_token_limit?(_mode, _model, _maximum), do: false
 
   defp valid_runtime_lease_for_role?(:responsible, nil), do: true
   defp valid_runtime_lease_for_role?(:responsible, lease), do: valid_runtime_lease(lease) == :ok
@@ -1007,13 +1012,22 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   end
 
   defp budget_subset?(child, parent) do
-    if child.max_tokens <= parent.max_tokens and child.max_children <= parent.max_children and
+    if token_budget_subset?(child, parent) and child.max_children <= parent.max_children and
          effort_rank(child.effort) <= effort_rank(parent.effort) and child.model == parent.model do
       :ok
     else
       {:error, :budget_widening}
     end
   end
+
+  defp token_budget_subset?(%{mode: :progress_scoped, max_tokens: nil}, %{mode: :progress_scoped, max_tokens: nil}), do: true
+  defp token_budget_subset?(%{max_tokens: maximum} = child, %{mode: :progress_scoped, max_tokens: nil})
+       when is_integer(maximum) and maximum > 0,
+       do: Map.get(child, :mode, :finite) == :finite
+  defp token_budget_subset?(%{max_tokens: child}, %{max_tokens: parent})
+       when is_integer(child) and is_integer(parent),
+       do: child <= parent
+  defp token_budget_subset?(_child, _parent), do: false
 
   defp effort_rank(effort), do: Enum.find_index(@efforts, &(&1 == effort)) || -1
 

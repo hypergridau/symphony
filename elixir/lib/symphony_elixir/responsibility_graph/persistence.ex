@@ -16,7 +16,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   @actions [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
   @efforts [:none, :minimal, :low, :medium, :high, :xhigh, :max, :ultra]
   @budget_modes [:finite, :progress_scoped]
-  @progress_model "gpt-5.6-luna"
+  @progress_models ["gpt-5.6-luna", "gpt-6-luna"]
   @classes [:routine_engineering, :coordination, :read_only, :exception]
   @scope_identifiers [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
   @scope_collections [:paths, :modules, :environments, :actions]
@@ -320,7 +320,7 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
   defp decode_budget(%{"model" => model, "effort" => effort, "max_tokens" => max_tokens, "max_children" => max_children} = payload) do
     with {:ok, effort} <- decode_atom(effort, @efforts),
          {:ok, mode, explicit_mode?} <- decode_budget_mode(payload),
-         true <- is_binary(model) and model != "" and is_integer(max_tokens) and max_tokens > 0 and is_integer(max_children) and max_children >= 0,
+         true <- is_binary(model) and model != "" and valid_budget_limit?(mode, max_tokens) and is_integer(max_children) and max_children >= 0,
          true <- valid_budget_model?(mode, model) do
       budget = %{model: model, effort: effort, max_tokens: max_tokens, max_children: max_children}
       {:ok, if(explicit_mode?, do: Map.put(budget, :mode, mode), else: budget)}
@@ -356,15 +356,21 @@ defmodule SymphonyElixir.ResponsibilityGraph.Persistence do
 
   defp valid_encoded_budget?(budget) when is_map(budget) do
     case Map.fetch(budget, :mode) do
-      :error -> true
-      {:ok, mode} when mode in @budget_modes -> valid_budget_model?(mode, Map.get(budget, :model))
+      :error -> valid_budget_limit?(:finite, Map.get(budget, :max_tokens))
+      {:ok, mode} when mode in @budget_modes ->
+        valid_budget_model?(mode, Map.get(budget, :model)) and
+          valid_budget_limit?(mode, Map.get(budget, :max_tokens))
       _ -> false
     end
   end
 
   defp valid_encoded_budget?(_budget), do: false
 
-  defp valid_budget_model?(:progress_scoped, @progress_model), do: true
+  defp valid_budget_limit?(:progress_scoped, nil), do: true
+  defp valid_budget_limit?(:finite, maximum), do: is_integer(maximum) and maximum > 0
+  defp valid_budget_limit?(_mode, _maximum), do: false
+
+  defp valid_budget_model?(:progress_scoped, model) when model in @progress_models, do: true
   defp valid_budget_model?(:progress_scoped, _model), do: false
   defp valid_budget_model?(:finite, _model), do: true
 

@@ -1028,7 +1028,7 @@ defmodule SymphonyElixir.Orchestrator do
     time_stall? = timeout_ms > 0 and is_integer(elapsed_ms) and elapsed_ms > timeout_ms
 
     total_token_budget_exhausted? =
-      max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
+      is_integer(max_total_tokens) and max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
 
     command_token_stall? =
       max_no_progress_tokens > 0 and no_progress_tokens >= max_no_progress_tokens
@@ -4244,7 +4244,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp enforce_total_token_budget(state, issue_id, updated_running_entry, threshold) do
-    if threshold > 0 and issue_token_total(state, issue_id) >= threshold do
+    if is_integer(threshold) and threshold > 0 and issue_token_total(state, issue_id) >= threshold do
       total_tokens = issue_token_total(state, issue_id)
       diagnostic = total_token_budget_diagnostic(updated_running_entry, total_tokens, threshold)
       error = total_token_budget_error(total_tokens, threshold)
