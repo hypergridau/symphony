@@ -79,6 +79,34 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
     assert {:error, :managed_responsibility_budget_exceeded} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), nil, now)
   end
 
+  test "GPT-6 Luna opt-in requires a matching grant and retry effort ceiling", %{graph: graph, now: now} do
+    issue = %{Fixture.issue(1) | labels: ["symphony-ready", "model:gpt-6-luna"]}
+    assert {:error, :managed_responsibility_required_for_gpt6_luna} =
+             Admission.prepare(graph, ExecutionFence.new(), nil, issue, nil, now)
+
+    {:ok, old_manifest} = ManagedResponsibility.decode(Fixture.payload(now), Fixture.context(), now)
+
+    assert {:error, :managed_responsibility_budget_exceeded} =
+             Admission.prepare(graph, ExecutionFence.new(), old_manifest, issue, nil, now)
+
+    payload =
+      update_in(Fixture.payload(now), ["entries"], fn entries ->
+        Enum.map(entries, fn entry ->
+          entry
+          |> put_in(["accountable", "budget", "model"], "gpt-6-luna")
+          |> put_in(["responsible", "budget", "model"], "gpt-6-luna")
+          |> put_in(["accountable", "budget", "effort"], "high")
+          |> put_in(["responsible", "budget", "effort"], "high")
+        end)
+      end)
+
+    assert {:ok, new_manifest} = ManagedResponsibility.decode(payload, Fixture.context(), now)
+    assert {:ok, _} = Admission.prepare(graph, ExecutionFence.new(), new_manifest, issue, nil, now)
+
+    assert {:error, :managed_responsibility_budget_exceeded} =
+             Admission.prepare(graph, ExecutionFence.new(), new_manifest, issue, 1, now)
+  end
+
   test "a fence write failure cannot produce a dispatchable restart or silently rebind", %{state: state, root: root, manifest: manifest, now: now} do
     invalid_parent = Path.join(root, "regular-file")
     File.write!(invalid_parent, "not a directory")

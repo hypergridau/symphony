@@ -20,7 +20,11 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
 
   @spec prepare(map(), map(), map() | nil, map(), non_neg_integer() | nil, non_neg_integer(), map() | nil) ::
           {:ok, map()} | {:error, term()}
-  def prepare(graph, _fence, nil, _issue, _attempt, _now_ms, _runtime), do: {:ok, graph}
+  def prepare(graph, _fence, nil, issue, attempt, _now_ms, _runtime) do
+    if ModelRouter.resolve(issue, attempt).model == "gpt-6-luna",
+      do: {:error, :managed_responsibility_required_for_gpt6_luna},
+      else: {:ok, graph}
+  end
 
   def prepare(graph, fence, manifest, issue, attempt, now_ms, runtime) do
     with true <- ResponsibilityGraph.enforced?(graph),

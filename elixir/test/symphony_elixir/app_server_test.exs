@@ -1983,7 +1983,12 @@ defmodule SymphonyElixir.AppServerTest do
                  remote_workspace,
                  "Run remote worker",
                  issue,
-                 worker_host: "worker-01:2200"
+                 worker_host: "worker-01:2200",
+                 model_route:
+                   SymphonyElixir.Codex.ModelRouter.resolve(
+                     %{issue | labels: ["model:gpt-6-luna"]},
+                     nil
+                   )
                )
 
       trace = File.read!(trace_file)
@@ -1996,7 +2001,8 @@ defmodule SymphonyElixir.AppServerTest do
       assert argv_line =~ "unset LINEAR_API_KEY"
       assert argv_line =~ "exec "
       assert argv_line =~ "fake-remote-codex"
-      assert argv_line =~ "gpt-5.6-luna"
+      assert argv_line =~ "gpt-6-luna"
+      refute argv_line =~ "gpt-5.6-luna"
       assert argv_line =~ "model_reasoning_effort=high"
       assert argv_line =~ "app-server"
 
