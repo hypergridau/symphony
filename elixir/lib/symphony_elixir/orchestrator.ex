@@ -13,6 +13,8 @@ defmodule SymphonyElixir.Orchestrator do
     ExecutionFence,
     ExecutionSupervisor,
     GlobalPause,
+    ManagedAssignmentBundle,
+    ManagedResponsibility,
     ResponsibilityGraph,
     ReviewHandoff,
     ReviewHandoffEvidence,
@@ -739,7 +741,29 @@ defmodule SymphonyElixir.Orchestrator do
         delegation_id,
         runtime_lease
       ) do
-    spawn_fenced_issue(state, issue, nil, self(), nil, token, session_id, delegation_id, runtime_lease)
+    spawn_fenced_issue(state, issue, %{
+      attempt: nil,
+      recipient: self(),
+      worker_host: nil,
+      token: token,
+      session_id: session_id,
+      delegation_id: delegation_id,
+      runtime_lease: runtime_lease
+    })
+  end
+
+  @doc false
+  @spec spawn_claimed_issue_for_test(term(), Issue.t(), map(), ([String.t()] -> term())) :: term()
+  def spawn_claimed_issue_for_test(%State{} = state, %Issue{} = issue, dispatch, issue_fetcher)
+      when is_map(dispatch) and is_function(issue_fetcher, 1) do
+    spawn_claimed_issue(state, issue, dispatch, issue_fetcher)
+  end
+
+  @doc false
+  @spec managed_assignment_bundle_for_test(term(), Issue.t(), map(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def managed_assignment_bundle_for_test(%State{} = state, %Issue{} = issue, token, session_id, delegation_id) do
+    managed_assignment_bundle(state, issue, token, session_id, delegation_id)
   end
 
   @doc false
@@ -1606,16 +1630,19 @@ defmodule SymphonyElixir.Orchestrator do
         {:ok, state, token, session_id, responsibility_delegation_id, runtime_lease} ->
           case claim_work_package(state, issue, token, worker_host) do
             {:ok, state} ->
-              spawn_fenced_issue(
+              spawn_claimed_issue(
                 state,
                 issue,
-                attempt,
-                recipient,
-                worker_host,
-                token,
-                session_id,
-                responsibility_delegation_id,
-                runtime_lease
+                %{
+                  attempt: attempt,
+                  recipient: recipient,
+                  worker_host: worker_host,
+                  token: token,
+                  session_id: session_id,
+                  delegation_id: responsibility_delegation_id,
+                  runtime_lease: runtime_lease
+                },
+                &Tracker.fetch_issues_by_ids/1
               )
 
             {:error, reason} ->
@@ -1635,154 +1662,84 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp spawn_fenced_issue(
-         %State{} = state,
-         issue,
-         attempt,
-         recipient,
-         worker_host,
-         token,
-         session_id,
-         responsibility_delegation_id,
-         runtime_lease
-       ) do
-    supervisor_identity = execution_supervisor_identity(state, issue, token, session_id, worker_host)
-    runtime = if is_map(state.work_package_runtime), do: state.work_package_runtime, else: %{}
+  defp spawn_claimed_issue(%State{work_package_runtime: nil} = state, issue, dispatch, _issue_fetcher) do
+    spawn_fenced_issue(state, issue, dispatch)
+  end
 
-    if GlobalPause.paused?() do
-      Logger.debug("Global mutable admission paused immediately before worker spawn for #{issue_context(issue)}")
+  defp spawn_claimed_issue(state, issue, dispatch, issue_fetcher) do
+    case final_managed_issue_preflight(state, issue, dispatch, issue_fetcher) do
+      {:ok, refreshed_issue} ->
+        spawn_fenced_issue(state, refreshed_issue, dispatch)
 
-      if is_map(state.work_package_runtime) do
-        # A confirmed provider claim may already hold capacity and scope here.
-        # Fence local replay before returning from the pause barrier. Recovery
-        # still needs a separately verified provider release and host proof.
-        recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
+      {:error, reason} ->
+        recover_post_claim_spawn_failure(state, issue, dispatch, {:assignment_revalidation_failed, reason})
+    end
+  end
 
-        state =
-          if recovery_fence == :ok do
-            release_execution_lease(
-              state,
-              %{
-                execution_token: token,
-                execution_session_id: session_id,
-                responsibility_delegation_id: responsibility_delegation_id,
-                responsibility_runtime_lease: runtime_lease
-              },
-              :spawn_failed
-            )
-          else
-            state
-          end
-
-        block_issue_from_entry(
-          state,
-          issue.id,
-          %{
-            issue: issue,
-            identifier: issue.identifier,
-            worker_host: worker_host,
-            execution_token: token,
-            execution_session_id: session_id
-          },
-          "Claim recovery requires reconciliation: #{inspect({:global_pause, recovery_fence})}"
-        )
-      else
-        release_execution_lease(
-          state,
-          %{
-            execution_token: token,
-            execution_session_id: session_id,
-            responsibility_delegation_id: responsibility_delegation_id,
-            responsibility_runtime_lease: runtime_lease
-          },
-          :global_pause
-        )
-      end
+  defp final_managed_issue_preflight(state, issue, dispatch, issue_fetcher) do
+    with {:ok, refreshed_issue} <- fetch_dispatchable_issue(issue, issue_fetcher),
+         :ok <- same_native_issue(issue, refreshed_issue),
+         manifest when is_map(manifest) <- Map.get(state.work_package_runtime, :managed_delegations),
+         {:ok, delegation, execution} <-
+           managed_lease_binding(
+             state,
+             issue,
+             dispatch.token,
+             dispatch.session_id,
+             dispatch.delegation_id,
+             dispatch.runtime_lease
+           ),
+         {:ok, context} <-
+           ManagedResponsibility.assignment_context(
+             manifest,
+             refreshed_issue,
+             dispatch.delegation_id,
+             execution_fence_now_ms()
+           ),
+         true <-
+           context.objective_id == delegation.scope.objective_id and
+             execution.repository == Map.get(manifest, :repository_ref) do
+      {:ok, refreshed_issue}
     else
-      case start_claimed_worker(state, issue, fn ->
-             AgentRunner.run(issue, recipient,
-               attempt: attempt,
-               managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
-               managed_model_runtime: managed_worker_model_runtime(state.work_package_runtime),
-               worker_host: worker_host,
-               execution_token: token,
-               execution_session_id: session_id,
-               execution_checkout: managed_execution_checkout(state, token, session_id),
-               execution_checkout_checkpoint: fn checkpoint ->
-                 GenServer.call(
-                   recipient,
-                   {:execution_checkout_progress, issue.id, checkpoint},
-                   @execution_authorization_timeout_ms
-                 )
-               end,
-               execution_supervisor: supervisor_identity,
-               secret_environment_names: Map.get(runtime, :secret_environment_names, []),
-               execution_supervisor_recorder: fn identity ->
-                 GenServer.call(
-                   recipient,
-                   {:execution_fence_supervisor, token, session_id, identity},
-                   @execution_authorization_timeout_ms
-                 )
-               end,
-               execution_fence_guard: fn ->
-                 GenServer.call(
-                   recipient,
-                   {:execution_authorize, token, responsibility_delegation_id, :state_mutation},
-                   @execution_authorization_timeout_ms
-                 )
-               end
-             )
-           end) do
-        {:ok, pid} ->
-          ref = Process.monitor(pid)
+      {:error, _reason} = error -> error
+      false -> {:error, :managed_assignment_context_drift}
+      _ -> {:error, :managed_assignment_preflight_failed}
+    end
+  end
 
-          Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+  defp fetch_dispatchable_issue(issue, issue_fetcher) do
+    case revalidate_issue_for_dispatch(issue, issue_fetcher, terminal_state_set()) do
+      {:ok, %Issue{} = refreshed_issue} -> {:ok, refreshed_issue}
+      {:skip, reason} -> {:error, {:native_issue_not_dispatchable, reason}}
+      {:error, reason} -> {:error, {:native_issue_refresh_failed, reason}}
+    end
+  end
 
-          running =
-            Map.put(state.running, issue.id, %{
-              pid: pid,
-              ref: ref,
-              identifier: issue.identifier,
-              issue: issue,
-              worker_host: worker_host,
-              workspace_path: nil,
-              session_id: nil,
-              execution_token: token,
-              execution_session_id: session_id,
-              responsibility_delegation_id: responsibility_delegation_id,
-              responsibility_runtime_lease: runtime_lease,
-              last_codex_message: nil,
-              last_codex_timestamp: nil,
-              last_codex_event: nil,
-              codex_app_server_pid: nil,
-              codex_input_tokens: 0,
-              codex_output_tokens: 0,
-              codex_total_tokens: 0,
-              codex_last_reported_input_tokens: 0,
-              codex_last_reported_output_tokens: 0,
-              codex_last_reported_total_tokens: 0,
-              codex_progress_token_baseline: 0,
-              codex_durable_progress_token_baseline: 0,
-              codex_last_progress_timestamp: nil,
-              codex_last_progress_method: nil,
-              codex_last_activity_monotonic_ms: nil,
-              codex_last_activity_method: nil,
-              turn_count: 0,
-              retry_attempt: normalize_retry_attempt(attempt),
-              started_at: DateTime.utc_now(),
-              started_monotonic_ms: monotonic_now_ms()
-            })
+  defp same_native_issue(%Issue{id: id, identifier: identifier}, %Issue{id: id, identifier: identifier}), do: :ok
+  defp same_native_issue(_issue, _refreshed_issue), do: {:error, :native_issue_identity_changed}
 
-          %{
-            state
-            | running: running,
-              claimed: MapSet.put(state.claimed, issue.id),
-              retry_attempts: Map.delete(state.retry_attempts, issue.id)
-          }
+  defp spawn_fenced_issue(%State{} = state, issue, dispatch) do
+    %{
+      attempt: attempt,
+      worker_host: worker_host,
+      token: token,
+      session_id: session_id,
+      delegation_id: responsibility_delegation_id,
+      runtime_lease: runtime_lease
+    } = dispatch
 
-        {:error, reason} ->
-          Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+    case managed_assignment_bundle(state, issue, token, session_id, responsibility_delegation_id) do
+      {:ok, bundle} ->
+        spawn_fenced_issue_with_bundle(
+          state,
+          issue,
+          Map.put(dispatch, :assignment_bundle, bundle)
+        )
 
+      {:error, reason} ->
+        if is_map(state.work_package_runtime) do
+          recover_post_claim_spawn_failure(state, issue, dispatch, {:assignment_bundle_build_failed, reason})
+        else
           handle_claim_spawn_failure(state, issue, attempt, reason, %{
             worker_host: worker_host,
             execution_token: token,
@@ -1790,7 +1747,227 @@ defmodule SymphonyElixir.Orchestrator do
             responsibility_delegation_id: responsibility_delegation_id,
             responsibility_runtime_lease: runtime_lease
           })
+        end
+    end
+  end
+
+  defp recover_post_claim_spawn_failure(state, issue, dispatch, reason) do
+    recovery = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
+
+    state =
+      if recovery == :ok do
+        release_execution_lease(
+          state,
+          %{
+            execution_token: dispatch.token,
+            execution_session_id: dispatch.session_id,
+            responsibility_delegation_id: dispatch.delegation_id,
+            responsibility_runtime_lease: dispatch.runtime_lease
+          },
+          :spawn_failed
+        )
+      else
+        state
       end
+
+    block_claim_recovery(state, issue, {reason, recovery})
+  end
+
+  defp spawn_fenced_issue_with_bundle(
+         %State{} = state,
+         issue,
+         %{
+           worker_host: worker_host,
+           token: token,
+           session_id: session_id,
+           assignment_bundle: assignment_bundle
+         } = dispatch
+       ) do
+    supervisor_identity = execution_supervisor_identity(state, issue, token, session_id, worker_host)
+    runtime = if is_map(state.work_package_runtime), do: state.work_package_runtime, else: %{}
+
+    if GlobalPause.paused?() do
+      Logger.debug("Global mutable admission paused immediately before worker spawn for #{issue_context(issue)}")
+      handle_paused_claim_spawn(state, issue, dispatch)
+    else
+      result = start_claimed_agent(state, issue, dispatch, assignment_bundle, supervisor_identity, runtime)
+      handle_claimed_spawn_result(state, issue, dispatch, result)
+    end
+  end
+
+  defp start_claimed_agent(state, issue, dispatch, assignment_bundle, supervisor_identity, runtime) do
+    %{
+      attempt: attempt,
+      recipient: recipient,
+      worker_host: worker_host,
+      token: token,
+      session_id: session_id,
+      delegation_id: delegation_id
+    } = dispatch
+
+    start_claimed_worker(state, issue, fn ->
+      AgentRunner.run(issue, recipient,
+        attempt: attempt,
+        assignment_bundle: assignment_bundle,
+        managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
+        managed_model_runtime: managed_worker_model_runtime(state.work_package_runtime),
+        worker_host: worker_host,
+        execution_token: token,
+        execution_session_id: session_id,
+        execution_checkout: managed_execution_checkout(state, token, session_id),
+        execution_checkout_checkpoint: fn checkpoint ->
+          GenServer.call(
+            recipient,
+            {:execution_checkout_progress, issue.id, checkpoint},
+            @execution_authorization_timeout_ms
+          )
+        end,
+        execution_supervisor: supervisor_identity,
+        secret_environment_names: Map.get(runtime, :secret_environment_names, []),
+        execution_supervisor_recorder: fn identity ->
+          GenServer.call(
+            recipient,
+            {:execution_fence_supervisor, token, session_id, identity},
+            @execution_authorization_timeout_ms
+          )
+        end,
+        execution_fence_guard: fn ->
+          GenServer.call(
+            recipient,
+            {:execution_authorize, token, delegation_id, :state_mutation},
+            @execution_authorization_timeout_ms
+          )
+        end
+      )
+    end)
+  end
+
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:ok, pid}) do
+    %{
+      attempt: attempt,
+      worker_host: worker_host,
+      token: token,
+      session_id: session_id,
+      delegation_id: delegation_id,
+      runtime_lease: runtime_lease,
+      assignment_bundle: assignment_bundle
+    } = dispatch
+
+    ref = Process.monitor(pid)
+
+    Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
+
+    running =
+      Map.put(state.running, issue.id, %{
+        pid: pid,
+        ref: ref,
+        identifier: issue.identifier,
+        issue: issue,
+        worker_host: worker_host,
+        workspace_path: nil,
+        session_id: nil,
+        execution_token: token,
+        execution_session_id: session_id,
+        responsibility_delegation_id: delegation_id,
+        responsibility_runtime_lease: runtime_lease,
+        assignment_bundle: assignment_bundle,
+        last_codex_message: nil,
+        last_codex_timestamp: nil,
+        last_codex_event: nil,
+        codex_app_server_pid: nil,
+        codex_input_tokens: 0,
+        codex_output_tokens: 0,
+        codex_total_tokens: 0,
+        codex_last_reported_input_tokens: 0,
+        codex_last_reported_output_tokens: 0,
+        codex_last_reported_total_tokens: 0,
+        codex_progress_token_baseline: 0,
+        codex_durable_progress_token_baseline: 0,
+        codex_last_progress_timestamp: nil,
+        codex_last_progress_method: nil,
+        codex_last_activity_monotonic_ms: nil,
+        codex_last_activity_method: nil,
+        turn_count: 0,
+        retry_attempt: normalize_retry_attempt(attempt),
+        started_at: DateTime.utc_now(),
+        started_monotonic_ms: monotonic_now_ms()
+      })
+
+    %{
+      state
+      | running: running,
+        claimed: MapSet.put(state.claimed, issue.id),
+        retry_attempts: Map.delete(state.retry_attempts, issue.id)
+    }
+  end
+
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:error, {:claim_not_spawned, reason}}) do
+    recover_post_claim_spawn_failure(state, issue, dispatch, {:pre_spawn_claim_fence_failed, reason})
+  end
+
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:error, {:claim_recovery_pending, reason}}) do
+    state =
+      release_execution_lease(
+        state,
+        %{
+          execution_token: dispatch.token,
+          execution_session_id: dispatch.session_id,
+          responsibility_delegation_id: dispatch.delegation_id,
+          responsibility_runtime_lease: dispatch.runtime_lease
+        },
+        :spawn_failed
+      )
+
+    block_claim_recovery(state, issue, {:pre_spawn_authority_expired, reason})
+  end
+
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:error, reason}) do
+    Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
+
+    handle_claim_spawn_failure(state, issue, dispatch.attempt, reason, %{
+      worker_host: dispatch.worker_host,
+      execution_token: dispatch.token,
+      execution_session_id: dispatch.session_id,
+      responsibility_delegation_id: dispatch.delegation_id,
+      responsibility_runtime_lease: dispatch.runtime_lease
+    })
+  end
+
+  defp handle_paused_claim_spawn(state, issue, dispatch) do
+    %{
+      token: token,
+      session_id: session_id,
+      worker_host: worker_host,
+      delegation_id: delegation_id,
+      runtime_lease: runtime_lease
+    } = dispatch
+
+    running_entry = %{
+      execution_token: token,
+      execution_session_id: session_id,
+      responsibility_delegation_id: delegation_id,
+      responsibility_runtime_lease: runtime_lease
+    }
+
+    if is_map(state.work_package_runtime) do
+      # Preserve the provider claim; close local replay before reconciliation.
+      recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
+      state = if recovery_fence == :ok, do: release_execution_lease(state, running_entry, :spawn_failed), else: state
+
+      block_issue_from_entry(
+        state,
+        issue.id,
+        %{
+          issue: issue,
+          identifier: issue.identifier,
+          worker_host: worker_host,
+          execution_token: token,
+          execution_session_id: session_id
+        },
+        "Claim recovery requires reconciliation: #{inspect({:global_pause, recovery_fence})}"
+      )
+    else
+      release_execution_lease(state, running_entry, :global_pause)
     end
   end
 
@@ -1956,8 +2133,17 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} -> {:error, {:global_pause_recovery_fence_failed, reason}}
       end
     else
-      with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-        Task.Supervisor.start_child(state.task_supervisor, worker)
+      begin_spawn_opts = maybe_claim_option([], state.work_package_runtime, :now_fun)
+
+      case WorkPackageClaim.begin_spawn(claim_input(state, issue), begin_spawn_opts) do
+        :ok ->
+          Task.Supervisor.start_child(state.task_supervisor, worker)
+
+        {:error, {:pre_spawn_recovery_pending, reason}} ->
+          {:error, {:claim_recovery_pending, reason}}
+
+        {:error, reason} ->
+          {:error, {:claim_not_spawned, reason}}
       end
     end
   end
@@ -2073,6 +2259,99 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.take([:issue_id, :generation, :repository, :branch, :worktree])
     |> Map.put(:session_id, session_id)
   end
+
+  defp managed_assignment_bundle(%State{work_package_runtime: nil}, _issue, _token, _session_id, _delegation_id),
+    do: {:ok, nil}
+
+  defp managed_assignment_bundle(%State{work_package_runtime: runtime} = state, issue, token, session_id, delegation_id)
+       when is_map(runtime) do
+    delegation = get_in(state.responsibility_graph, [:delegations, delegation_id])
+    execution = get_in(state.execution_fence, [:executions, issue.id])
+
+    with true <- is_map(delegation) and is_map(execution),
+         {:ok, delegation, execution} <-
+           managed_lease_binding(state, issue, token, session_id, delegation_id, delegation.runtime_lease),
+         {:ok, context} <-
+           ManagedResponsibility.assignment_context(
+             Map.get(runtime, :managed_delegations),
+             issue,
+             delegation_id,
+             execution_fence_now_ms()
+           ),
+         true <- context.objective_id == delegation.scope.objective_id,
+         ancestry when is_list(ancestry) <- delegation_ancestry(state.responsibility_graph, delegation),
+         {:ok, bundle} <-
+           ManagedAssignmentBundle.build(%{
+             objective: %{
+               id: Map.get(context, :objective_id),
+               identity: Map.get(context, :objective_id),
+               content: Map.get(context, :objective_content)
+             },
+             repository_ref: execution.repository,
+             base_ref: Map.get(context, :base_ref),
+             branch: execution.branch,
+             seat: delegation.actor_id,
+             lease: delegation.runtime_lease,
+             intent_ancestry: ancestry,
+             acceptance: %{deliverable: delegation.expected_deliverable, evidence: delegation.expected_evidence},
+             context_secret_refs: Map.get(runtime, :secret_environment_names, []),
+             platform: Map.get(context, :platform),
+             environment_classification: Map.get(context, :environment_classification),
+             environment_constraints: Map.get(context, :environment_constraints)
+           }) do
+      {:ok, bundle}
+    else
+      false -> {:error, :assignment_bundle_authority_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :assignment_bundle_authority_missing}
+    end
+  end
+
+  defp managed_assignment_bundle(_state, _issue, _token, _session_id, _delegation_id),
+    do: {:error, :assignment_bundle_authority_missing}
+
+  defp managed_lease_binding(state, issue, token, session_id, delegation_id, runtime_lease) do
+    delegations = Map.get(state.responsibility_graph || %{}, :delegations, %{})
+    executions = Map.get(state.execution_fence || %{}, :executions, %{})
+    delegation = Map.get(delegations, delegation_id)
+    execution = Map.get(executions, issue.id)
+
+    with %{issue_id: issue_id, generation: generation} <- token,
+         %{status: :active, runtime_lease: graph_lease} = delegation when is_map(graph_lease) <- delegation,
+         %{status: :active, generation: ^generation, repository: repository, leases: leases} = execution <- execution,
+         expected = %{
+           issue_id: issue_id,
+           generation: generation,
+           session_id: session_id,
+           process_id: Map.get(runtime_lease, :process_id),
+           repository: repository
+         },
+         %{status: :active, role: :worker} = fence_lease when is_map(fence_lease) <- Map.get(leases, session_id),
+         true <-
+           issue_id == issue.id and is_binary(session_id) and is_binary(expected.process_id) and
+             delegation.id == delegation_id,
+         true <- runtime_lease == expected and graph_lease == expected,
+         true <- Map.take(fence_lease, Map.keys(expected)) == expected do
+      {:ok, delegation, execution}
+    else
+      _ -> {:error, :assignment_bundle_lease_invalid}
+    end
+  end
+
+  defp delegation_ancestry(graph, delegation), do: delegation_ancestry(graph, delegation, [])
+
+  defp delegation_ancestry(_graph, %{id: id, parent_delegation_id: nil}, acc) when is_binary(id),
+    do: [id | acc]
+
+  defp delegation_ancestry(graph, %{id: id, parent_delegation_id: parent_id}, acc)
+       when is_binary(id) and is_binary(parent_id) do
+    case get_in(graph, [:delegations, parent_id]) do
+      %{id: ^parent_id} = parent -> delegation_ancestry(graph, parent, [id | acc])
+      _ -> nil
+    end
+  end
+
+  defp delegation_ancestry(_graph, _delegation, _acc), do: nil
 
   defp execution_attributes(%Issue{id: issue_id, identifier: identifier, branch_name: branch_name}, worker_host) do
     workspace_root =

@@ -33,6 +33,56 @@ defmodule SymphonyElixir.ManagedResponsibilityTest do
     assert {:error, _} = ManagedResponsibility.admit(ResponsibilityGraph.new(), empty, Fixture.issue(1), now)
   end
 
+  test "v1 empty manifests remain compatible while nonempty v1 grants fail closed", %{now: now} do
+    empty_v1 = Fixture.payload_v1(now) |> Map.put("entries", [])
+    assert {:ok, %{schema_version: 1, entries: []}} = ManagedResponsibility.decode(empty_v1, Fixture.context(), now)
+
+    nonempty_v1 = Fixture.payload_v1(now)
+    assert {:ok, legacy} = ManagedResponsibility.decode(nonempty_v1, Fixture.context(), now)
+    graph = ResponsibilityGraph.new()
+    assert {:error, :managed_assignment_context_missing} = ManagedResponsibility.admit(graph, legacy, Fixture.issue(1), now)
+    assert graph.delegations == %{}
+  end
+
+  test "v2 objective snapshot is checked against canonical issue content before graph writes", %{now: now, manifest: manifest} do
+    graph = ResponsibilityGraph.new()
+    issue = %{Fixture.issue(1) | description: "First paragraph\nSecond paragraph"}
+
+    signed_context = %{
+      "objective" => %{"id" => "objective-test", "content" => issue.title <> "\n\n" <> issue.description},
+      "base_ref" => "refs/remotes/origin/main",
+      "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]}
+    }
+
+    payload =
+      Fixture.payload(now)
+      |> put_in(["entries", Access.at(0), "assignment_context"], signed_context)
+
+    assert {:ok, matching} = ManagedResponsibility.decode(payload, Fixture.context(), now)
+    assert {:ok, admitted} = ManagedResponsibility.admit(graph, matching, issue, now)
+    assert map_size(admitted.delegations) == 2
+
+    assert {:error, :managed_assignment_context_drift} =
+             ManagedResponsibility.admit(graph, manifest, %{Fixture.issue(1) | title: "Drifted title"}, now)
+
+    assert {:error, :managed_assignment_context_drift} =
+             ManagedResponsibility.admit(graph, manifest, issue, now)
+
+    assert graph.delegations == %{}
+  end
+
+  test "v2 assignment context rejects a wrong base or empty environment constraints", %{now: now} do
+    payload = Fixture.payload(now)
+
+    for candidate <- [
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "base_ref"], "refs/heads/other"),
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "environment", "platform"], "unknown-platform"),
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "environment", "constraints"], [])
+        ] do
+      assert {:error, :invalid_managed_assignment_context} = ManagedResponsibility.decode(candidate, Fixture.context(), now)
+    end
+  end
+
   test "the selected responsible actor must be the configured managed runner", %{now: now} do
     assert {:error, _} = ManagedResponsibility.decode(Fixture.payload(now), Map.delete(Fixture.context(), :runner_id), now)
     context = Map.put(Fixture.context(), :runner_id, "wrong-runner")
@@ -54,7 +104,7 @@ defmodule SymphonyElixir.ManagedResponsibilityTest do
     first = hd(raw["entries"])
 
     cases = [
-      Map.put(raw, "schema_version", 2),
+      Map.put(raw, "schema_version", 3),
       Map.put(raw, "pool_key", "other"),
       Map.put(raw, "repository_ref", "other/repo"),
       Map.put(raw, "managed_project_profile_id", "other"),

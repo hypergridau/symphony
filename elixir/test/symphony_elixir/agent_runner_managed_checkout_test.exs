@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.PathSafety
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   setup do
@@ -17,14 +19,38 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     git(source, ["commit", "-m", "initial"])
     issue = %Issue{id: "checkout-launch", identifier: "MC-1", title: "managed checkout", state: "In Progress"}
 
+    {:ok, worktree} = PathSafety.canonicalize(Path.join(pool, issue.identifier))
+
     identity = %{
       issue_id: issue.id,
       generation: 1,
       session_id: "worker:checkout-launch:1",
       repository: "example/repository",
-      worktree: Path.join(pool, issue.identifier),
+      worktree: worktree,
       branch: "codex/MC-1"
     }
+
+    {:ok, assignment_bundle} =
+      ManagedAssignmentBundle.build(%{
+        objective: %{id: "objective-checkout", identity: "objective-checkout", content: "Verify managed checkout execution"},
+        repository_ref: identity.repository,
+        base_ref: "refs/remotes/origin/main",
+        branch: identity.branch,
+        seat: "runner-checkout",
+        lease: %{
+          issue_id: identity.issue_id,
+          repository: identity.repository,
+          generation: identity.generation,
+          session_id: identity.session_id,
+          process_id: identity.session_id
+        },
+        intent_ancestry: ["objective-checkout", "delegation-checkout"],
+        acceptance: %{deliverable: "Managed checkout", evidence: "Observed branch and head"},
+        context_secret_refs: [],
+        platform: "linux-x86_64",
+        environment_classification: "repository",
+        environment_constraints: ["repository"]
+      })
 
     trace = Path.join(root, "codex.jsonl")
     started = Path.join(root, "codex-started")
@@ -58,12 +84,20 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     ]
 
     write_workflow_file!(Workflow.workflow_file_path(), workflow)
-    %{issue: issue, identity: identity, workflow: workflow, trace: trace, started: started}
+
+    %{
+      issue: issue,
+      identity: identity,
+      assignment_bundle: assignment_bundle,
+      workflow: workflow,
+      trace: trace,
+      started: started
+    }
   end
 
   test "real clone reaches app-server on its prepared branch and reports observed identity", ctx do
     assert :ok =
-             AgentRunner.run(ctx.issue, self(),
+             run_managed(ctx, self(),
                execution_checkout: ctx.identity,
                execution_fence_guard: fn -> :ok end,
                execution_session_id: ctx.identity.session_id,
@@ -132,7 +166,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     ]
 
     assert_raise RuntimeError, ~r/turn_failed/, fn ->
-      AgentRunner.run(ctx.issue, recipient, opts)
+      run_managed(ctx, recipient, opts)
     end
 
     assert File.read!(argv_path) =~ "model=\"gpt-6-luna\""
@@ -144,13 +178,13 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     on_exit(fn -> Process.exit(rejecting_recipient, :kill) end)
 
     assert_raise RuntimeError, ~r/Managed failed-turn evidence was not persisted: :journal_unwritable/, fn ->
-      AgentRunner.run(ctx.issue, rejecting_recipient, opts)
+      run_managed(ctx, rejecting_recipient, opts)
     end
   end
 
   test "managed route refuses a missing claimed journal before Codex launch", ctx do
     assert_raise RuntimeError, ~r/managed_journal_missing/, fn ->
-      AgentRunner.run(ctx.issue, self(),
+      run_managed(ctx, self(),
         execution_checkout: ctx.identity,
         execution_fence_guard: fn -> :ok end,
         managed_model_route: true,
@@ -227,7 +261,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     )
 
     assert :ok =
-             AgentRunner.run(ctx.issue, self(),
+             run_managed(ctx, self(),
                execution_checkout: ctx.identity,
                execution_fence_guard: fn -> :ok end,
                execution_token: %{issue_id: ctx.issue.id, generation: 1},
@@ -293,7 +327,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     expected_branch = identity.branch
 
     assert :ok =
-             AgentRunner.run(ctx.issue, self(),
+             run_managed(ctx, self(),
                execution_checkout: identity,
                execution_fence_guard: fn -> :ok end,
                execution_session_id: identity.session_id,
@@ -336,7 +370,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     )
 
     assert_raise RuntimeError, ~r/managed_checkout_git_identity_mismatch/, fn ->
-      AgentRunner.run(ctx.issue, self(),
+      run_managed(ctx, self(),
         execution_checkout: ctx.identity,
         execution_fence_guard: fn -> :ok end,
         execution_checkout_checkpoint: fn checkpoint ->
@@ -363,7 +397,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.put(ctx.workflow, :hook_before_run, "printf unexpected > before-hook.txt"))
 
     assert_raise RuntimeError, ~r/managed_checkout_marker_identity_mismatch/, fn ->
-      AgentRunner.run(ctx.issue, self(),
+      run_managed(ctx, self(),
         execution_checkout: %{ctx.identity | generation: 2},
         execution_fence_guard: fn -> :ok end
       )
@@ -389,7 +423,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     guard = fn -> if File.exists?(revoked), do: {:error, :terminal_fenced}, else: :ok end
 
     assert_raise RuntimeError, ~r/terminal_fenced/, fn ->
-      AgentRunner.run(ctx.issue, self(), execution_checkout: ctx.identity, execution_fence_guard: guard)
+      run_managed(ctx, self(), execution_checkout: ctx.identity, execution_fence_guard: guard)
     end
 
     assert File.read!(revoked) == "revoked"
@@ -409,7 +443,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     )
 
     assert_raise RuntimeError, ~r/managed_checkout_path_exists_or_unreadable/, fn ->
-      AgentRunner.run(ctx.issue, self(), execution_checkout: ctx.identity, execution_fence_guard: fn -> :ok end)
+      run_managed(ctx, self(), execution_checkout: ctx.identity, execution_fence_guard: fn -> :ok end)
     end
 
     assert File.dir?(Path.join(ctx.identity.worktree, ".git/symphony-execution.json"))
@@ -427,7 +461,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     )
 
     assert_raise RuntimeError, fn ->
-      AgentRunner.run(ctx.issue, self(), execution_checkout: ctx.identity, execution_fence_guard: fn -> :ok end)
+      run_managed(ctx, self(), execution_checkout: ctx.identity, execution_fence_guard: fn -> :ok end)
     end
 
     assert File.read!(Path.join(ctx.identity.worktree, "after-hook.txt")) == "authorized"
@@ -443,7 +477,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     write_workflow_file!(Workflow.workflow_file_path(), Keyword.merge(ctx.workflow, hook_before_run: before_hook, hook_after_run: after_hook))
 
     assert :ok =
-             AgentRunner.run(ctx.issue, self(),
+             run_managed(ctx, self(),
                execution_checkout: ctx.identity,
                execution_fence_guard: fn -> {:ok, %{authorized: true}} end,
                execution_session_id: ctx.identity.session_id,
@@ -476,7 +510,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     end
 
     assert_raise RuntimeError, ~r/final_checkpoint_rejected/, fn ->
-      AgentRunner.run(ctx.issue, self(),
+      run_managed(ctx, self(),
         execution_checkout: ctx.identity,
         execution_fence_guard: fn -> :ok end,
         execution_checkout_checkpoint: callback,
@@ -494,6 +528,10 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
   defp git(cwd, args) do
     {output, 0} = System.cmd("git", args, cd: cwd, stderr_to_stdout: true)
     String.trim(output)
+  end
+
+  defp run_managed(ctx, recipient, opts) do
+    AgentRunner.run(ctx.issue, recipient, Keyword.put_new(opts, :assignment_bundle, ctx.assignment_bundle))
   end
 
   defp failed_turn_recipient(parent, reply \\ :ok) do

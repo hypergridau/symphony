@@ -742,6 +742,18 @@ repository ownership, previous execution cleanup and the selected model/effort/t
 The graph remains the only delegation ledger, and provider reservation/claim remains mandatory.
 No workspace or worker is created by loading the manifest.
 
+Nonempty managed grants require signed manifest v2 assignment context. It binds objective ID and
+content, the fixed `refs/remotes/origin/main` base, and an allowlisted `linux-x86_64` target with
+`repository` classification and explicit constraints. Admission compares the signed objective
+snapshot with the freshly fetched issue title and optional description. Empty signed v1 manifests
+remain loadable; nonempty v1 grants fail closed. The signature domain is selected by schema version
+(`hypergrid.symphony.managed-delegation.v1` or `.v2`, each followed by a zero byte before the exact
+manifest bytes). The manifest signing script requires Python 3 to select that version safely.
+
+The current Dahlia/Grid grant issuer and its rollout still need to emit and sign v2 nonempty entries.
+Keep managed admission paused until the issuer change is reviewed and the signed manifest is installed.
+This source change does not qualify production host admission or workload execution.
+
 Pause the existing global gate before replacing the manifest or its digest, then restart the
 supervised pool and verify its readiness before resuming. This is explicit runtime-owner
 configuration, not a worker-editable authorization file. A restart never silently revives a

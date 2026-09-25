@@ -1,6 +1,9 @@
+Code.require_file("../support/managed_responsibility_fixture.exs", __DIR__)
+
 defmodule SymphonyElixir.WorkPackageRuntimeTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.WorkPackageRuntime
 
   @required %{
@@ -40,6 +43,8 @@ defmodule SymphonyElixir.WorkPackageRuntimeTest do
     assert runtime.attestation_key == "attestation-key"
     assert runtime.runner_id == "runner-350"
     assert runtime.managed_project_profile_id == "profile-350"
+    assert runtime.managed_delegations == nil
+    refute Map.has_key?(runtime, :assignment_context)
     assert runtime.journal_path == Path.expand("tmp/runner-journal.json")
     assert runtime.archive_root == Path.expand("tmp/runner-archives")
     assert is_function(runtime.cleanup_prepare_fun, 4)
@@ -47,6 +52,33 @@ defmodule SymphonyElixir.WorkPackageRuntimeTest do
 
     assert "DAHLIA_WORK_PACKAGE_RUNNER_TOKEN" in runtime.secret_environment_names
     assert "DAHLIA_WORK_PACKAGE_ATTESTATION_KEY" in runtime.secret_environment_names
+  end
+
+  @tag skip: System.get_env("SYMPHONY_TEST_ROOT_MANIFEST_FILES") != "1"
+  test "managed runtime starts with a correctly signed empty v1 grant while admission is paused" do
+    assert {:unix, :linux} = :os.type()
+    assert {"0\n", 0} = System.cmd("id", ["-u"])
+
+    root = Path.join(System.tmp_dir!(), "work-package-v1-empty-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    path = Path.join(root, "manifest.json")
+    bytes = Jason.encode!(Fixture.payload_v1(System.system_time(:millisecond)) |> Map.put("entries", []))
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    File.write!(path, bytes)
+    File.chmod!(path, 0o644)
+
+    env =
+      Map.merge(@required, %{
+        "SYMPHONY_POOL_KEY" => "test-pool",
+        "SYMPHONY_REPOSITORY_REF" => "openai/symphony",
+        "DAHLIA_MANAGED_DELEGATION_PATH" => path,
+        "DAHLIA_MANAGED_DELEGATION_SHA256" => digest(bytes),
+        "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519" => sign(bytes, private_key),
+        "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519" => hex(public_key)
+      })
+
+    on_exit(fn -> File.rm_rf!(root) end)
+    assert {:ok, %{managed_delegations: %{schema_version: 1, entries: []}}} = WorkPackageRuntime.configuration(env: env)
   end
 
   test "managed runtime rejects malformed provider and path settings" do
@@ -132,5 +164,13 @@ defmodule SymphonyElixir.WorkPackageRuntimeTest do
     assert_raise ArgumentError, ~r/managed Symphony pool work-package runtime is not configured/, fn ->
       SymphonyElixir.AgentRuntimeSupervisor.init([])
     end
+  end
+
+  defp digest(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+  defp hex(bytes), do: Base.encode16(bytes, case: :lower)
+
+  defp sign(bytes, private_key) do
+    :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v1\0" <> bytes, [private_key, :ed25519])
+    |> hex()
   end
 end

@@ -33,6 +33,15 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
 
     assert {:ok, digest(public_key)} == Manifest.verify_signature(bytes, signature, hex(public_key))
 
+    v2_signature =
+      :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v2\0" <> bytes, [private_key, :ed25519])
+      |> hex()
+
+    assert {:ok, digest(public_key)} == Manifest.verify_signature(bytes, v2_signature, hex(public_key), 2)
+
+    assert {:error, :invalid_managed_delegation_signature} =
+             Manifest.verify_signature(bytes, v2_signature, hex(public_key), 1)
+
     assert {:error, :invalid_managed_delegation_signature} ==
              Manifest.verify_signature(bytes <> " ", signature, hex(public_key))
 
@@ -70,7 +79,7 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
       env = %{
         "DAHLIA_MANAGED_DELEGATION_PATH" => path,
         "DAHLIA_MANAGED_DELEGATION_SHA256" => digest(bytes),
-        "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519" => sign(bytes, private_key),
+        "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519" => sign(bytes, private_key, 2),
         "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519" => hex(public_key),
         "SYMPHONY_POOL_KEY" => "test-pool",
         "DAHLIA_RUNNER_ID" => "runner-test",
@@ -88,6 +97,19 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
       assert manifest.signer_key_sha256 == digest(Base.decode16!(env["DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"], case: :lower))
       assert length(manifest.entries) == 2
       refute Map.has_key?(manifest, :delegations)
+    end
+
+    test "loads a correctly signed empty v1 manifest for paused startup", %{path: path, env: env, now: now, private_key: private_key} do
+      bytes = Jason.encode!(Fixture.payload_v1(now) |> Map.put("entries", []))
+      File.write!(path, bytes)
+      File.chmod!(path, 0o644)
+
+      empty_env =
+        env
+        |> Map.put("DAHLIA_MANAGED_DELEGATION_SHA256", digest(bytes))
+        |> Map.put("DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519", sign(bytes, private_key, 1))
+
+      assert {:ok, %{schema_version: 1, entries: []}} = Manifest.load(empty_env, now)
     end
 
     test "rejects changed bytes and group-writable authorization", %{path: path, env: env, now: now} do
@@ -148,7 +170,8 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
   defp digest(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
   defp hex(bytes), do: Base.encode16(bytes, case: :lower)
 
-  defp sign(bytes, private_key) do
-    :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v1\0" <> bytes, [private_key, :ed25519]) |> hex()
+  defp sign(bytes, private_key, version \\ 1) do
+    domain = if version == 1, do: "hypergrid.symphony.managed-delegation.v1\0", else: "hypergrid.symphony.managed-delegation.v2\0"
+    :crypto.sign(:eddsa, :none, domain <> bytes, [private_key, :ed25519]) |> hex()
   end
 end

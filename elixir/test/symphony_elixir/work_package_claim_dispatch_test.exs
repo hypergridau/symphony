@@ -91,11 +91,14 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
   test "a confirmed claim can be durably fenced for recovery before spawn", %{journal: journal, key: key} do
     {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
     {:ok, confirmed} = Dispatch.confirm(submitted, key)
-    {:ok, pending} = Dispatch.begin_recovery(confirmed, key)
+    {:ok, pending} = Dispatch.begin_recovery(confirmed, key, @input)
     assert pending.reservations[key].dispatch.phase == "recovery_pending"
     assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_spawn(pending, key, @input)
     assert {:error, :claim_reconciliation_required} = Dispatch.submit(pending, key, @input, @now)
     assert {:error, :claim_reconciliation_required} = Dispatch.find(pending, "issue", "profile", "repo", 1)
+
+    assert {:error, :claim_authority_changed} =
+             Dispatch.begin_recovery(confirmed, key, %{@input | runner_id: "changed"})
 
     path = Path.join(System.tmp_dir!(), "claim-recovery-pending-#{System.unique_integer([:positive])}.json")
     on_exit(fn -> File.rm(path) end)
@@ -105,10 +108,10 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
 
   test "a lost provider acknowledgement can be fenced without a second claim", %{journal: journal, key: key} do
     {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
-    {:ok, pending} = Dispatch.begin_recovery(submitted, key)
+    {:ok, pending} = Dispatch.begin_recovery(submitted, key, @input)
     assert pending.reservations[key].dispatch.phase == "recovery_pending"
     assert {:error, :claim_reconciliation_required} = Dispatch.submit(pending, key, @input, @now)
     assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_spawn(pending, key, @input)
-    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_recovery(pending, key)
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_recovery(pending, key, @input)
   end
 end
