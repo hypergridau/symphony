@@ -95,6 +95,15 @@ allows target platform `linux-x86_64` and requires classification `repository`
 plus at least one nonempty constraint. The assignment bundle context comes from
 this decoded signed entry, never ambient runtime or prompt fields.
 
+The exact v2 assignment context also requires signed `placement` and
+`target_environment` fields. `internal_beta` is valid only with `rke2`, and
+`hosted_production` is valid only with `lke`, matching HGS-728 placement policy.
+The normalized values are included in assignment bundle schema v2 and its
+canonical digest. Existing nonempty v2 grants that omit these fields or name an
+invalid pair fail closed and must be reissued by the signed-manifest issuer;
+empty signed v1 manifests remain compatible. This source contract does not
+provision either target or qualify its runtime.
+
 To issue or rotate a grant, keep an Ed25519 PEM private key on a trusted root
 signing host outside the runner guest, owned by root with mode `0600`. Freeze the
 manifest's exact bytes, copy that non-secret file to the signing host, and run
@@ -132,9 +141,9 @@ manual enforcement. Completed graph responsibility alone is not cleanup acceptan
 
 Managed worker spawn binds the objective ID, identity and content, repository, explicit base ref,
 prepared branch, responsible seat, current execution lease, delegation ancestry, acceptance
-contract, secret environment variable names, and target platform constraints into a canonical
-SHA-256 assignment bundle. Secret values are never included. The worker validates the bundle
-before workspace creation.
+contract, secret environment variable names, target platform constraints, and signed placement / target
+environment into a canonical SHA-256 assignment bundle. Secret values are never included. The worker
+validates the bundle before workspace creation.
 
 The runtime carries the decoded, signature-verified manifest entry, and admission
 compares its objective snapshot with the canonical issue before graph writes.
@@ -165,6 +174,15 @@ recorded. Checkout heads must be canonical 40- or 64-character hexadecimal Git
 object identifiers. The adapter return shapes are deliberately narrow so
 workspace paths, command strings, credential values and raw process output are
 not lifecycle fields.
+
+Before execution, the typed adapter acquires a JIT credential lease bound to the
+assignment digest and allocation, renews it using a stable key, and refuses to
+execute when the lease is denied or expired. The lease record contains only a
+non-secret reference and expiry. Cleanup revokes that lease before accepting
+terminal evidence; abort cleanup revokes it when one was acquired. Lifecycle
+journal schema v2 adds this lease state and rejects old v1 records rather than
+interpreting their execution state without a lease. These are port semantics
+only: no broker, credential issuance, or host integration is implemented.
 
 The journal uses versioned compare-and-swap and must be durable and atomic in any
 future implementation. Allocation and checkout interruptions can retry through

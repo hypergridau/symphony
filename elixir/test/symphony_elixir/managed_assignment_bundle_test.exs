@@ -38,6 +38,13 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
     assert :ok = ManagedAssignmentBundle.validate_bundle(first)
     assert first.objective == %{id: "objective-1", identity: "objective-1", content: "Ship the managed runner"}
     assert first.context_secret_refs == ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"]
+    assert first.environment.placement == :internal_beta
+    assert first.environment.target_environment == :rke2
+
+    assert {:ok, hosted} =
+             ManagedAssignmentBundle.build(%{attrs | placement: :hosted_production, target_environment: :lke})
+
+    refute hosted.sha256 == first.sha256
     refute Map.has_key?(first, :runner_token)
   end
 
@@ -61,6 +68,9 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
 
     assert {:error, :assignment_bundle_environment_invalid} =
              ManagedAssignmentBundle.build(Map.put(attrs, :environment_classification, "production"))
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.build(%{attrs | placement: :internal_beta, target_environment: :lke})
 
     assert {:error, :assignment_bundle_objective_invalid} =
              ManagedAssignmentBundle.build(put_in(attrs, [:objective, :identity], "other-objective"))
@@ -120,7 +130,9 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
       context_secret_refs: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
       platform: "linux-x86_64",
       environment_classification: "repository",
-      environment_constraints: ["repository", "no-production-workload"]
+      environment_constraints: ["repository", "no-production-workload"],
+      placement: :internal_beta,
+      target_environment: :rke2
     }
   end
 end

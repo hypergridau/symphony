@@ -23,8 +23,11 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert Enum.map(events, &elem(&1, 0)) == [
              :allocate_or_reconcile,
              :prepare_checkout,
+             :acquire_credential_lease,
+             :renew_credential_lease,
              :execute,
              :publish_or_reconcile_result,
+             :revoke_credential_lease,
              :ensure_terminal_cleanup,
              :verify_terminal_cleanup
            ]
@@ -34,7 +37,26 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert checkout_key == "#{assignment.sha256}:checkout"
     assert assignment.context_secret_refs == ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"]
     refute Map.has_key?(assignment, :runner_token)
+    assert assignment.environment.placement == :internal_beta
+    assert assignment.environment.target_environment == :rke2
     refute Enum.any?(events, &(inspect(&1) =~ "runner_token"))
+    refute Enum.any?(events, &(inspect(&1) =~ "synthetic-secret-value"))
+
+    assert [{:acquire_credential_lease, "allocation-fixture-1", digest, acquire_key}] =
+             Enum.filter(events, &(elem(&1, 0) == :acquire_credential_lease))
+
+    assert digest == assignment.sha256
+    assert acquire_key == "#{assignment.sha256}:credential-acquire"
+
+    assert [{:renew_credential_lease, "allocation-fixture-1", ^digest, "credential-lease-fixture-1", renew_key}] =
+             Enum.filter(events, &(elem(&1, 0) == :renew_credential_lease))
+
+    assert renew_key == "#{assignment.sha256}:credential-renew"
+
+    assert [{:revoke_credential_lease, "allocation-fixture-1", ^digest, "credential-lease-fixture-1", revoke_key}] =
+             Enum.filter(events, &(elem(&1, 0) == :revoke_credential_lease))
+
+    assert revoke_key == "#{assignment.sha256}:credential-revoke"
 
     prior_count = length(events)
     assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
@@ -42,6 +64,87 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert length(replay_events) == prior_count + 1
     assert Enum.count(replay_events, &(elem(&1, 0) != :verify_terminal_cleanup)) == prior_count - 1
     assert is_pid(journal)
+  end
+
+  test "credential lease denial blocks before execution" do
+    {adapter, _journal, opts} = ports(credential_denied: true)
+    assignment = assignment()
+
+    assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :acquire_credential_lease)) == 1
+    refute Enum.any?(events, &(elem(&1, 0) in [:renew_credential_lease, :execute, :revoke_credential_lease]))
+  end
+
+  test "a lease with a different assignment binding never reaches execution" do
+    {adapter, _journal, opts} = ports(credential_wrong_binding: true)
+    assignment = assignment()
+
+    assert {:held, :invalid_credential_lease, %{phase: :credential_lease_pending}} = ManagedExecutor.run(assignment, opts)
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) in [:renew_credential_lease, :execute]))
+  end
+
+  test "renewal denial revokes the lease and blocks before execution" do
+    {adapter, _journal, opts} = ports(credential_renew_denied: true)
+    assignment = assignment()
+
+    assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 2
+    refute Enum.any?(events, &(elem(&1, 0) == :execute))
+  end
+
+  test "renewal and revocation failures retain safe journal debt for retry" do
+    assignment = assignment()
+    {renew_adapter, _journal, renew_opts} = ports(faults: %{credential_renew: 1})
+
+    assert {:held, :credential_lease_renewal_failed, %{phase: :credential_lease_ready}} =
+             ManagedExecutor.run(assignment, renew_opts)
+
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, renew_opts)
+    renew_events = FakeAdapter.events(renew_adapter)
+    renew_keys = for {:renew_credential_lease, _allocation, _digest, _ref, key} <- renew_events, do: key
+    assert renew_keys == ["#{assignment.sha256}:credential-renew", "#{assignment.sha256}:credential-renew"]
+    assert Enum.count(renew_events, &(elem(&1, 0) == :execute)) == 1
+
+    {revoke_adapter, _journal, revoke_opts} = ports(faults: %{credential_revoke: 1})
+
+    assert {:held, :credential_lease_revocation_failed, %{phase: :cleanup_pending}} =
+             ManagedExecutor.run(assignment, revoke_opts)
+
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, revoke_opts)
+    revoke_events = FakeAdapter.events(revoke_adapter)
+    revoke_keys = for {:revoke_credential_lease, _allocation, _digest, _ref, key} <- revoke_events, do: key
+    assert revoke_keys == ["#{assignment.sha256}:credential-revoke", "#{assignment.sha256}:credential-revoke"]
+    assert Enum.count(revoke_events, &(elem(&1, 0) == :execute)) == 1
+    assert Enum.count(revoke_events, &(elem(&1, 0) == :ensure_terminal_cleanup)) == 1
+  end
+
+  test "expired leases are revoked and cannot reach execution" do
+    {adapter, _journal, opts} = ports(credential_expired: true)
+    assignment = assignment()
+
+    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 1
+    refute Enum.any?(events, &(elem(&1, 0) in [:renew_credential_lease, :execute]))
+  end
+
+  test "uncertain lease acquisition retries with the same key and terminal replay does not reacquire" do
+    {adapter, _journal, opts} = ports(faults: %{credential_acquire: 1})
+    assignment = assignment()
+
+    assert {:held, :credential_lease_acquisition_failed, %{phase: :credential_lease_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
+    prior = FakeAdapter.events(adapter)
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert length(events) == length(prior) + 1
+    keys = for {:acquire_credential_lease, _allocation_id, _digest, key} <- events, do: key
+    assert keys == ["#{assignment.sha256}:credential-acquire", "#{assignment.sha256}:credential-acquire"]
+    assert Enum.count(events, &(elem(&1, 0) == :execute)) == 1
   end
 
   test "reconciles allocation with the same key after an interrupted allocation request" do
@@ -70,6 +173,17 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     }
 
     assert :ok = FakeJournal.compare_and_swap(key, 0, malformed, journal)
+    assert {:error, :invalid_lifecycle_journal} = ManagedExecutor.run(assignment, opts)
+    assert FakeAdapter.events(adapter) == []
+  end
+
+  test "a schema v1 lifecycle record is rejected rather than replayed without a credential lease" do
+    {adapter, journal, opts} = ports()
+    assignment = assignment()
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+    legacy = %{schema_version: 1, key: key, assignment_digest: assignment.sha256, phase: :planned, version: 0}
+
+    assert :ok = FakeJournal.compare_and_swap(key, 0, legacy, journal)
     assert {:error, :invalid_lifecycle_journal} = ManagedExecutor.run(assignment, opts)
     assert FakeAdapter.events(adapter) == []
   end
@@ -367,7 +481,9 @@ defmodule SymphonyElixir.ManagedExecutorTest do
       context_secret_refs: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
       platform: "linux-x86_64",
       environment_classification: "repository",
-      environment_constraints: ["no-production-workload", "synthetic-test-only"]
+      environment_constraints: ["no-production-workload", "synthetic-test-only"],
+      placement: :internal_beta,
+      target_environment: :rke2
     }
 
     attrs = Enum.reduce(overrides, attrs, fn {key, value}, acc -> Map.put(acc, key, value) end)

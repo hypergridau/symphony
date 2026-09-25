@@ -2297,7 +2297,9 @@ defmodule SymphonyElixir.Orchestrator do
              context_secret_refs: Map.get(runtime, :secret_environment_names, []),
              platform: Map.get(context, :platform),
              environment_classification: Map.get(context, :environment_classification),
-             environment_constraints: Map.get(context, :environment_constraints)
+             environment_constraints: Map.get(context, :environment_constraints),
+             placement: Map.get(context, :placement),
+             target_environment: Map.get(context, :target_environment)
            }) do
       {:ok, bundle}
     else

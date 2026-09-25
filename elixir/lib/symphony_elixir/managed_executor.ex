@@ -77,7 +77,10 @@ defmodule SymphonyElixir.ManagedExecutor do
     do: checkout(record, assignment, ports)
 
   defp advance(%{phase: :checkout_ready} = record, assignment, ports),
-    do: execute(record, assignment, ports)
+    do: acquire_credential_lease(record, assignment, ports)
+
+  defp advance(%{phase: phase} = record, assignment, ports) when phase in [:credential_lease_pending, :credential_lease_ready],
+    do: credential_lease(record, assignment, ports)
 
   defp advance(%{phase: :result_recorded} = record, assignment, ports),
     do: report_result(record, assignment, ports)
@@ -152,14 +155,107 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
-  defp execute(record, assignment, ports) do
-    case checkpoint(record, :execution_started, ports) do
-      {:ok, started} ->
-        execute_started(started, assignment, ports)
-
-      {:error, reason} ->
-        {:held, reason, record}
+  defp acquire_credential_lease(record, assignment, ports) do
+    case checkpoint(record, :credential_lease_pending, ports) do
+      {:ok, pending} -> credential_lease(pending, assignment, ports)
+      {:error, reason} -> {:held, reason, record}
     end
+  end
+
+  defp credential_lease(%{phase: :credential_lease_pending} = record, assignment, ports) do
+    case ports.adapter.acquire_credential_lease(
+           record.allocation,
+           assignment,
+           key(assignment, "credential-acquire"),
+           ports.adapter_context
+         ) do
+      {:ok, lease} -> save_credential_lease(record, lease, assignment, ports)
+      {:error, :denied} -> abort_before_execution(record, assignment, :credential_lease_denied, ports)
+      {:error, _reason} -> {:held, :credential_lease_acquisition_failed, record}
+      _ -> {:held, :invalid_credential_lease, record}
+    end
+  end
+
+  defp credential_lease(%{phase: :credential_lease_ready} = record, assignment, ports) do
+    lease = record.credential_lease
+
+    if lease.expires_at_ms <= now_ms() do
+      revoke_before_abort(record, assignment, :credential_lease_expired, ports)
+    else
+      case ports.adapter.renew_credential_lease(
+             record.allocation,
+             assignment,
+             lease,
+             key(assignment, "credential-renew"),
+             ports.adapter_context
+           ) do
+        {:ok, renewed} -> save_renewed_credential_lease(record, renewed, assignment, ports)
+        {:error, :denied} -> revoke_before_abort(record, assignment, :credential_lease_denied, ports)
+        {:error, _reason} -> {:held, :credential_lease_renewal_failed, record}
+        _ -> {:held, :invalid_credential_lease, record}
+      end
+    end
+  end
+
+  defp save_credential_lease(record, lease, assignment, ports) do
+    with :ok <- Record.validate_credential_lease(lease, record.allocation, assignment) do
+      if lease.expires_at_ms <= now_ms() do
+        revoke_unpersisted_lease(record, assignment, lease, :credential_lease_expired, ports)
+      else
+        case checkpoint(record, :credential_lease_ready, ports, %{credential_lease: lease}) do
+          {:ok, ready} -> advance(ready, assignment, ports)
+          {:error, reason} -> {:held, reason, record}
+        end
+      end
+    else
+      _ -> {:held, :invalid_credential_lease, record}
+    end
+  end
+
+  defp save_renewed_credential_lease(record, renewed, assignment, ports) do
+    with :ok <- Record.validate_credential_lease(renewed, record.allocation, assignment),
+         true <- renewed.lease_ref == record.credential_lease.lease_ref do
+      if renewed.expires_at_ms <= now_ms() do
+        revoke_before_abort(record, assignment, :credential_lease_expired, ports)
+      else
+        case checkpoint(record, :execution_started, ports, %{credential_lease: renewed}) do
+          {:ok, started} -> execute_started(started, assignment, ports)
+          {:error, reason} -> {:held, reason, record}
+        end
+      end
+    else
+      _ -> {:held, :invalid_credential_lease, record}
+    end
+  end
+
+  defp revoke_unpersisted_lease(record, assignment, lease, reason, ports) do
+    case ports.adapter.revoke_credential_lease(
+           record.allocation,
+           assignment,
+           lease,
+           key(assignment, "credential-revoke"),
+           ports.adapter_context
+         ) do
+      :ok -> abort_before_execution(record, assignment, reason, ports)
+      _ -> {:held, :credential_lease_revocation_failed, record}
+    end
+  end
+
+  defp revoke_before_abort(record, assignment, reason, ports) do
+    case revoke_credential_lease(record, assignment, ports) do
+      :ok -> abort_before_execution(record, assignment, reason, ports)
+      _ -> {:held, :credential_lease_revocation_failed, record}
+    end
+  end
+
+  defp revoke_credential_lease(record, assignment, ports) do
+    ports.adapter.revoke_credential_lease(
+      record.allocation,
+      assignment,
+      record.credential_lease,
+      key(assignment, "credential-revoke"),
+      ports.adapter_context
+    )
   end
 
   defp execute_started(record, assignment, ports) do
@@ -167,6 +263,7 @@ defmodule SymphonyElixir.ManagedExecutor do
            record.allocation,
            assignment,
            record.checkout,
+           record.credential_lease,
            key(assignment, "execute"),
            ports.adapter_context
          ) do
@@ -181,6 +278,7 @@ defmodule SymphonyElixir.ManagedExecutor do
       record.allocation,
       assignment,
       record.checkout,
+      record.credential_lease,
       key(assignment, "execute"),
       ports.adapter_context
     )
@@ -253,6 +351,13 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp ensure_cleanup(record, assignment, ports) do
+    case revoke_credential_lease(record, assignment, ports) do
+      :ok -> ensure_terminal_cleanup(record, assignment, ports)
+      _ -> {:held, :credential_lease_revocation_failed, record}
+    end
+  end
+
+  defp ensure_terminal_cleanup(record, assignment, ports) do
     response =
       ports.adapter.ensure_terminal_cleanup(
         record.allocation,
@@ -279,7 +384,7 @@ defmodule SymphonyElixir.ManagedExecutor do
              record.execution_result,
              ports.adapter_context
            ),
-         {:ok, terminal} <- checkpoint(record, :terminal, ports, %{cleanup_evidence: evidence}) do
+         {:ok, terminal} <- checkpoint(record, :terminal, ports, %{cleanup_evidence: evidence, credential_lease: nil}) do
       {:ok, terminal}
     else
       {:error, :cleanup_evidence_invalid} -> {:held, :cleanup_evidence_invalid, record}
@@ -348,14 +453,21 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp ensure_abort_cleanup(record, assignment, ports) do
+    revoked =
+      if is_map(record.credential_lease), do: revoke_credential_lease(record, assignment, ports), else: :ok
+
     response =
-      ports.adapter.ensure_abort_cleanup(
-        record.allocation,
-        assignment,
-        record.abort_reason,
-        key(assignment, "abort-cleanup"),
-        ports.adapter_context
-      )
+      if revoked == :ok do
+        ports.adapter.ensure_abort_cleanup(
+          record.allocation,
+          assignment,
+          record.abort_reason,
+          key(assignment, "abort-cleanup"),
+          ports.adapter_context
+        )
+      else
+        {:error, :credential_lease_revocation_failed}
+      end
 
     case response do
       :ok -> {:blocked, record.abort_reason, record}
@@ -378,8 +490,11 @@ defmodule SymphonyElixir.ManagedExecutor do
       adapter_callbacks = [
         {:allocate_or_reconcile, 3},
         {:prepare_checkout, 5},
-        {:execute, 5},
-        {:reconcile_execution, 5},
+        {:acquire_credential_lease, 4},
+        {:renew_credential_lease, 5},
+        {:revoke_credential_lease, 5},
+        {:execute, 6},
+        {:reconcile_execution, 6},
         {:publish_or_reconcile_result, 5},
         {:ensure_terminal_cleanup, 5},
         {:verify_terminal_cleanup, 5},
@@ -413,4 +528,5 @@ defmodule SymphonyElixir.ManagedExecutor do
 
   defp assignment_key(assignment), do: "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
   defp key(assignment, stage), do: "#{assignment.sha256}:#{stage}"
+  defp now_ms, do: System.system_time(:millisecond)
 end

@@ -9,6 +9,12 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
 
   @type assignment :: map()
   @type allocation :: %{id: String.t(), status: :ready}
+  @type credential_lease :: %{
+          lease_ref: String.t(),
+          assignment_digest: String.t(),
+          allocation_id: String.t(),
+          expires_at_ms: non_neg_integer()
+        }
   @type checkout_intent :: %{repository_ref: String.t(), base_ref: String.t(), branch: String.t()}
   @type checkout_receipt :: %{
           assignment_digest: String.t(),
@@ -56,9 +62,15 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   @callback allocate_or_reconcile(assignment(), String.t(), term()) :: {:ok, allocation()} | {:error, term()}
   @callback prepare_checkout(allocation(), assignment(), checkout_intent(), String.t(), term()) ::
               {:ok, checkout_receipt()} | {:error, term()}
-  @callback execute(allocation(), assignment(), checkout_receipt(), String.t(), term()) ::
+  @callback acquire_credential_lease(allocation(), assignment(), String.t(), term()) ::
+              {:ok, credential_lease()} | {:error, :denied | term()}
+  @callback renew_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
+              {:ok, credential_lease()} | {:error, :denied | term()}
+  @callback revoke_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
+              :ok | {:error, term()}
+  @callback execute(allocation(), assignment(), checkout_receipt(), credential_lease(), String.t(), term()) ::
               {:ok, execution_result()} | {:error, term()}
-  @callback reconcile_execution(allocation(), assignment(), checkout_receipt(), String.t(), term()) ::
+  @callback reconcile_execution(allocation(), assignment(), checkout_receipt(), credential_lease(), String.t(), term()) ::
               {:ok, execution_result() | nil} | {:error, term()}
   @callback publish_or_reconcile_result(allocation(), assignment(), execution_result(), String.t(), term()) ::
               {:ok, String.t()} | {:error, term()}

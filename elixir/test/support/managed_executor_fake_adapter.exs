@@ -36,7 +36,12 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         checkout_head: Keyword.get(opts, :checkout_head, "0123456789abcdef0123456789abcdef01234567"),
         execution_reconciliation: Keyword.get(opts, :execution_reconciliation),
         cleanup_invalid: Keyword.get(opts, :cleanup_invalid, false),
-        signature_invalid: Keyword.get(opts, :signature_invalid, false)
+        signature_invalid: Keyword.get(opts, :signature_invalid, false),
+        credential_denied: Keyword.get(opts, :credential_denied, false),
+        credential_expired: Keyword.get(opts, :credential_expired, false),
+        credential_renew_denied: Keyword.get(opts, :credential_renew_denied, false),
+        credential_wrong_binding: Keyword.get(opts, :credential_wrong_binding, false),
+        credential_material: "synthetic-secret-value"
       }
     end)
   end
@@ -56,15 +61,59 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   end
 
   @impl true
-  def execute(allocation, assignment, checkout, idempotency_key, pid) do
-    with_event(pid, {:execute, allocation.id, checkout.head, idempotency_key}, fn state ->
+  def acquire_credential_lease(allocation, assignment, idempotency_key, pid) do
+    with_event(pid, {:acquire_credential_lease, allocation.id, assignment.sha256, idempotency_key}, fn state ->
+      cond do
+        state.credential_denied ->
+          {{:error, :denied}, %{state | credential_denied: false}}
+
+        true ->
+          expires_at_ms = if state.credential_expired, do: System.system_time(:millisecond) - 1, else: System.system_time(:millisecond) + 60_000
+
+          lease = %{
+            lease_ref: "credential-lease-fixture-1",
+            assignment_digest: if(state.credential_wrong_binding, do: String.duplicate("0", 64), else: assignment.sha256),
+            allocation_id: allocation.id,
+            expires_at_ms: expires_at_ms
+          }
+
+          fail_once(%{state | credential_expired: false, credential_wrong_binding: false}, :credential_acquire, {:ok, lease})
+      end
+    end)
+  end
+
+  @impl true
+  def renew_credential_lease(allocation, assignment, lease, idempotency_key, pid) do
+    with_event(pid, {:renew_credential_lease, allocation.id, assignment.sha256, lease.lease_ref, idempotency_key}, fn state ->
+      if state.credential_renew_denied do
+        {{:error, :denied}, %{state | credential_renew_denied: false}}
+      else
+        fail_once(state, :credential_renew, {:ok, %{lease | expires_at_ms: System.system_time(:millisecond) + 60_000}})
+      end
+    end)
+  end
+
+  @impl true
+  def revoke_credential_lease(allocation, assignment, lease, idempotency_key, pid) do
+    with_event(pid, {:revoke_credential_lease, allocation.id, assignment.sha256, lease.lease_ref, idempotency_key}, fn state ->
+      fail_once(state, :credential_revoke, :ok)
+    end)
+    |> case do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
+  @impl true
+  def execute(allocation, assignment, checkout, credential_lease, idempotency_key, pid) do
+    with_event(pid, {:execute, allocation.id, checkout.head, credential_lease.lease_ref, idempotency_key}, fn state ->
       fail_once(state, :execute, {:ok, result(state, assignment)})
     end)
   end
 
   @impl true
-  def reconcile_execution(allocation, assignment, checkout, idempotency_key, pid) do
-    with_event(pid, {:reconcile_execution, allocation.id, checkout.head, idempotency_key}, fn state ->
+  def reconcile_execution(allocation, assignment, checkout, credential_lease, idempotency_key, pid) do
+    with_event(pid, {:reconcile_execution, allocation.id, checkout.head, credential_lease.lease_ref, idempotency_key}, fn state ->
       case state.execution_reconciliation do
         nil -> {{:ok, nil}, state}
         result -> {{:ok, result || result(state, assignment)}, state}
