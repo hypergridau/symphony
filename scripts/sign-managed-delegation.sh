@@ -19,15 +19,18 @@ public_der_hex=$(openssl pkey -in "$private_key" -pubout -outform DER \
 public_key_hex=${BASH_REMATCH[1]}
 
 umask 077
+snapshot_file=$(mktemp /dev/shm/symphony-grant-manifest.XXXXXXXX)
 message_file=$(mktemp /dev/shm/symphony-grant-sign.XXXXXXXX)
-trap 'rm -f -- "$message_file"' EXIT
+trap 'rm -f -- "$snapshot_file" "$message_file"' EXIT
+cat -- "$manifest" >"$snapshot_file"
+[[ $(stat -c '%s' -- "$snapshot_file") -le 262144 ]]
 printf '%s\0' 'hypergrid.symphony.managed-delegation.v1' >"$message_file"
-cat -- "$manifest" >>"$message_file"
+cat -- "$snapshot_file" >>"$message_file"
 signature_hex=$(openssl pkeyutl -sign -rawin -inkey "$private_key" \
   -in "$message_file" \
   | od -An -tx1 -v | tr -d ' \n')
 [[ $signature_hex =~ ^[0-9a-f]{128}$ ]]
 
-printf 'DAHLIA_MANAGED_DELEGATION_SHA256=%s\n' "$(sha256sum -- "$manifest" | cut -d ' ' -f 1)"
+printf 'DAHLIA_MANAGED_DELEGATION_SHA256=%s\n' "$(sha256sum -- "$snapshot_file" | cut -d ' ' -f 1)"
 printf 'DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519=%s\n' "$signature_hex"
 printf 'DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519=%s\n' "$public_key_hex"
