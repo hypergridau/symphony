@@ -29,11 +29,24 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     with {:ok, client, context} <- ports(opts),
          {:ok, config} <- config(opts),
          {:ok, expected} <- JobSpec.compile(assignment, config) do
-      delete_job(client, expected, context)
+      delete_job(client, expected, context, nil, :missing_job_is_held)
     end
   end
 
   def delete(_assignment, _opts), do: {:error, :invalid_rke2_job_request}
+
+  @doc "Deletes only the exact owned Job allocation recorded by its server UID."
+  @spec delete_owned(map(), String.t(), keyword()) :: :ok | {:held, term()} | {:error, term()}
+  def delete_owned(assignment, uid, opts)
+      when is_map(assignment) and is_binary(uid) and byte_size(uid) > 0 and is_list(opts) do
+    with {:ok, client, context} <- ports(opts),
+         {:ok, config} <- config(opts),
+         {:ok, expected} <- JobSpec.compile(assignment, config) do
+      delete_job(client, expected, context, uid, :already_absent_is_clean)
+    end
+  end
+
+  def delete_owned(_assignment, _uid, _opts), do: {:error, :invalid_rke2_job_request}
 
   defp ensure_job(client, expected, context) do
     namespace = get_in(expected, ["metadata", "namespace"])
@@ -69,34 +82,76 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     if JobSpec.owned_job?(job, expected), do: {:ok, job}, else: {:held, :job_identity_or_spec_mismatch}
   end
 
-  defp delete_job(client, expected, context) do
+  defp delete_job(client, expected, context, expected_uid, missing_job) do
     namespace = get_in(expected, ["metadata", "namespace"])
     name = get_in(expected, ["metadata", "name"])
 
     case client.get_job(namespace, name, context) do
-      {:error, :not_found} -> {:held, :job_not_found_for_delete}
-      {:error, reason} -> {:held, {:job_read_failed, reason}}
-      {:ok, job} -> delete_verified(client, job, namespace, name, expected, context)
-      _ -> {:held, :invalid_job_read_response}
+      {:error, :not_found} ->
+        case missing_job do
+          :already_absent_is_clean -> :ok
+          :missing_job_is_held -> {:held, :job_not_found_for_delete}
+        end
+
+      {:error, reason} ->
+        {:held, {:job_read_failed, reason}}
+
+      {:ok, job} ->
+        delete_verified(client, job, namespace, name, expected, context, expected_uid)
+
+      _ ->
+        {:held, :invalid_job_read_response}
     end
   end
 
-  defp delete_verified(client, job, namespace, name, expected, context) do
+  defp delete_verified(client, job, namespace, name, expected, context, expected_uid) do
+    case verified_delete_uid(job, expected, expected_uid) do
+      {:ok, uid} -> delete_job_request(client, namespace, name, uid, expected, context)
+      {:error, reason} -> {:held, reason}
+    end
+  end
+
+  defp verified_delete_uid(job, expected, expected_uid) do
     uid = get_in(job, ["metadata", "uid"])
 
     cond do
-      not JobSpec.owned_job?(job, expected) ->
-        {:held, :job_identity_or_spec_mismatch}
+      not JobSpec.owned_job_for_cleanup?(job, expected) -> {:error, :job_identity_or_spec_mismatch}
+      not is_binary(uid) or String.trim(uid) == "" -> {:error, :job_uid_missing}
+      not is_nil(expected_uid) and uid != expected_uid -> {:error, :job_allocation_identity_mismatch}
+      true -> {:ok, uid}
+    end
+  end
 
-      not is_binary(uid) or String.trim(uid) == "" ->
-        {:held, :job_uid_missing}
+  defp delete_job_request(client, namespace, name, uid, expected, context) do
+    case client.delete_job(namespace, name, uid, context) do
+      :ok -> :ok
+      {:error, reason} -> reconcile_delete(client, namespace, name, uid, expected, context, reason)
+      _ -> {:held, :invalid_job_delete_response}
+    end
+  end
 
-      true ->
-        case client.delete_job(namespace, name, uid, context) do
-          :ok -> :ok
-          {:error, reason} -> {:held, {:job_delete_failed, reason}}
-          _ -> {:held, :invalid_job_delete_response}
+  defp reconcile_delete(client, namespace, name, uid, expected, context, reason) do
+    case client.get_job(namespace, name, context) do
+      {:error, :not_found} ->
+        :ok
+
+      {:ok, job} ->
+        cond do
+          not JobSpec.owned_job_for_cleanup?(job, expected) ->
+            {:held, :job_identity_or_spec_mismatch}
+
+          get_in(job, ["metadata", "uid"]) != uid ->
+            {:held, :job_allocation_identity_mismatch}
+
+          true ->
+            {:held, {:job_delete_outcome_uncertain, reason}}
         end
+
+      {:error, read_reason} ->
+        {:held, {:job_delete_and_read_uncertain, reason, read_reason}}
+
+      _ ->
+        {:held, {:job_delete_and_read_uncertain, reason, :invalid_read_response}}
     end
   end
 

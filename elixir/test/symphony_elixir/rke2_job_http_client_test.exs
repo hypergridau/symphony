@@ -176,7 +176,7 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     |> put_in(["spec", "parallelism"], 1)
     |> put_in(["spec", "completionMode"], "NonIndexed")
     |> put_in(["spec", "manualSelector"], false)
-    |> put_in(["spec", "suspend"], false)
+    |> put_in(["spec", "suspend"], true)
     |> put_in(["spec", "podReplacementPolicy"], "TerminatingOrFailed")
     |> put_in(["spec", "selector"], %{"matchLabels" => %{"batch.kubernetes.io/controller-uid" => uid}})
     |> put_in(["spec", "template", "metadata", "creationTimestamp"], nil)

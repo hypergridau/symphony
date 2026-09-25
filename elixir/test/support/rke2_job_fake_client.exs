@@ -14,10 +14,16 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
   @impl true
   def delete_job(namespace, name, uid, agent) do
     Agent.get_and_update(agent, fn state ->
-      if state.delete_error do
-        {{:error, state.delete_error}, state}
-      else
-        delete_from_state(state, namespace, name, uid)
+      case {state.delete_error, Map.get(state, :delete_commit?, false)} do
+        {nil, _commit?} ->
+          delete_from_state(state, namespace, name, uid)
+
+        {reason, true} ->
+          {_response, next} = delete_from_state(state, namespace, name, uid)
+          {{:error, reason}, next}
+
+        {reason, false} ->
+          {{:error, reason}, state}
       end
     end)
   end
@@ -91,7 +97,7 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
     |> put_in(["spec", "parallelism"], 1)
     |> put_in(["spec", "completionMode"], "NonIndexed")
     |> put_in(["spec", "manualSelector"], false)
-    |> put_in(["spec", "suspend"], false)
+    |> put_in(["spec", "suspend"], true)
     |> put_in(["spec", "podReplacementPolicy"], "TerminatingOrFailed")
     |> put_in(["spec", "selector"], %{"matchLabels" => selector})
     |> put_in(["spec", "template", "metadata", "creationTimestamp"], nil)

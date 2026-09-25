@@ -16,7 +16,8 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
           create_error: nil,
           create_commit?: true,
           get_error: nil,
-          delete_error: nil
+          delete_error: nil,
+          delete_commit?: false
         }
       end)
 
@@ -33,6 +34,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     refute next_generation["metadata"]["name"] == job["metadata"]["name"]
     assert job["metadata"]["name"] =~ ~r/\Asymphony-[a-f0-9]{24}\z/
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/assignment-sha256"] == assignment.sha256
+    assert job["spec"]["suspend"] == true
 
     container = get_in(job, ["spec", "template", "spec", "containers"]) |> hd()
     pod = get_in(job, ["spec", "template", "spec"])
@@ -120,7 +122,8 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
           create_error: :timeout,
           create_commit?: false,
           get_error: {:error, :timeout},
-          delete_error: nil
+          delete_error: nil,
+          delete_commit?: false
         }
       end)
 
@@ -174,7 +177,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert {:held, {:job_read_failed, :timeout}} = Provider.delete(assignment, opts(client))
 
     Agent.update(client, &%{&1 | get_error: nil, delete_error: :timeout})
-    assert {:held, {:job_delete_failed, :timeout}} = Provider.delete(assignment, opts(client))
+    assert {:held, {:job_delete_outcome_uncertain, :timeout}} = Provider.delete(assignment, opts(client))
     assert Agent.get(client, &Map.has_key?(&1.jobs, key))
     assert get_in(job, ["metadata", "uid"]) == get_in(Agent.get(client, &Map.fetch!(&1.jobs, key)), ["metadata", "uid"])
   end
