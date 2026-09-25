@@ -26,6 +26,8 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
       %{
         events: [],
         faults: Keyword.get(opts, :faults, %{}),
+        invalid_allocation_response: Keyword.get(opts, :invalid_allocation_response, false),
+        invalid_result_ack: Keyword.get(opts, :invalid_result_ack, false),
         result: Keyword.get(opts, :result),
         checkout_mismatch: Keyword.get(opts, :checkout_mismatch, false),
         checkout_failure: Keyword.get(opts, :checkout_failure, false),
@@ -42,7 +44,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   @impl true
   def allocate_or_reconcile(assignment, idempotency_key, pid) do
     with_event(pid, {:allocate_or_reconcile, idempotency_key, assignment.sha256}, fn state ->
-      fail_once(state, :allocate, {:ok, %{id: "allocation-fixture-1", status: :ready}})
+      allocation_response(state)
     end)
   end
 
@@ -71,7 +73,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   @impl true
   def publish_or_reconcile_result(allocation, assignment, execution_result, idempotency_key, pid) do
     with_event(pid, {:publish_or_reconcile_result, allocation.id, assignment.sha256, execution_result, idempotency_key}, fn state ->
-      fail_once(state, :result, {:ok, "result-fixture-1"})
+      result_response(state)
     end)
   end
 
@@ -139,6 +141,17 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
     receipt = if state.checkout_mismatch, do: %{receipt | branch: "codex/other"}, else: receipt
     {{:ok, receipt}, state}
   end
+
+  defp allocation_response(%{invalid_allocation_response: true} = state),
+    do: {:unexpected_allocation_response, %{state | invalid_allocation_response: false}}
+
+  defp allocation_response(state),
+    do: fail_once(state, :allocate, {:ok, %{id: "allocation-fixture-1", status: :ready}})
+
+  defp result_response(%{invalid_result_ack: true} = state),
+    do: {{:ok, ""}, %{state | invalid_result_ack: false}}
+
+  defp result_response(state), do: fail_once(state, :result, {:ok, "result-fixture-1"})
 
   defp result(%{result: nil}, assignment), do: result(%{result: :default}, assignment)
 

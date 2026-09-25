@@ -56,6 +56,49 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert keys == ["#{assignment.sha256}:allocation", "#{assignment.sha256}:allocation"]
   end
 
+  test "fails closed on a persisted lifecycle record with missing phase fields" do
+    {adapter, journal, opts} = ports()
+    assignment = assignment()
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+
+    malformed = %{
+      schema_version: 1,
+      key: key,
+      assignment_digest: assignment.sha256,
+      phase: :terminal,
+      version: 0
+    }
+
+    assert :ok = FakeJournal.compare_and_swap(key, 0, malformed, journal)
+    assert {:error, :invalid_lifecycle_journal} = ManagedExecutor.run(assignment, opts)
+    assert FakeAdapter.events(adapter) == []
+  end
+
+  test "does not advance when allocation reconciliation returns an invalid response" do
+    {adapter, _journal, opts} = ports(invalid_allocation_response: true)
+    assignment = assignment()
+
+    assert {:held, :invalid_allocation, %{phase: :allocation_pending}} = ManagedExecutor.run(assignment, opts)
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
+
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :allocate_or_reconcile)) == 2
+    assert Enum.count(events, &(elem(&1, 0) == :execute)) == 1
+  end
+
+  test "reconciles an empty result acknowledgement without executing again" do
+    {adapter, _journal, opts} = ports(invalid_result_ack: true)
+    assignment = assignment()
+
+    assert {:held, :invalid_result_acknowledgement, %{phase: :result_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :execute)) == 1
+    assert Enum.count(events, &(elem(&1, 0) == :publish_or_reconcile_result)) == 2
+  end
+
   test "holds an unknown execution outcome after crash and never executes it twice" do
     {adapter, _journal, opts} = ports(faults: %{execute: 1})
     assignment = assignment()
@@ -180,6 +223,31 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assert {:held, :cleanup_unverified, %{phase: :cleanup_pending}} = ManagedExecutor.run(assignment, opts)
     assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :verify_terminal_cleanup))
+  end
+
+  test "re-verifies a terminal record and holds if cleanup signature verification fails" do
+    {adapter, journal, opts} = ports()
+    assignment = assignment()
+
+    assert {:ok, %{phase: :terminal} = terminal} = ManagedExecutor.run(assignment, opts)
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+
+    assert {:ok, ^terminal} = FakeJournal.load(key, journal)
+
+    tampered = %{
+      terminal
+      | version: terminal.version + 1,
+        cleanup_evidence: %{terminal.cleanup_evidence | signature: "invalid-signature"}
+    }
+
+    assert :ok = FakeJournal.compare_and_swap(key, terminal.version, tampered, journal)
+
+    assert {:held, :terminal_cleanup_reverification_failed, %{phase: :terminal}} =
+             ManagedExecutor.run(assignment, opts)
+
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :allocate_or_reconcile)) == 1
+    assert Enum.count(events, &(elem(&1, 0) == :verify_terminal_cleanup)) == 2
   end
 
   test "rejects a changed assignment on replay even when issue and generation match" do
