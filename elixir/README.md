@@ -761,6 +761,18 @@ callbacks; it does not implement a broker or issue credentials. Admission stays 
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
 
+The HGS-729 RKE2 provider is a separate source-only port. Callers must pass an assignment
+bundle built from an upstream signature-verified manifest entry. The provider validates
+the canonical bundle and `internal_beta`/`rke2` placement; it does not verify the manifest
+signature itself. It compiles the bundle into a deterministic Job using a digest-pinned
+image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
+an ephemeral workspace, restricted container security, bounded resources, and a deadline.
+The fakeable client contract supports create/get/delete reconciliation; a same-name Job
+with a different assignment or spec is held, and deletion requires an exact identity and
+server UID. No live Kubernetes client, cluster configuration, credentials, Pod, or spawn
+path is provided or qualified by this source slice. See the
+[managed responsibility contract](../docs/responsibility-delegation.md#managed-assignment-bundle).
+
 Pause the existing global gate before replacing the manifest or its digest, then restart the
 supervised pool and verify its readiness before resuming. This is explicit runtime-owner
 configuration, not a worker-editable authorization file. A restart never silently revives a
