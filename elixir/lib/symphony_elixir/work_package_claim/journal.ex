@@ -480,9 +480,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
     ]
 
     Enum.all?(string_fields, &present_string?(Map.get(reservation, &1))) and
-      Enum.all?([:workspace_id, :company_id], fn key ->
-        not Map.has_key?(reservation, key) or present_string?(Map.get(reservation, key))
-      end) and
+      valid_scope_ids?(reservation) and
       is_integer(reservation[:generation]) and reservation[:generation] > 0 and
       is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
       Enum.all?(reservation[:scope_keys], &present_string?/1) and
@@ -492,6 +490,12 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   end
 
   defp valid_reservation?(_reservation), do: false
+
+  defp valid_scope_ids?(reservation) do
+    Enum.all?([:workspace_id, :company_id], fn key ->
+      not Map.has_key?(reservation, key) or present_string?(Map.get(reservation, key))
+    end)
+  end
 
   defp valid_cleanup_receipts?(receipts) when is_map(receipts) do
     Enum.all?(receipts, fn {kind, receipt} ->
