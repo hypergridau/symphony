@@ -7,7 +7,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
   alias SymphonyElixir.RKE2Job.{JobSpec, Provider}
 
   setup do
-    {:ok, client} = Agent.start_link(fn -> %{jobs: %{}, creates: 0, deletes: []} end)
+    {:ok, client} = Agent.start_link(fn -> %{jobs: %{}, creates: 0, deletes: [], create_error: nil} end)
     %{client: client}
   end
 
@@ -66,6 +66,14 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert Agent.get(client, & &1.creates) == 1
   end
 
+  test "reconciles a create timeout by reading the defaulted Job", %{client: client} do
+    Agent.update(client, &%{&1 | create_error: :timeout})
+
+    assert {:ok, created} = Provider.ensure(assignment(), opts(client))
+    assert get_in(created, ["spec", "template", "spec", "dnsPolicy"]) == "ClusterFirst"
+    assert Agent.get(client, & &1.creates) == 1
+  end
+
   test "rejects a tampered bundle before the client can create anything", %{client: client} do
     assert {:error, :assignment_bundle_digest_mismatch} =
              Provider.ensure(%{assignment() | branch: "codex/tampered"}, opts(client))
@@ -82,15 +90,31 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert {:held, :job_identity_or_spec_mismatch} = Provider.ensure(assignment, opts(client))
   end
 
+  test "holds server-defaulted Jobs with security-relevant drift", %{client: client} do
+    assignment = assignment()
+    assert {:ok, created} = Provider.ensure(assignment, opts(client))
+    key = {config().namespace, created["metadata"]["name"]}
+
+    tampered = [
+      put_in(created, ["spec", "template", "spec", "automountServiceAccountToken"], true),
+      put_in(created, ["spec", "template", "spec", "hostNetwork"], true),
+      put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "securityContext", "allowPrivilegeEscalation"], true),
+      put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "image"], "other@sha256:" <> String.duplicate("b", 64))
+    ]
+
+    for job <- tampered do
+      Agent.update(client, &put_in(&1, [:jobs, key], job))
+      assert {:held, :job_identity_or_spec_mismatch} = Provider.ensure(assignment, opts(client))
+    end
+  end
+
   test "delete requires the exact assignment identity and server UID", %{client: client} do
     assignment = assignment()
     assert {:ok, job} = Provider.ensure(assignment, opts(client))
-    stored = put_in(job, ["metadata", "uid"], "uid-exact")
-    key = {config().namespace, job["metadata"]["name"]}
-    Agent.update(client, &put_in(&1, [:jobs, key], stored))
+    uid = get_in(job, ["metadata", "uid"])
 
     assert :ok = Provider.delete(assignment, opts(client))
-    assert Agent.get(client, & &1.deletes) == ["uid-exact"]
+    assert Agent.get(client, & &1.deletes) == [uid]
     assert {:held, :job_not_found_for_delete} = Provider.delete(assignment, opts(client))
   end
 

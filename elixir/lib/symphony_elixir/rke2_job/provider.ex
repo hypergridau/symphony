@@ -42,8 +42,8 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     case client.create_job(namespace, expected, context) do
       {:ok, created} -> verify_owned(created, expected)
       {:error, :already_exists} -> get_existing(client, namespace, name, expected, context)
-      {:error, reason} -> {:error, {:job_create_failed, reason}}
-      _ -> {:held, :invalid_job_create_response}
+      {:error, reason} -> reconcile_uncertain_create(client, namespace, name, expected, context, reason)
+      _ -> reconcile_uncertain_create(client, namespace, name, expected, context, :invalid_create_response)
     end
   end
 
@@ -53,6 +53,15 @@ defmodule SymphonyElixir.RKE2Job.Provider do
       {:error, :not_found} -> {:held, :job_create_race_unresolved}
       {:error, reason} -> {:held, {:job_read_failed, reason}}
       _ -> {:held, :invalid_job_read_response}
+    end
+  end
+
+  defp reconcile_uncertain_create(client, namespace, name, expected, context, reason) do
+    case client.get_job(namespace, name, context) do
+      {:ok, existing} -> verify_owned(existing, expected)
+      {:error, :not_found} -> {:held, {:job_create_outcome_uncertain, reason}}
+      {:error, read_reason} -> {:held, {:job_create_and_read_uncertain, reason, read_reason}}
+      _ -> {:held, {:job_create_and_read_uncertain, reason, :invalid_read_response}}
     end
   end
 
