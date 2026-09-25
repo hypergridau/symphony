@@ -6,12 +6,13 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   the signed assignment contract and non-secret references only; host credentials
   belong to the execution adapter and must never be returned here.
 
-  Credential lease acquisition must reconcile by key and return only an exact
-  assignment/allocation binding. If a result cannot be returned in that shape,
-  the adapter must leave no active lease behind; replay of an uncertain result
-  must resolve to the same lease or a denial. Renewal must reconcile by key and
-  preserve the lease reference. It must not create an alternate active lease if
-  its result cannot be returned. Revocation is idempotent. Execution adapters
+  Credential lease references are non-authorizing, non-secret identifiers using
+  only ASCII letters, digits, colon, underscore, or hyphen. Acquisition and
+  renewal reconcile by key. A malformed response with a safe reference is
+  durably quarantined by the journal and revoked before abort. An unsafe or
+  absent reference is quarantined by the stable acquire/renew request key and
+  revoked through the request-reconciliation port. Revocation by reference or
+  request key is idempotent and verifies ownership before revoking. Execution adapters
   must recheck lease expiry at the side-effect boundary, since journal persistence
   can take long enough for a locally checked expiry to pass.
   """
@@ -75,7 +76,9 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
               {:ok, credential_lease()} | {:error, :denied | term()}
   @callback renew_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
               {:ok, credential_lease()} | {:error, :denied | term()}
-  @callback revoke_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
+  @callback revoke_credential_lease(allocation(), assignment(), String.t(), String.t(), term()) ::
+              :ok | {:error, term()}
+  @callback revoke_credential_lease_request(allocation(), assignment(), String.t(), String.t(), term()) ::
               :ok | {:error, term()}
   @callback execute(allocation(), assignment(), checkout_receipt(), credential_lease(), String.t(), term()) ::
               {:ok, execution_result()} | {:error, term()}

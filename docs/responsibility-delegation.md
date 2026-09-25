@@ -178,11 +178,16 @@ not lifecycle fields.
 Before execution, the typed adapter acquires a JIT credential lease bound to the
 assignment digest and allocation, renews it using a stable key, and refuses to
 execute when the lease is denied or expired. The lease record contains only a
-non-secret reference and expiry. Cleanup revokes that lease before accepting
-terminal evidence; abort cleanup revokes it when one was acquired. Lifecycle
-journal schema v2 adds this lease state and rejects old v1 records rather than
-interpreting their execution state without a lease. These are port semantics
-only: no broker, credential issuance, or host integration is implemented.
+non-secret reference and expiry. A malformed response with a safe reference is
+written as candidate-revocation debt before the adapter is asked to revoke it;
+replay retries that same reference and key. An unsafe or absent reference is
+quarantined by the stable acquire/renew request key; replay retries revoke by
+request before abort. Cleanup revokes the accepted lease
+before terminal evidence; abort cleanup revokes it when one was acquired.
+Lifecycle journal schema v3 adds candidate revocation debt and rejects v1/v2
+records rather than interpreting their state without the expanded lease
+lifecycle. These are port semantics only: no broker, credential issuance, or
+host integration is implemented.
 
 The journal uses versioned compare-and-swap and must be durable and atomic in any
 future implementation. Allocation and checkout interruptions can retry through

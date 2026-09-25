@@ -61,6 +61,12 @@ defmodule SymphonyElixir.ManagedExecutor do
   defp advance(%{phase: :abort_cleanup_pending} = record, assignment, ports),
     do: ensure_abort_cleanup(record, assignment, ports)
 
+  defp advance(%{phase: :credential_candidate_revocation_pending} = record, assignment, ports),
+    do: revoke_candidate_lease(record, assignment, ports)
+
+  defp advance(%{phase: :credential_request_revocation_pending} = record, assignment, ports),
+    do: revoke_candidate_request(record, assignment, ports)
+
   defp advance(%{phase: :execution_started} = record, assignment, ports) do
     case reconcile_execution(record, assignment, ports) do
       {:ok, nil} -> {:held, :execution_outcome_unknown, record}
@@ -173,7 +179,7 @@ defmodule SymphonyElixir.ManagedExecutor do
       {:ok, lease} -> save_credential_lease(record, lease, assignment, ports)
       {:error, :denied} -> abort_before_execution(record, assignment, :credential_lease_denied, ports)
       {:error, _reason} -> {:held, :credential_lease_acquisition_failed, record}
-      _ -> {:held, :invalid_credential_lease, record}
+      _ -> quarantine_candidate_request(record, assignment, ports, :acquire)
     end
   end
 
@@ -193,15 +199,18 @@ defmodule SymphonyElixir.ManagedExecutor do
         {:ok, renewed} -> save_renewed_credential_lease(record, renewed, assignment, ports)
         {:error, :denied} -> revoke_before_abort(record, assignment, :credential_lease_denied, ports)
         {:error, _reason} -> {:held, :credential_lease_renewal_failed, record}
-        _ -> {:held, :invalid_credential_lease, record}
+        _ -> quarantine_candidate_request(record, assignment, ports, :renew)
       end
     end
   end
 
   defp save_credential_lease(record, lease, assignment, ports) do
     case Record.validate_credential_lease(lease, record.allocation, assignment) do
-      :ok -> persist_or_revoke_credential_lease(record, lease, assignment, ports)
-      {:error, _reason} -> {:held, :invalid_credential_lease, record}
+      :ok ->
+        persist_or_revoke_credential_lease(record, lease, assignment, ports)
+
+      {:error, _reason} ->
+        quarantine_candidate_lease(record, lease, assignment, ports, :credential_lease_invalid, :acquire)
     end
   end
 
@@ -222,10 +231,10 @@ defmodule SymphonyElixir.ManagedExecutor do
         persist_renewed_credential_lease(record, renewed, assignment, ports)
 
       :ok ->
-        revoke_before_abort(record, assignment, :credential_lease_invalid, ports)
+        quarantine_candidate_lease(record, renewed, assignment, ports, :credential_lease_invalid, :renew)
 
       _ ->
-        {:held, :invalid_credential_lease, record}
+        quarantine_candidate_request(record, assignment, ports, :renew)
     end
   end
 
@@ -244,7 +253,7 @@ defmodule SymphonyElixir.ManagedExecutor do
     case ports.adapter.revoke_credential_lease(
            record.allocation,
            assignment,
-           lease,
+           lease.lease_ref,
            key(assignment, "credential-revoke"),
            ports.adapter_context
          ) do
@@ -264,10 +273,64 @@ defmodule SymphonyElixir.ManagedExecutor do
     ports.adapter.revoke_credential_lease(
       record.allocation,
       assignment,
-      record.credential_lease,
+      record.credential_lease.lease_ref,
       key(assignment, "credential-revoke"),
       ports.adapter_context
     )
+  end
+
+  defp quarantine_candidate_lease(record, lease, assignment, ports, reason, operation) do
+    case Record.candidate_lease_ref(lease) do
+      nil ->
+        quarantine_candidate_request(record, assignment, ports, operation)
+
+      ref ->
+        case checkpoint(record, :credential_candidate_revocation_pending, ports, %{candidate_lease_ref: ref}) do
+          {:ok, pending} -> revoke_candidate_lease(pending, assignment, ports, reason)
+          {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
+        end
+    end
+  end
+
+  defp quarantine_candidate_request(record, assignment, ports, operation) do
+    attrs = %{candidate_lease_operation: operation}
+
+    case checkpoint(record, :credential_request_revocation_pending, ports, attrs) do
+      {:ok, pending} -> revoke_candidate_request(pending, assignment, ports)
+      {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
+    end
+  end
+
+  defp revoke_candidate_request(record, assignment, ports) do
+    operation_key = key(assignment, "credential-#{record.candidate_lease_operation}")
+    revoke_key = key(assignment, "credential-request-revoke:#{record.candidate_lease_operation}")
+
+    case ports.adapter.revoke_credential_lease_request(
+           record.allocation,
+           assignment,
+           operation_key,
+           revoke_key,
+           ports.adapter_context
+         ) do
+      :ok -> abort_before_execution(record, assignment, :credential_lease_invalid, ports)
+      _ -> {:held, :credential_lease_candidate_revocation_failed, record}
+    end
+  end
+
+  defp revoke_candidate_lease(record, assignment, ports, reason \\ :credential_lease_invalid) do
+    ref = record.candidate_lease_ref
+    revoke_key = key(assignment, "credential-candidate-revoke:#{:crypto.hash(:sha256, ref) |> Base.encode16(case: :lower)}")
+
+    case ports.adapter.revoke_credential_lease(
+           record.allocation,
+           assignment,
+           ref,
+           revoke_key,
+           ports.adapter_context
+         ) do
+      :ok -> abort_before_execution(record, assignment, reason, ports)
+      _ -> {:held, :credential_lease_candidate_revocation_failed, record}
+    end
   end
 
   defp execute_started(record, assignment, ports) do
@@ -417,7 +480,9 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp abort_before_execution(record, assignment, reason, ports) do
-    case checkpoint(record, :abort_pending, ports, %{abort_reason: reason}) do
+    attrs = %{abort_reason: reason, candidate_lease_ref: nil}
+
+    case checkpoint(record, :abort_pending, ports, attrs) do
       {:ok, pending} -> advance(pending, assignment, ports)
       {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
     end
@@ -516,6 +581,7 @@ defmodule SymphonyElixir.ManagedExecutor do
         {:acquire_credential_lease, 4},
         {:renew_credential_lease, 5},
         {:revoke_credential_lease, 5},
+        {:revoke_credential_lease_request, 5},
         {:execute, 6},
         {:reconcile_execution, 6},
         {:publish_or_reconcile_result, 5},

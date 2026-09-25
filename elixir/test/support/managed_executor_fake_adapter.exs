@@ -52,9 +52,11 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         credential_expired: Keyword.get(opts, :credential_expired, false),
         credential_renew_denied: Keyword.get(opts, :credential_renew_denied, false),
         credential_wrong_binding: Keyword.get(opts, :credential_wrong_binding, false),
+        credential_unsafe_ref: Keyword.get(opts, :credential_unsafe_ref, false),
         credential_renew_wrong_ref: Keyword.get(opts, :credential_renew_wrong_ref, false),
         credential_short_renewal: Keyword.get(opts, :credential_short_renewal, false),
         credential_leases: %{},
+        credential_renewals: %{},
         active_credential_refs: [],
         credential_material: "synthetic-secret-value"
       }
@@ -92,18 +94,26 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
     end
   end
 
-  defp create_credential_lease(%{credential_wrong_binding: true} = state, allocation, assignment, _key) do
-    lease = make_credential_lease(state, allocation, assignment)
-    {{:ok, lease}, %{state | credential_wrong_binding: false}}
+  defp create_credential_lease(%{credential_wrong_binding: true} = state, allocation, assignment, key) do
+    lease = make_credential_lease(state, allocation, assignment) |> maybe_unsafe_lease_ref(state)
+    refs = Enum.uniq([lease.lease_ref | state.active_credential_refs])
+    leases = Map.put(state.credential_leases, key, lease)
+
+    {{:ok, lease}, %{state | credential_wrong_binding: false, active_credential_refs: refs, credential_leases: leases}}
   end
 
   defp create_credential_lease(state, allocation, assignment, key) do
-    lease = make_credential_lease(state, allocation, assignment)
+    lease = make_credential_lease(state, allocation, assignment) |> maybe_unsafe_lease_ref(state)
     leases = Map.put(state.credential_leases, key, lease)
     refs = Enum.uniq([lease.lease_ref | state.active_credential_refs])
     next = %{state | credential_leases: leases, active_credential_refs: refs, credential_expired: false}
     fail_once(next, :credential_acquire, {:ok, lease})
   end
+
+  defp maybe_unsafe_lease_ref(lease, %{credential_unsafe_ref: true}),
+    do: %{lease | lease_ref: "unsafe.secret.material"}
+
+  defp maybe_unsafe_lease_ref(lease, _state), do: lease
 
   defp make_credential_lease(state, allocation, assignment) do
     expiry = credential_expiry(state)
@@ -128,18 +138,21 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   @impl true
   def renew_credential_lease(allocation, assignment, lease, idempotency_key, pid) do
     event = {:renew_credential_lease, allocation.id, assignment.sha256, lease.lease_ref, idempotency_key}
-    with_event(pid, event, &renew_credential_lease_response(&1, lease))
+    with_event(pid, event, &renew_credential_lease_response(&1, lease, idempotency_key))
   end
 
-  defp renew_credential_lease_response(%{credential_renew_denied: true} = state, _lease),
+  defp renew_credential_lease_response(%{credential_renew_denied: true} = state, _lease, _key),
     do: {{:error, :denied}, %{state | credential_renew_denied: false}}
 
-  defp renew_credential_lease_response(state, lease) do
+  defp renew_credential_lease_response(state, lease, key) do
     expires_at_ms = renewed_expiry(state)
     lease_ref = renewed_lease_ref(state, lease)
-    next = %{state | credential_short_renewal: false}
-    renewed = %{lease | lease_ref: lease_ref, expires_at_ms: expires_at_ms}
-    fail_once(next, :credential_renew, {:ok, renewed})
+    refs = Enum.uniq([lease_ref | state.active_credential_refs])
+    next = %{state | credential_short_renewal: false, active_credential_refs: refs}
+    renewed = %{lease | lease_ref: lease_ref, expires_at_ms: expires_at_ms} |> maybe_unsafe_lease_ref(state)
+    renewals = Map.put(next.credential_renewals, key, renewed)
+    refs = Enum.uniq([renewed.lease_ref | next.active_credential_refs])
+    fail_once(%{next | credential_renewals: renewals, active_credential_refs: refs}, :credential_renew, {:ok, renewed})
   end
 
   defp renewed_lease_ref(%{credential_renew_wrong_ref: true}, _lease), do: "credential-lease-fixture-2"
@@ -149,9 +162,9 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   defp renewed_expiry(_state), do: System.system_time(:millisecond) + 60_000
 
   @impl true
-  def revoke_credential_lease(allocation, assignment, lease, idempotency_key, pid) do
-    with_event(pid, {:revoke_credential_lease, allocation.id, assignment.sha256, lease.lease_ref, idempotency_key}, fn state ->
-      revoke_credential_lease_response(state, lease)
+  def revoke_credential_lease(allocation, assignment, lease_ref, idempotency_key, pid) do
+    with_event(pid, {:revoke_credential_lease, allocation.id, assignment.sha256, lease_ref, idempotency_key}, fn state ->
+      revoke_credential_lease_response(state, lease_ref)
     end)
     |> case do
       {:ok, _} -> :ok
@@ -159,9 +172,28 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
     end
   end
 
-  defp revoke_credential_lease_response(state, lease) do
+  @impl true
+  def revoke_credential_lease_request(allocation, assignment, request_key, revoke_key, pid) do
+    with_event(
+      pid,
+      {:revoke_credential_lease_request, allocation.id, assignment.sha256, request_key, revoke_key},
+      fn state ->
+        lease = Map.get(state.credential_leases, request_key) || Map.get(state.credential_renewals, request_key)
+        if is_map(lease), do: revoke_credential_lease_response(state, lease.lease_ref), else: {:ok, state}
+      end
+    )
+    |> case do
+      {:ok, _} -> :ok
+      other -> other
+    end
+  end
+
+  defp revoke_credential_lease_response(state, lease_ref) do
     {response, next} = fail_once(state, :credential_revoke, :ok)
-    if response == :ok, do: {:ok, %{next | active_credential_refs: List.delete(next.active_credential_refs, lease.lease_ref)}}, else: {response, next}
+
+    if response == :ok,
+      do: {:ok, %{next | active_credential_refs: List.delete(next.active_credential_refs, lease_ref)}},
+      else: {response, next}
   end
 
   @impl true
