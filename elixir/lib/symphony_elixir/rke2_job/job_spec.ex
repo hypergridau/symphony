@@ -98,7 +98,6 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
     else
       {:error, _reason} = error -> error
       false -> {:error, :rke2_job_assignment_too_large}
-      _ -> {:error, :invalid_rke2_job_assignment}
     end
   end
 
