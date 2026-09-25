@@ -76,6 +76,7 @@ defmodule Mix.Tasks.QualityBaseline.Check do
     {output, status} = System.cmd("mix", ["credo", "--strict", "--format", "json"], stderr_to_stdout: true)
 
     unless status in [0, 1, 12] do
+      Mix.shell().error(output)
       Mix.raise("Credo failed before producing findings (exit #{status})")
     end
 
