@@ -432,10 +432,17 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
 
+    fence_path = path <> ".fence"
+    graph_path = path <> ".graph"
+    :ok = ExecutionFence.Persistence.save(fence_path, input.fence_state)
+    :ok = ResponsibilityGraph.Persistence.save(graph_path, input.responsibility_graph)
+
     state = %Orchestrator.State{
       execution_fence: input.fence_state,
       responsibility_graph: input.responsibility_graph,
-      work_package_runtime: runtime
+      work_package_runtime: runtime,
+      execution_fence_path: fence_path,
+      responsibility_graph_path: graph_path
     }
 
     task_supervisor = start_supervised!({Task.Supervisor, name: Module.concat(__MODULE__, "ClaimPause#{System.unique_integer([:positive])}")})
@@ -487,6 +494,12 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert after_pause.execution_fence.executions[@issue_id].leases[lease.session_id].status == :released
     assert after_pause.execution_fence.executions[@issue_id].leases[lease.session_id].release_reason == :spawn_failed
     assert after_pause.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
+    assert {:ok, persisted_fence} = ExecutionFence.Persistence.load(fence_path)
+    assert persisted_fence.executions[@issue_id].leases[lease.session_id].status == :released
+    assert persisted_fence.executions[@issue_id].leases[lease.session_id].release_reason == "spawn_failed"
+    assert {:ok, persisted_graph} = ResponsibilityGraph.Persistence.load(graph_path)
+    assert persisted_graph.delegations["delegation-349"].runtime_lease == nil
+    assert persisted_graph.delegations["delegation-349"].status == :active
     assert {:ok, journal_after_pause} = Journal.load(path)
     [{_key, reservation_after_pause}] = Map.to_list(journal_after_pause.reservations)
     assert reservation_after_pause.dispatch.phase == "recovery_pending"
