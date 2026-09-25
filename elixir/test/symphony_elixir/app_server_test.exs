@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  alias SymphonyElixir.Codex.ModelRouter
+
   import SymphonyElixir.TestSupport,
     only: [
       path_env: 2,
@@ -1985,7 +1987,7 @@ defmodule SymphonyElixir.AppServerTest do
                  issue,
                  worker_host: "worker-01:2200",
                  model_route:
-                   SymphonyElixir.Codex.ModelRouter.resolve(
+                   ModelRouter.resolve(
                      %{issue | labels: ["model:gpt-6-luna"]},
                      nil
                    )

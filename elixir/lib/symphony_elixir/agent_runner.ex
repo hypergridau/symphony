@@ -134,14 +134,18 @@ defmodule SymphonyElixir.AgentRunner do
     fn message ->
       update = Map.merge(message, identity)
 
-      if Keyword.get(opts, :managed_model_route, false) and update[:event] == :turn_failed do
-        case GenServer.call(recipient, {:managed_failed_turn, issue.id, update}, 60_000) do
-          :ok -> :ok
-          {:error, reason} -> raise RuntimeError, "Managed failed-turn evidence was not persisted: #{inspect(reason)}"
-        end
-      end
+      persist_managed_failed_turn(recipient, issue, update, opts)
 
       send_codex_update(recipient, issue, update)
+    end
+  end
+
+  defp persist_managed_failed_turn(recipient, issue, update, opts) do
+    if Keyword.get(opts, :managed_model_route, false) and update[:event] == :turn_failed do
+      case GenServer.call(recipient, {:managed_failed_turn, issue.id, update}, 60_000) do
+        :ok -> :ok
+        {:error, reason} -> raise RuntimeError, "Managed failed-turn evidence was not persisted: #{inspect(reason)}"
+      end
     end
   end
 

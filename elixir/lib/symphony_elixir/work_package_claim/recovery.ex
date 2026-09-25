@@ -261,17 +261,32 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
   defp recover(runtime, fence, graph, issue, attempt, now_ms, execution) do
     with path when is_binary(path) <- runtime[:journal_path],
          {:ok, journal} <- Journal.load(path),
-         {:ok, reservation} <- Dispatch.find(journal, issue.id, runtime.managed_project_profile_id, execution.repository, execution.generation),
+         {:ok, reservation} <-
+           Dispatch.find(
+             journal,
+             issue.id,
+             runtime.managed_project_profile_id,
+             execution.repository,
+             execution.generation
+           ),
          :ok <- Dispatch.retry_status(reservation, now_ms),
          input = Map.merge(runtime, %{repository_ref: execution.repository}),
          true <- same_authority?(reservation, runtime, input),
          {:ok, fence} <- ExecutionFence.reconcile_unstarted_claim(fence, reservation),
          lease = runtime_lease(reservation),
          {:ok, graph} <- reconcile_graph(graph, reservation.responsible_delegation_id, lease, now_ms),
-         {:ok, graph} <- Admission.prepare(graph, fence, runtime[:managed_delegations], issue, attempt, now_ms, runtime),
-         {:ok, delegation} <- ResponsibilityGraph.admission_delegation(graph, issue.id, issue.identifier, execution.repository),
+         {:ok, graph} <-
+           Admission.prepare(graph, fence, runtime[:managed_delegations], issue, attempt, now_ms, runtime),
+         {:ok, delegation} <-
+           ResponsibilityGraph.admission_delegation(graph, issue.id, issue.identifier, execution.repository),
          true <- delegation.id == reservation.responsible_delegation_id and delegation.runtime_lease == lease do
-      {:ok, fence, graph, %{token: %{issue_id: issue.id, generation: reservation.generation}, session_id: reservation.session_id, delegation_id: delegation.id, runtime_lease: lease}}
+      {:ok, fence, graph,
+       %{
+         token: %{issue_id: issue.id, generation: reservation.generation},
+         session_id: reservation.session_id,
+         delegation_id: delegation.id,
+         runtime_lease: lease
+       }}
     else
       {:error, _reason} = error -> error
       :missing -> {:error, :claim_recovery_journal_missing}

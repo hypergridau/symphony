@@ -71,7 +71,12 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   @doc "Records an explicit Codex `turn/failed` event once for its admitted turn identity."
   @spec put_failed_worker_turn(state(), String.t(), String.t(), map()) ::
           {:ok, state()} | {:error, term()}
-  def put_failed_worker_turn(%{schema_version: @schema_version, reservations: reservations} = state, key, turn_key, evidence)
+  def put_failed_worker_turn(
+        %{schema_version: @schema_version, reservations: reservations} = state,
+        key,
+        turn_key,
+        evidence
+      )
       when is_binary(key) and is_binary(turn_key) and is_map(evidence) do
     case Map.get(reservations, key) do
       reservation when is_map(reservation) ->
@@ -100,8 +105,14 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   def put_failed_worker_turn(_state, _key, _turn_key, _evidence), do: {:error, :invalid_failed_worker_turn}
 
   @doc "Counts only persisted protocol failures for one exact managed issue and repository."
-  @spec failed_worker_turn_count(state(), String.t(), String.t(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  def failed_worker_turn_count(%{schema_version: @schema_version, reservations: reservations} = state, issue_id, profile_id, repository_ref)
+  @spec failed_worker_turn_count(state(), String.t(), String.t(), String.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def failed_worker_turn_count(
+        %{schema_version: @schema_version, reservations: reservations} = state,
+        issue_id,
+        profile_id,
+        repository_ref
+      )
       when is_binary(issue_id) and is_binary(profile_id) and is_binary(repository_ref) do
     with :ok <- validate(state) do
       count =
@@ -112,7 +123,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
             reservation.managed_project_profile_id == profile_id and
             reservation.repository_ref == repository_ref
         end)
-        |> Enum.reduce(0, fn reservation, total -> total + map_size(Map.get(reservation, :failed_worker_turns, %{})) end)
+        |> Enum.reduce(0, fn reservation, total ->
+          total + map_size(Map.get(reservation, :failed_worker_turns, %{}))
+        end)
 
       {:ok, count}
     end
@@ -472,19 +485,26 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   defp valid_cleanup_receipts?(_receipts), do: false
 
   defp valid_failed_worker_turns?(turns) when is_map(turns) do
-    Enum.all?(turns, fn {key, evidence} ->
-      is_binary(key) and byte_size(key) > 0 and byte_size(key) <= 512 and
-        is_map(evidence) and map_size(evidence) == 4 and
-        present_string?(Map.get(evidence, :thread_id)) and
-        present_string?(Map.get(evidence, :turn_id)) and
-        key == "#{Map.get(evidence, :thread_id)}:#{Map.get(evidence, :turn_id)}" and
-        is_integer(Map.get(evidence, :observed_at_ms)) and Map.get(evidence, :observed_at_ms) > 0 and
-        is_binary(Map.get(evidence, :payload_sha256)) and
-        String.match?(Map.get(evidence, :payload_sha256), ~r/\A[0-9a-f]{64}\z/)
-    end)
+    Enum.all?(turns, fn {key, evidence} -> valid_failed_worker_turn?(key, evidence) end)
   end
 
   defp valid_failed_worker_turns?(_turns), do: false
+
+  defp valid_failed_worker_turn?(key, %{thread_id: thread_id, turn_id: turn_id} = evidence) do
+    is_binary(key) and byte_size(key) > 0 and byte_size(key) <= 512 and
+      map_size(evidence) == 4 and present_string?(thread_id) and present_string?(turn_id) and
+      key == "#{thread_id}:#{turn_id}" and valid_failed_worker_turn_metadata?(evidence)
+  end
+
+  defp valid_failed_worker_turn?(_key, _evidence), do: false
+
+  defp valid_failed_worker_turn_metadata?(evidence) do
+    observed_at_ms = Map.get(evidence, :observed_at_ms)
+    payload_sha256 = Map.get(evidence, :payload_sha256)
+
+    is_integer(observed_at_ms) and observed_at_ms > 0 and is_binary(payload_sha256) and
+      String.match?(payload_sha256, ~r/\A[0-9a-f]{64}\z/)
+  end
 
   defp same_failed_turn?(existing, evidence) when is_map(existing) and is_map(evidence) do
     Map.take(existing, [:thread_id, :turn_id, :payload_sha256]) ==

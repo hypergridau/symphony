@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.WorkPackageClaimTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.{ExecutionFence, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.Codex.ModelRouter
+  alias SymphonyElixir.{ExecutionFence, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.Journal
 
@@ -80,7 +80,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     }
 
     assert {:ok, once} = Journal.put_failed_worker_turn(journal, key, "thread-349:turn-349", evidence)
-    assert {:ok, ^once} = Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{evidence | observed_at_ms: evidence.observed_at_ms + 1})
+    assert {:ok, ^once} =
+             Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{
+               evidence | observed_at_ms: evidence.observed_at_ms + 1
+             })
 
     assert {:error, :failed_worker_turn_conflict} =
              Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{evidence | payload_sha256: String.duplicate("b", 64)})

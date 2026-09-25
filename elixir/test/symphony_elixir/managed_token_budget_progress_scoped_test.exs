@@ -3,8 +3,8 @@ Code.require_file("../support/managed_responsibility_fixture.exs", __DIR__)
 defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{ExecutionFence, ManagedResponsibility, ManagedTokenBudget, Orchestrator, ResponsibilityGraph}
   alias SymphonyElixir.Codex.ModelRouter
+  alias SymphonyElixir.{ExecutionFence, ManagedResponsibility, ManagedTokenBudget, Orchestrator, ResponsibilityGraph}
   alias SymphonyElixir.ManagedResponsibility.Admission
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.ManagedTokenBudget.{Limit, Runtime}
@@ -184,9 +184,11 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert c.manifest.entries |> hd() |> get_in([:responsible, :budget, :model]) == "gpt-6-luna"
     assert c.manifest.entries |> hd() |> get_in([:responsible, :budget, :max_children]) == 0
 
-    assert {:ok, _} = Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, c.manifest, issue, 3, c.now)
+    assert {:ok, _} =
+             Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, c.manifest, issue, 3, c.now)
 
-    {:ok, stale_manifest} = ManagedResponsibility.decode(progress_payload(c.now, "gpt-5.6-luna"), Fixture.context(), c.now)
+    {:ok, stale_manifest} =
+      ManagedResponsibility.decode(progress_payload(c.now, "gpt-5.6-luna"), Fixture.context(), c.now)
 
     assert {:error, :managed_responsibility_budget_exceeded} =
              Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, stale_manifest, issue, nil, c.now)
@@ -207,7 +209,8 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
     assert {:error, :managed_responsibility_budget_mode_mismatch} =
              Admission.prepare(c.state.responsibility_graph, c.state.execution_fence, mixed_manifest, issue, nil, c.now)
 
-    bad_scope = put_in(Fixture.payload(c.now), ["entries", Access.at(0), "responsible", "scope", "repository"], "other/repository")
+    bad_scope =
+      put_in(Fixture.payload(c.now), ["entries", Access.at(0), "responsible", "scope", "repository"], "other/repository")
     assert {:error, _} = ManagedResponsibility.decode(bad_scope, Fixture.context(), c.now)
   end
 

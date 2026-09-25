@@ -93,7 +93,11 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
           %{"turnId" => "turn-failed-turn"}
         ] do
       assert {:error, :managed_failed_turn_identity_mismatch} =
-               GenServer.call(pid, {:managed_failed_turn, issue_id, put_in(update, [:payload, "params"], params)})
+               GenServer.call(pid, {
+                 :managed_failed_turn,
+                 issue_id,
+                 put_in(update, [:payload, "params"], params)
+               })
 
       assert File.read!(journal_path) == bytes
     end

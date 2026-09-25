@@ -33,10 +33,13 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
   def prepare(graph, fence, manifest, issue, _attempt, now_ms, runtime) do
     with true <- ResponsibilityGraph.enforced?(graph),
          :ok <- ExecutionFence.validate(fence),
-         {:ok, route} <- ModelRouter.resolve_managed_from_journal(issue, managed_model_runtime(runtime, manifest, fence, issue)),
+         {:ok, route} <-
+           ModelRouter.resolve_managed_from_journal(issue, managed_model_runtime(runtime, manifest, fence, issue)),
          :ok <- prior_repository_cleanup(fence, graph, manifest.repository_ref, issue.id, runtime, now_ms),
-         {:ok, next_graph} <- ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
-         {:ok, delegation} <- ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
+         {:ok, next_graph} <-
+           ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
+         {:ok, delegation} <-
+           ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
          :ok <- matching_budget_modes(next_graph, delegation),
          :ok <- route_budget(delegation.budget, route) do
       {:ok, next_graph}
