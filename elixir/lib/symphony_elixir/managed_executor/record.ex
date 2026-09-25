@@ -14,8 +14,25 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :cleanup_pending,
     :terminal,
     :abort_pending,
-    :aborted
+    :abort_result_pending,
+    :abort_cleanup_pending
   ]
+  @phase_fields %{
+    planned: [],
+    allocation_pending: [],
+    allocated: [:allocation],
+    checkout_pending: [:allocation],
+    checkout_ready: [:allocation, :checkout],
+    execution_started: [:allocation, :checkout],
+    result_recorded: [:allocation, :checkout, :execution_result],
+    result_pending: [:allocation, :checkout, :execution_result],
+    result_reported: [:allocation, :checkout, :execution_result, :result_ref],
+    cleanup_pending: [:allocation, :checkout, :execution_result, :result_ref],
+    terminal: [:allocation, :checkout, :execution_result, :result_ref, :cleanup_evidence],
+    abort_pending: [:allocation, :abort_reason],
+    abort_result_pending: [:allocation, :abort_reason, :pre_execution_result],
+    abort_cleanup_pending: [:allocation, :abort_reason, :pre_execution_result, :abort_result_ref]
+  }
   @checkout_phases [
     :checkout_ready,
     :execution_started,
@@ -124,41 +141,28 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   def validate_cleanup_evidence(_evidence, _allocation, _assignment, _result), do: {:error, :cleanup_evidence_invalid}
 
-  @spec validate_abort_cleanup_evidence(term(), map(), map(), atom()) ::
-          :ok | {:error, :abort_cleanup_evidence_invalid}
-  def validate_abort_cleanup_evidence(evidence, allocation, assignment, abort_reason) when is_map(evidence) do
+  @spec validate_pre_execution_result(term(), map(), atom()) :: :ok | {:error, :pre_execution_result_invalid}
+  def validate_pre_execution_result(result, assignment, abort_reason) when is_map(result) do
     expected = %{
-      contract_version: "managed-executor-abort-receipt.v1",
-      receipt_kind: "pre_execution_cleanup_verified",
       assignment_digest: assignment.sha256,
-      allocation_id: allocation.id,
-      issue_id: assignment.lease.issue_id,
-      generation: assignment.lease.generation,
-      session_id: assignment.lease.session_id,
-      process_id: assignment.lease.process_id,
-      repository_ref: assignment.repository_ref,
       abort_reason: abort_reason,
-      workspace_removed: true,
-      credentials_revoked: true,
-      reviewer_leases_released: true
+      outcome: :blocked,
+      summary: pre_execution_summary(abort_reason),
+      evidence_ref: "managed-executor:#{assignment.sha256}:#{abort_reason}"
     }
 
-    exact_keys =
-      MapSet.new(Map.keys(evidence)) ==
-        MapSet.new(Map.keys(expected) ++ [:evidence_ref, :checksum, :signer_id, :signature])
-
-    valid = Enum.all?(expected, fn {key, value} -> Map.get(evidence, key) == value end)
-    signed = Enum.all?([:evidence_ref, :signer_id, :signature], &nonempty_text?(Map.get(evidence, &1)))
-    checksum = Map.get(evidence, :checksum)
-    checksum_valid? = is_binary(checksum) and Regex.match?(~r/\A[a-f0-9]{64}\z/, checksum)
-
-    if exact_keys and valid and signed and checksum_valid?,
+    if MapSet.new(Map.keys(result)) == MapSet.new(Map.keys(expected)) and result == expected,
       do: :ok,
-      else: {:error, :abort_cleanup_evidence_invalid}
+      else: {:error, :pre_execution_result_invalid}
   end
 
-  def validate_abort_cleanup_evidence(_evidence, _allocation, _assignment, _abort_reason),
-    do: {:error, :abort_cleanup_evidence_invalid}
+  def validate_pre_execution_result(_result, _assignment, _abort_reason),
+    do: {:error, :pre_execution_result_invalid}
+
+  @spec pre_execution_summary(atom()) :: String.t()
+  def pre_execution_summary(:checkout_preparation_failed), do: "Checkout preparation failed before execution."
+  def pre_execution_summary(:checkout_intent_mismatch), do: "Checkout intent or commit did not match the assignment."
+  def pre_execution_summary(_reason), do: "Assignment was blocked before execution."
 
   @spec nonempty_text?(term()) :: boolean()
   def nonempty_text?(value), do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
@@ -209,34 +213,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   end
 
   defp valid_phase_keys?(record, base_keys) do
-    phase_keys =
-      case record.phase do
-        phase when phase in [:planned, :allocation_pending] ->
-          []
-
-        phase when phase in [:allocated, :checkout_pending] ->
-          [:allocation]
-
-        phase when phase in [:checkout_ready, :execution_started] ->
-          [:allocation, :checkout]
-
-        phase when phase in [:result_recorded, :result_pending] ->
-          [:allocation, :checkout, :execution_result]
-
-        phase when phase in [:result_reported, :cleanup_pending] ->
-          [:allocation, :checkout, :execution_result, :result_ref]
-
-        :terminal ->
-          [:allocation, :checkout, :execution_result, :result_ref, :cleanup_evidence]
-
-        :abort_pending ->
-          [:allocation, :abort_reason]
-
-        :aborted ->
-          [:allocation, :abort_reason, :abort_cleanup_evidence]
-      end
-
-    MapSet.new(Map.keys(record)) == MapSet.new(base_keys ++ phase_keys)
+    MapSet.new(Map.keys(record)) == MapSet.new(base_keys ++ Map.fetch!(@phase_fields, record.phase))
   end
 
   defp valid_allocation_phase?(%{phase: phase}) when phase in [:planned, :allocation_pending], do: true
@@ -266,18 +243,16 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
         Map.get(record, :execution_result)
       ) == :ok
 
-  defp valid_abort_phase?(%{phase: phase}, _assignment) when phase not in [:abort_pending, :aborted], do: true
+  defp valid_abort_phase?(%{phase: phase}, _assignment)
+       when phase not in [:abort_pending, :abort_result_pending, :abort_cleanup_pending],
+       do: true
 
   defp valid_abort_phase?(record, assignment) do
     abort_reason = Map.get(record, :abort_reason)
 
     abort_reason in @abort_reasons and validate_allocation(Map.get(record, :allocation)) == :ok and
       (record.phase == :abort_pending or
-         validate_abort_cleanup_evidence(
-           Map.get(record, :abort_cleanup_evidence),
-           Map.get(record, :allocation),
-           assignment,
-           abort_reason
-         ) == :ok)
+         (validate_pre_execution_result(Map.get(record, :pre_execution_result), assignment, abort_reason) == :ok and
+            (record.phase == :abort_result_pending or nonempty_text?(Map.get(record, :abort_result_ref)))))
   end
 end

@@ -73,54 +73,93 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     {adapter, _journal, opts} = ports(checkout_mismatch: true)
     assignment = assignment()
 
-    assert {:ok, %{phase: :aborted, abort_reason: :checkout_intent_mismatch}} =
-             ManagedExecutor.run(assignment, opts)
+    assert {:blocked, :checkout_intent_mismatch, record} = ManagedExecutor.run(assignment, opts)
+    assert record.phase == :abort_cleanup_pending
+    assert %{pre_execution_result: result, abort_result_ref: result_ref} = record
 
+    assert result.outcome == :blocked
+    assert result.abort_reason == :checkout_intent_mismatch
+    refute Map.has_key?(result, :accepted_head)
+    assert result_ref == "abort-result-fixture-1"
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
     assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :ensure_abort_cleanup))
+    assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :publish_or_reconcile_abort_result))
   end
 
   test "records pre-execution cleanup debt and retries uncertain cleanup without re-preparing checkout" do
     {adapter, _journal, opts} = ports(checkout_failure: true, faults: %{abort_cleanup: 1})
     assignment = assignment()
 
-    assert {:held, :abort_cleanup_unverified, %{phase: :abort_pending, allocation: %{id: allocation_id}}} =
-             ManagedExecutor.run(assignment, opts)
+    assert {:held, :abort_cleanup_unverified, pending} = ManagedExecutor.run(assignment, opts)
+    assert pending.phase == :abort_cleanup_pending
+    assert %{allocation: %{id: allocation_id}, abort_result_ref: "abort-result-fixture-1"} = pending
 
-    assert {:ok, %{phase: :aborted, allocation: %{id: ^allocation_id}, abort_cleanup_evidence: evidence}} =
-             ManagedExecutor.run(assignment, opts)
+    assert {:blocked, :checkout_preparation_failed, blocked} = ManagedExecutor.run(assignment, opts)
+    assert blocked.phase == :abort_cleanup_pending
+    assert %{allocation: %{id: ^allocation_id}, pre_execution_result: result} = blocked
 
-    assert evidence.abort_reason == :checkout_preparation_failed
+    assert result.abort_reason == :checkout_preparation_failed
+    assert result.outcome == :blocked
     events = FakeAdapter.events(adapter)
     assert Enum.count(events, &(elem(&1, 0) == :prepare_checkout)) == 1
     assert Enum.count(events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 2
+    assert Enum.count(events, &(elem(&1, 0) == :publish_or_reconcile_abort_result)) == 1
     refute Enum.any?(events, &(elem(&1, 0) == :execute))
 
-    assert {:ok, %{phase: :aborted}} = ManagedExecutor.run(assignment, opts)
+    assert {:blocked, :checkout_preparation_failed, %{phase: :abort_cleanup_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
     replay_events = FakeAdapter.events(adapter)
-    assert Enum.count(replay_events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 2
-    assert Enum.count(replay_events, &(elem(&1, 0) == :verify_abort_cleanup)) == 2
+    assert Enum.count(replay_events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 3
+    assert Enum.count(replay_events, &(elem(&1, 0) == :publish_or_reconcile_abort_result)) == 1
   end
 
   test "rejects a noncanonical checkout head and cleans up before execution" do
     {adapter, _journal, opts} = ports(checkout_head: String.duplicate("a", 41))
     assignment = assignment()
 
-    assert {:ok, %{phase: :aborted, abort_reason: :checkout_intent_mismatch}} =
+    assert {:blocked, :checkout_intent_mismatch, %{phase: :abort_cleanup_pending}} =
              ManagedExecutor.run(assignment, opts)
 
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
   end
 
-  test "does not terminalize abort cleanup evidence for another allocation" do
-    {adapter, _journal, opts} = ports(checkout_failure: true, abort_cleanup_mismatch: true)
+  test "reconciles a lost blocked-result acknowledgement before attempting cleanup" do
+    {adapter, _journal, opts} = ports(checkout_failure: true, faults: %{abort_result: 1})
     assignment = assignment()
 
-    assert {:held, :abort_cleanup_evidence_invalid, %{phase: :abort_pending}} =
+    assert {:held, :abort_result_reconciliation_failed, %{phase: :abort_result_pending}} =
              ManagedExecutor.run(assignment, opts)
 
-    assert {:ok, %{phase: :aborted}} = ManagedExecutor.run(assignment, opts)
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :ensure_abort_cleanup))
+
+    assert {:blocked, :checkout_preparation_failed, %{phase: :abort_cleanup_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
+    events = FakeAdapter.events(adapter)
+    result_keys = for {:publish_or_reconcile_abort_result, _allocation_id, _digest, _result, key} <- events, do: key
+    assert result_keys == ["#{assignment.sha256}:abort-result", "#{assignment.sha256}:abort-result"]
+    assert Enum.count(events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 1
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+  end
+
+  test "journal compare-and-swap admits only one concurrent writer for a lifecycle version" do
+    {:ok, journal} = FakeJournal.start_link()
+    initial = %{version: 0, phase: :planned}
+    assert :ok = FakeJournal.compare_and_swap("issue:3", 0, initial, journal)
+
+    results =
+      [:writer_a, :writer_b]
+      |> Task.async_stream(
+        fn writer ->
+          FakeJournal.compare_and_swap("issue:3", 0, %{version: 1, writer: writer}, journal)
+        end,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.count(results, &(&1 == :ok)) == 1
+    assert Enum.count(results, &(&1 == {:error, :conflict})) == 1
   end
 
   test "holds cleanup unless signed terminal cleanup evidence confirms workspace and credential removal" do

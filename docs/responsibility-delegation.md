@@ -151,16 +151,20 @@ adapter and durable-journal behaviors. Its allocation, checkout, execution,
 result-publication and cleanup calls all carry stable keys derived from the
 validated assignment digest. Checkout intent is projected only from the signed
 assignment's repository, base ref and branch; an adapter receipt that differs is
-aborted before execution through a journaled cleanup-debt phase. A failed or
-uncertain pre-execution cleanup remains in `abort_pending`; replay retries only
-the exact allocation-bound cleanup operation with its stable key, never checkout
-or execution. The `aborted` terminal state requires signed evidence bound to
-the assignment digest, allocation, lease identity, repository and abort reason,
-confirming workspace removal, credential revocation and reviewer-lease release.
-Replay re-verifies this evidence. Checkout heads must be canonical 40- or
-64-character hexadecimal Git object identifiers. The adapter return shapes are
-deliberately narrow so workspace paths, command strings, credential values and
-raw process output are not lifecycle fields.
+reported as a blocked pre-execution result and enters journaled cleanup debt. The
+result has a stable idempotency key and no accepted head. Uncertain result
+publication retries with that key before cleanup starts. Cleanup retry remains
+bound to the exact allocation and assignment; it never repeats checkout or
+execution. A successful adapter cleanup call returns a blocked outcome while
+the journal stays nonterminal in `abort_cleanup_pending`. HGS-350's
+`work-package-cleanup-receipt.v1` requires an accepted head from a terminal
+execution and cannot attest cleanup before checkout. No second signed receipt
+contract is defined here; an abort remains source-incomplete and held until the
+native HGS-350 authority defines how cleanup without an accepted head is
+recorded. Checkout heads must be canonical 40- or 64-character hexadecimal Git
+object identifiers. The adapter return shapes are deliberately narrow so
+workspace paths, command strings, credential values and raw process output are
+not lifecycle fields.
 
 The journal uses versioned compare-and-swap and must be durable and atomic in any
 future implementation. Allocation and checkout interruptions can retry through

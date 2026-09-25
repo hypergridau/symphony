@@ -10,7 +10,7 @@ defmodule SymphonyElixir.ManagedExecutor do
   alias SymphonyElixir.ManagedExecutor.Adapter
   alias SymphonyElixir.ManagedExecutor.Record
 
-  @type result :: {:ok, map()} | {:held, term(), map()} | {:error, term()}
+  @type result :: {:ok, map()} | {:blocked, term(), map()} | {:held, term(), map()} | {:error, term()}
 
   @doc "Runs or safely reconciles one exact assignment lifecycle."
   @spec run(map(), keyword()) :: result()
@@ -52,29 +52,13 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
-  defp advance(%{phase: :aborted} = record, assignment, ports) do
-    with :ok <-
-           Record.validate_abort_cleanup_evidence(
-             record.abort_cleanup_evidence,
-             record.allocation,
-             assignment,
-             record.abort_reason
-           ),
-         :ok <-
-           ports.adapter.verify_abort_cleanup(
-             record.abort_cleanup_evidence,
-             record.allocation,
-             assignment,
-             record.abort_reason,
-             ports.adapter_context
-           ) do
-      {:ok, record}
-    else
-      _ -> {:held, :abort_cleanup_reverification_failed, record}
-    end
-  end
-
   defp advance(%{phase: :abort_pending} = record, assignment, ports),
+    do: record_abort_result(record, assignment, ports)
+
+  defp advance(%{phase: :abort_result_pending} = record, assignment, ports),
+    do: publish_abort_result(record, assignment, ports)
+
+  defp advance(%{phase: :abort_cleanup_pending} = record, assignment, ports),
     do: ensure_abort_cleanup(record, assignment, ports)
 
   defp advance(%{phase: :execution_started} = record, assignment, ports) do
@@ -306,8 +290,60 @@ defmodule SymphonyElixir.ManagedExecutor do
 
   defp abort_before_execution(record, assignment, reason, ports) do
     case checkpoint(record, :abort_pending, ports, %{abort_reason: reason}) do
-      {:ok, pending} -> ensure_abort_cleanup(pending, assignment, ports)
+      {:ok, pending} -> advance(pending, assignment, ports)
       {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
+    end
+  end
+
+  defp record_abort_result(record, assignment, ports) do
+    abort_result = %{
+      assignment_digest: assignment.sha256,
+      abort_reason: record.abort_reason,
+      outcome: :blocked,
+      summary: Record.pre_execution_summary(record.abort_reason),
+      evidence_ref: "managed-executor:#{assignment.sha256}:#{record.abort_reason}"
+    }
+
+    with :ok <- Record.validate_pre_execution_result(abort_result, assignment, record.abort_reason),
+         {:ok, pending} <- checkpoint(record, :abort_result_pending, ports, %{pre_execution_result: abort_result}) do
+      advance(pending, assignment, ports)
+    else
+      {:error, reason} -> {:held, reason, record}
+    end
+  end
+
+  defp publish_abort_result(record, assignment, ports) do
+    response =
+      ports.adapter.publish_or_reconcile_abort_result(
+        record.allocation,
+        assignment,
+        record.pre_execution_result,
+        key(assignment, "abort-result"),
+        ports.adapter_context
+      )
+
+    case response do
+      {:ok, result_ref} when is_binary(result_ref) ->
+        save_abort_result_ref(record, result_ref, assignment, ports)
+
+      {:error, _reason} ->
+        {:held, :abort_result_reconciliation_failed, record}
+
+      _ ->
+        {:held, :invalid_abort_result_acknowledgement, record}
+    end
+  end
+
+  defp save_abort_result_ref(record, result_ref, assignment, ports) do
+    case Record.nonempty_text?(result_ref) do
+      true ->
+        case checkpoint(record, :abort_cleanup_pending, ports, %{abort_result_ref: result_ref}) do
+          {:ok, pending} -> advance(pending, assignment, ports)
+          {:error, reason} -> {:held, reason, record}
+        end
+
+      false ->
+        {:held, :invalid_abort_result_acknowledgement, record}
     end
   end
 
@@ -322,34 +358,9 @@ defmodule SymphonyElixir.ManagedExecutor do
       )
 
     case response do
-      {:ok, evidence} -> verify_and_record_abort_cleanup(record, evidence, assignment, ports)
+      :ok -> {:blocked, record.abort_reason, record}
       {:error, _reason} -> {:held, :abort_cleanup_unverified, record}
-      _ -> {:held, :abort_cleanup_evidence_invalid, record}
-    end
-  end
-
-  defp verify_and_record_abort_cleanup(record, evidence, assignment, ports) do
-    with :ok <-
-           Record.validate_abort_cleanup_evidence(
-             evidence,
-             record.allocation,
-             assignment,
-             record.abort_reason
-           ),
-         :ok <-
-           ports.adapter.verify_abort_cleanup(
-             evidence,
-             record.allocation,
-             assignment,
-             record.abort_reason,
-             ports.adapter_context
-           ),
-         {:ok, aborted} <- checkpoint(record, :aborted, ports, %{abort_cleanup_evidence: evidence}) do
-      {:ok, aborted}
-    else
-      {:error, :abort_cleanup_evidence_invalid} -> {:held, :abort_cleanup_evidence_invalid, record}
-      {:error, _reason} -> {:held, :abort_cleanup_unverified, record}
-      _ -> {:held, :abort_cleanup_evidence_invalid, record}
+      _ -> {:held, :abort_cleanup_unverified, record}
     end
   end
 
@@ -373,7 +384,7 @@ defmodule SymphonyElixir.ManagedExecutor do
         {:ensure_terminal_cleanup, 5},
         {:verify_terminal_cleanup, 5},
         {:ensure_abort_cleanup, 5},
-        {:verify_abort_cleanup, 5}
+        {:publish_or_reconcile_abort_result, 5}
       ]
 
       adapter_valid? =

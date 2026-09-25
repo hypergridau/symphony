@@ -49,7 +49,9 @@ defmodule SymphonyElixir.MixProject do
       ],
       test_ignore_filters: [
         "test/support/snapshot_support.exs",
-        "test/support/test_support.exs"
+        "test/support/test_support.exs",
+        "test/support/managed_executor_fake_adapter.exs",
+        "test/support/managed_responsibility_fixture.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]

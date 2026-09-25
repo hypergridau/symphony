@@ -45,24 +45,12 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
           signature: String.t()
         }
   @type abort_reason :: :checkout_preparation_failed | :checkout_intent_mismatch
-  @type abort_cleanup_evidence :: %{
-          contract_version: String.t(),
-          receipt_kind: String.t(),
+  @type pre_execution_result :: %{
           assignment_digest: String.t(),
-          allocation_id: String.t(),
-          issue_id: String.t(),
-          generation: pos_integer(),
-          session_id: String.t(),
-          process_id: String.t(),
-          repository_ref: String.t(),
           abort_reason: abort_reason(),
-          workspace_removed: true,
-          credentials_revoked: true,
-          reviewer_leases_released: true,
-          evidence_ref: String.t(),
-          checksum: String.t(),
-          signer_id: String.t(),
-          signature: String.t()
+          outcome: :blocked,
+          summary: String.t(),
+          evidence_ref: String.t()
         }
 
   @callback allocate_or_reconcile(assignment(), String.t(), term()) :: {:ok, allocation()} | {:error, term()}
@@ -77,9 +65,9 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   @callback ensure_terminal_cleanup(allocation(), assignment(), execution_result(), String.t(), term()) ::
               {:ok, cleanup_evidence()} | {:error, term()}
   @callback ensure_abort_cleanup(allocation(), assignment(), abort_reason(), String.t(), term()) ::
-              {:ok, abort_cleanup_evidence()} | {:error, term()}
-  @callback verify_terminal_cleanup(cleanup_evidence(), allocation(), assignment(), execution_result(), term()) ::
               :ok | {:error, term()}
-  @callback verify_abort_cleanup(abort_cleanup_evidence(), allocation(), assignment(), abort_reason(), term()) ::
+  @callback publish_or_reconcile_abort_result(allocation(), assignment(), pre_execution_result(), String.t(), term()) ::
+              {:ok, String.t()} | {:error, term()}
+  @callback verify_terminal_cleanup(cleanup_evidence(), allocation(), assignment(), execution_result(), term()) ::
               :ok | {:error, term()}
 end
