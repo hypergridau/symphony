@@ -8,25 +8,39 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
 
   @impl true
   def get_job(namespace, name, agent) do
-    case Agent.get(agent, &Map.get(&1.jobs, {namespace, name})) do
-      nil -> {:error, :not_found}
-      job -> {:ok, job}
-    end
+    Agent.get_and_update(agent, &get_job_state(&1, {namespace, name}))
   end
 
   @impl true
   def delete_job(namespace, name, uid, agent) do
     Agent.get_and_update(agent, fn state ->
-      key = {namespace, name}
-
-      case Map.get(state.jobs, key) do
-        %{"metadata" => %{"uid" => ^uid}} ->
-          {:ok, %{state | jobs: Map.delete(state.jobs, key), deletes: [uid | state.deletes]}}
-
-        _ ->
-          {{:error, :uid_precondition_failed}, state}
+      if state.delete_error do
+        {{:error, state.delete_error}, state}
+      else
+        delete_from_state(state, namespace, name, uid)
       end
     end)
+  end
+
+  defp delete_from_state(state, namespace, name, uid) do
+    key = {namespace, name}
+
+    case Map.get(state.jobs, key) do
+      %{"metadata" => %{"uid" => ^uid}} ->
+        {:ok, %{state | jobs: Map.delete(state.jobs, key), deletes: [uid | state.deletes]}}
+
+      _ ->
+        {{:error, :uid_precondition_failed}, state}
+    end
+  end
+
+  defp get_job_state(%{get_error: error} = state, _key) when not is_nil(error), do: {error, state}
+
+  defp get_job_state(state, key) do
+    case Map.get(state.jobs, key) do
+      nil -> {{:error, :not_found}, state}
+      job -> {{:ok, job}, state}
+    end
   end
 
   defp create_job_state(state, namespace, job) do
@@ -37,13 +51,21 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
         {{:error, :already_exists}, state}
 
       :error ->
-        stored = defaulted_job(job)
-        next = %{state | jobs: Map.put(state.jobs, key, stored), creates: state.creates + 1}
-        {create_result(state.create_error, stored), next}
+        create_new(state, key, job)
     end
   end
 
+  defp create_new(%{create_commit?: false, create_error: reason} = state, _key, _job) when not is_nil(reason),
+    do: {{:error, reason}, %{state | creates: state.creates + 1}}
+
+  defp create_new(state, key, job) do
+    stored = defaulted_job(job)
+    next = %{state | jobs: Map.put(state.jobs, key, stored), creates: state.creates + 1}
+    {create_result(state.create_error, stored), next}
+  end
+
   defp create_result(nil, job), do: {:ok, job}
+  defp create_result(:invalid_response, _job), do: :unexpected_create_response
   defp create_result(reason, _job), do: {:error, reason}
 
   defp defaulted_job(job) do

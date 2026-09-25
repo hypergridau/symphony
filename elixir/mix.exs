@@ -51,7 +51,8 @@ defmodule SymphonyElixir.MixProject do
         "test/support/snapshot_support.exs",
         "test/support/test_support.exs",
         "test/support/managed_executor_fake_adapter.exs",
-        "test/support/managed_responsibility_fixture.exs"
+        "test/support/managed_responsibility_fixture.exs",
+        "test/support/rke2_job_fake_client.exs"
       ],
       dialyzer: [
         plt_add_apps: [:mix]

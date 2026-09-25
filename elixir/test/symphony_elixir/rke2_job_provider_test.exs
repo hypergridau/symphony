@@ -7,7 +7,19 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
   alias SymphonyElixir.RKE2Job.{JobSpec, Provider}
 
   setup do
-    {:ok, client} = Agent.start_link(fn -> %{jobs: %{}, creates: 0, deletes: [], create_error: nil} end)
+    {:ok, client} =
+      Agent.start_link(fn ->
+        %{
+          jobs: %{},
+          creates: 0,
+          deletes: [],
+          create_error: nil,
+          create_commit?: true,
+          get_error: nil,
+          delete_error: nil
+        }
+      end)
+
     %{client: client}
   end
 
@@ -55,6 +67,19 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
 
     assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | image: "worker:latest"})
     assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | namespace: "Prod"})
+
+    attrs = %{assignment_attrs() | placement: :hosted_production, target_environment: :lke}
+    assert {:ok, hosted} = ManagedAssignmentBundle.build(attrs)
+    assert {:error, :rke2_job_target_not_authorized} = JobSpec.compile(hosted, config())
+  end
+
+  test "rejects invalid compiler arguments and oversized assignment payloads" do
+    assert {:error, :invalid_rke2_job_assignment} = JobSpec.compile(nil, config())
+    assert {:error, :invalid_rke2_job_assignment} = JobSpec.compile(assignment(), nil)
+
+    refs = for index <- 1..32, do: "SECRET_#{index}_" <> String.duplicate("A", 2_000)
+    assert {:ok, oversized} = ManagedAssignmentBundle.build(%{assignment_attrs() | context_secret_refs: refs})
+    assert {:error, :rke2_job_assignment_too_large} = JobSpec.compile(oversized, config())
   end
 
   test "create replay reads and verifies the deterministic existing Job", %{client: client} do
@@ -74,6 +99,46 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert Agent.get(client, & &1.creates) == 1
   end
 
+  test "holds a create timeout when read-back proves no Job exists", %{client: client} do
+    Agent.update(client, &%{&1 | create_error: :timeout, create_commit?: false})
+
+    assert {:held, {:job_create_outcome_uncertain, :timeout}} = Provider.ensure(assignment(), opts(client))
+    assert Agent.get(client, & &1.creates) == 1
+    assert Agent.get(client, &map_size(&1.jobs)) == 0
+  end
+
+  test "reads back after malformed create response and holds when read-back fails", %{client: client} do
+    Agent.update(client, &%{&1 | create_error: :invalid_response})
+    assert {:ok, _job} = Provider.ensure(assignment(), opts(client))
+
+    {:ok, other_client} =
+      Agent.start_link(fn ->
+        %{
+          jobs: %{},
+          creates: 0,
+          deletes: [],
+          create_error: :timeout,
+          create_commit?: false,
+          get_error: {:error, :timeout},
+          delete_error: nil
+        }
+      end)
+
+    assert {:held, {:job_create_and_read_uncertain, :timeout, :timeout}} =
+             Provider.ensure(assignment(), opts(other_client))
+  end
+
+  test "validates provider options before effect calls and fails closed for missing ports" do
+    assert {:error, :invalid_rke2_job_request} = Provider.ensure(nil, [])
+    assert {:error, :invalid_rke2_job_request} = Provider.delete(nil, [])
+
+    assert {:error, :rke2_job_client_missing} =
+             Provider.ensure(assignment(), config: config(), client: String)
+
+    assert {:error, :rke2_job_trusted_config_missing} =
+             Provider.ensure(assignment(), client: SymphonyElixir.RKE2JobFakeClient)
+  end
+
   test "rejects a tampered bundle before the client can create anything", %{client: client} do
     assert {:error, :assignment_bundle_digest_mismatch} =
              Provider.ensure(%{assignment() | branch: "codex/tampered"}, opts(client))
@@ -88,6 +153,30 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     Agent.update(client, &put_in(&1, [:jobs, {config().namespace, expected["metadata"]["name"]}], foreign))
 
     assert {:held, :job_identity_or_spec_mismatch} = Provider.ensure(assignment, opts(client))
+  end
+
+  test "holds unresolved existing-Job reads and delete adapter failures", %{client: client} do
+    assignment = assignment()
+    {:ok, expected} = JobSpec.compile(assignment, config())
+    key = {config().namespace, expected["metadata"]["name"]}
+    Agent.update(client, &put_in(&1, [:jobs, key], expected))
+    Agent.update(client, &%{&1 | get_error: {:error, :timeout}})
+
+    assert {:held, {:job_read_failed, :timeout}} = Provider.ensure(assignment, opts(client))
+
+    Agent.update(client, &%{&1 | get_error: :malformed_response})
+    assert {:held, :invalid_job_read_response} = Provider.ensure(assignment, opts(client))
+
+    Agent.update(client, &%{&1 | get_error: nil})
+    Agent.update(client, &%{&1 | jobs: Map.delete(&1.jobs, key)})
+    assert {:ok, job} = Provider.ensure(assignment, opts(client))
+    Agent.update(client, &%{&1 | get_error: {:error, :timeout}})
+    assert {:held, {:job_read_failed, :timeout}} = Provider.delete(assignment, opts(client))
+
+    Agent.update(client, &%{&1 | get_error: nil, delete_error: :timeout})
+    assert {:held, {:job_delete_failed, :timeout}} = Provider.delete(assignment, opts(client))
+    assert Agent.get(client, &Map.has_key?(&1.jobs, key))
+    assert get_in(job, ["metadata", "uid"]) == get_in(Agent.get(client, &Map.fetch!(&1.jobs, key)), ["metadata", "uid"])
   end
 
   test "holds server-defaulted Jobs with security-relevant drift", %{client: client} do
@@ -130,25 +219,38 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
   end
 
   defp assignment(generation \\ 4) do
+    attrs = assignment_attrs()
+    attrs = %{attrs | lease: %{attrs.lease | generation: generation}}
+
     {:ok, bundle} =
-      ManagedAssignmentBundle.build(%{
-        objective: %{id: "objective-1", identity: "objective-1", content: "Run a bounded source worker"},
-        repository_ref: "hypergridau/symphony",
-        base_ref: "refs/remotes/origin/main",
-        branch: "codex/hgs729-rke2-job-provider",
-        seat: "runner-17",
-        lease: %{issue_id: "issue-1", repository: "hypergridau/symphony", generation: generation, session_id: "worker:issue-1:4", process_id: "worker:issue-1:4"},
-        intent_ancestry: ["objective-root", "delegation-1"],
-        acceptance: %{deliverable: "Assignment bundle", evidence: "Focused test coverage"},
-        context_secret_refs: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
-        platform: "linux-x86_64",
-        environment_classification: "repository",
-        environment_constraints: ["repository", "no-production-workload"],
-        placement: :internal_beta,
-        target_environment: :rke2
-      })
+      ManagedAssignmentBundle.build(attrs)
 
     bundle
+  end
+
+  defp assignment_attrs do
+    %{
+      objective: %{id: "objective-1", identity: "objective-1", content: "Run a bounded source worker"},
+      repository_ref: "hypergridau/symphony",
+      base_ref: "refs/remotes/origin/main",
+      branch: "codex/hgs729-rke2-job-provider",
+      seat: "runner-17",
+      lease: %{
+        issue_id: "issue-1",
+        repository: "hypergridau/symphony",
+        generation: 4,
+        session_id: "worker:issue-1:4",
+        process_id: "worker:issue-1:4"
+      },
+      intent_ancestry: ["objective-root", "delegation-1"],
+      acceptance: %{deliverable: "Assignment bundle", evidence: "Focused test coverage"},
+      context_secret_refs: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
+      platform: "linux-x86_64",
+      environment_classification: "repository",
+      environment_constraints: ["repository", "no-production-workload"],
+      placement: :internal_beta,
+      target_environment: :rke2
+    }
   end
 
   defp config, do: %{namespace: "symphony-beta", image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64)}
