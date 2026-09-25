@@ -143,3 +143,42 @@ source slice only: the cross-repository manifest issuer must emit and sign v2
 nonempty entries before such grants can run. Keep the managed gate paused until
 that issuer and its rollout are reviewed. No runtime admission, production host,
 or workload execution is qualified by this change.
+
+## Managed executor lifecycle contract
+
+`SymphonyElixir.ManagedExecutor` defines a source-only lifecycle over explicit
+adapter and durable-journal behaviors. Its allocation, checkout, execution,
+result-publication and cleanup calls all carry stable keys derived from the
+validated assignment digest. Checkout intent is projected only from the signed
+assignment's repository, base ref and branch; an adapter receipt that differs is
+reported as a blocked pre-execution result and enters journaled cleanup debt. The
+result has a stable idempotency key and no accepted head. Uncertain result
+publication retries with that key before cleanup starts. Cleanup retry remains
+bound to the exact allocation and assignment; it never repeats checkout or
+execution. A successful adapter cleanup call returns a blocked outcome while
+the journal stays nonterminal in `abort_cleanup_pending`. HGS-350's
+`work-package-cleanup-receipt.v1` requires an accepted head from a terminal
+execution and cannot attest cleanup before checkout. No second signed receipt
+contract is defined here; an abort remains source-incomplete and held until the
+native HGS-350 authority defines how cleanup without an accepted head is
+recorded. Checkout heads must be canonical 40- or 64-character hexadecimal Git
+object identifiers. The adapter return shapes are deliberately narrow so
+workspace paths, command strings, credential values and raw process output are
+not lifecycle fields.
+
+The journal uses versioned compare-and-swap and must be durable and atomic in any
+future implementation. Allocation and checkout interruptions can retry through
+their idempotent reconciliation ports. A journaled `execution_started` state
+never starts execution a second time: it asks the adapter for read-only outcome
+reconciliation and remains held when the result is unknown. Result publication
+and cleanup use reconcile-or-ensure ports with stable keys. The terminal phase
+requires HGS-350 contract-versioned signed cleanup evidence bound to the exact
+issue generation, session/process lease, repository, terminal outcome and
+accepted head. It also confirms workspace removal, credential revocation and
+reviewer-lease release; replay re-verifies that evidence.
+
+The module is not connected to `Orchestrator` and has no production adapter or
+journal implementation. Its deterministic fake adapter suite performs no
+network or shell calls and supplies no credential values. It does not admit a
+worker, qualify a disposable runner, or establish the signed HGS-350 receipt
+implementation.
