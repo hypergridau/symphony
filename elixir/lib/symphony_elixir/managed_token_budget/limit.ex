@@ -3,18 +3,18 @@ defmodule SymphonyElixir.ManagedTokenBudget.Limit do
 
   @error {:error, :managed_token_budget_unavailable_or_exhausted}
   @modes [:finite, :progress_scoped]
-  @progress_model "gpt-5.6-luna"
+  @progress_models ["gpt-5.6-luna", "gpt-6-luna"]
   @type error :: {:error, :managed_token_budget_unavailable_or_exhausted}
-  @type result :: {:ok, non_neg_integer(), map() | nil} | error()
+  @type result :: {:ok, non_neg_integer() | :unbounded, map() | nil} | error()
   @type mode :: :finite | :progress_scoped
 
-  @spec bounded(term(), term()) :: {:ok, pos_integer()} | error()
+  @spec bounded(term(), term()) :: {:ok, pos_integer() | :unbounded} | error()
   def bounded(configured, %{budget: budget}) when is_map(budget) do
     with true <- is_integer(configured) and configured > 0,
          {:ok, mode} <- budget_mode(budget),
-         {:ok, maximum} <- positive_maximum(budget),
+         {:ok, maximum} <- maximum_for_mode(mode, budget),
          :ok <- valid_progress_model(mode, budget) do
-      {:ok, if(mode == :progress_scoped, do: maximum, else: min(configured, maximum))}
+      {:ok, if(mode == :progress_scoped, do: :unbounded, else: min(configured, maximum))}
     else
       _ -> @error
     end
@@ -70,11 +70,12 @@ defmodule SymphonyElixir.ManagedTokenBudget.Limit do
     end
   end
 
-  defp valid_entry(%{issue_id: issue_id, responsible: %{id: id, budget: %{max_tokens: maximum}} = grant})
+  defp valid_entry(%{issue_id: issue_id, responsible: %{id: id, budget: budget} = grant})
        when is_binary(issue_id) and byte_size(issue_id) > 0 and is_binary(id) and byte_size(id) > 0 and
-              is_integer(maximum) and maximum > 0 do
-    with {:ok, mode} <- budget_mode(grant.budget),
-         :ok <- valid_progress_model(mode, grant.budget) do
+              is_map(budget) do
+    with {:ok, mode} <- budget_mode(budget),
+         {:ok, _} <- maximum_for_mode(mode, budget),
+         :ok <- valid_progress_model(mode, budget) do
       {:ok, issue_id, grant}
     else
       _ -> :error
@@ -90,7 +91,11 @@ defmodule SymphonyElixir.ManagedTokenBudget.Limit do
 
   defp positive_maximum(_budget), do: @error
 
-  defp valid_progress_model(:progress_scoped, %{model: @progress_model}), do: :ok
+  defp maximum_for_mode(:progress_scoped, %{max_tokens: nil}), do: {:ok, :unbounded}
+  defp maximum_for_mode(:progress_scoped, _budget), do: @error
+  defp maximum_for_mode(:finite, budget), do: positive_maximum(budget)
+
+  defp valid_progress_model(:progress_scoped, %{model: model}) when model in @progress_models, do: :ok
   defp valid_progress_model(:progress_scoped, _budget), do: @error
   defp valid_progress_model(:finite, _budget), do: :ok
 end

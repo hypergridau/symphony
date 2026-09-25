@@ -132,7 +132,20 @@ defmodule SymphonyElixir.AgentRunner do
     }
 
     fn message ->
-      send_codex_update(recipient, issue, Map.merge(message, identity))
+      update = Map.merge(message, identity)
+
+      persist_managed_failed_turn(recipient, issue, update, opts)
+
+      send_codex_update(recipient, issue, update)
+    end
+  end
+
+  defp persist_managed_failed_turn(recipient, issue, update, opts) do
+    if Keyword.get(opts, :managed_model_route, false) and update[:event] == :turn_failed do
+      case GenServer.call(recipient, {:managed_failed_turn, issue.id, update}, 60_000) do
+        :ok -> :ok
+        {:error, reason} -> raise RuntimeError, "Managed failed-turn evidence was not persisted: #{inspect(reason)}"
+      end
     end
   end
 
@@ -185,9 +198,20 @@ defmodule SymphonyElixir.AgentRunner do
   defp maybe_put_runtime_head(runtime_info, _result), do: runtime_info
 
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
+    route_result =
+      if Keyword.get(opts, :managed_model_route, false),
+        do: ModelRouter.resolve_managed_from_journal(issue, Keyword.get(opts, :managed_model_runtime)),
+        else: {:ok, ModelRouter.resolve(issue, Keyword.get(opts, :attempt))}
+
+    case route_result do
+      {:ok, route} -> start_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp start_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host, route) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issues_by_ids/1)
-    route = ModelRouter.resolve(issue, Keyword.get(opts, :attempt))
 
     Logger.info(
       "Codex model route selected for #{issue_context(issue)} model=#{route.model} tier=#{route.tier} effort=#{route.effort} attempt=#{route.attempt} escalated=#{route.escalated} reason=#{inspect(route.reason)}"

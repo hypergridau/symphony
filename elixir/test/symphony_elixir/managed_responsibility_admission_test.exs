@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
   alias SymphonyElixir.ManagedResponsibility.Admission
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
+  alias SymphonyElixir.WorkPackageClaim.Journal
 
   setup do
     root = Path.dirname(Workflow.workflow_file_path())
@@ -74,9 +75,64 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
 
   test "model escalation and unbounded token configuration do not exceed operator budget", %{graph: graph, manifest: manifest, now: now} do
     assert {:ok, _} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), 2, now)
-    assert {:error, :managed_responsibility_budget_exceeded} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), 3, now)
+    assert {:ok, _} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), 3, now)
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", codex_max_total_tokens: 0)
     assert {:error, :managed_responsibility_budget_exceeded} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), nil, now)
+  end
+
+  test "managed GPT-6 Luna default requires a matching grant and retry effort ceiling", %{graph: graph, now: now} do
+    issue = Fixture.issue(1)
+
+    assert {:ok, ^graph} = Admission.prepare(graph, nil, nil, nil, nil, now)
+
+    assert {:error, :invalid_issue} =
+             Admission.prepare(graph, nil, nil, %{labels: ["model:gpt-6-luna"]}, nil, now)
+
+    assert {:ok, ^graph} = Admission.prepare(graph, ExecutionFence.new(), nil, issue, nil, now)
+
+    assert {:error, :managed_responsibility_required_for_gpt6_luna} =
+             Admission.prepare(graph, ExecutionFence.new(), nil, %{issue | labels: ["model:gpt-6-luna"]}, nil, now)
+
+    old_payload =
+      update_in(Fixture.payload(now), ["entries"], fn entries ->
+        Enum.map(entries, fn entry ->
+          entry
+          |> put_in(["accountable", "budget", "model"], "gpt-5.6-luna")
+          |> put_in(["responsible", "budget", "model"], "gpt-5.6-luna")
+        end)
+      end)
+
+    {:ok, old_manifest} = ManagedResponsibility.decode(old_payload, Fixture.context(), now)
+
+    assert {:error, :managed_responsibility_budget_exceeded} =
+             Admission.prepare(graph, ExecutionFence.new(), old_manifest, issue, nil, now)
+
+    payload =
+      update_in(Fixture.payload(now), ["entries"], fn entries ->
+        Enum.map(entries, fn entry ->
+          entry
+          |> put_in(["accountable", "budget", "effort"], "high")
+          |> put_in(["responsible", "budget", "effort"], "high")
+        end)
+      end)
+
+    assert {:ok, new_manifest} = ManagedResponsibility.decode(payload, Fixture.context(), now)
+    assert {:ok, _} = Admission.prepare(graph, ExecutionFence.new(), new_manifest, issue, nil, now)
+
+    # Scheduler attempts alone do not prove a failed worker turn.
+    assert {:ok, _} = Admission.prepare(graph, ExecutionFence.new(), new_manifest, issue, 9, now)
+
+    write_failed_turn_journal!(issue, new_manifest, now)
+
+    assert {:error, :managed_responsibility_budget_exceeded} =
+             Admission.prepare(graph, ExecutionFence.new(), new_manifest, issue, nil, now)
+
+    for label <- ["model:luna", "model:terra", "model:sol", "model:spark", "model:unknown"] do
+      labeled = %{issue | labels: ["symphony-ready", label]}
+
+      assert {:error, :unsupported_managed_model_label} =
+               Admission.prepare(graph, ExecutionFence.new(), new_manifest, labeled, nil, now)
+    end
   end
 
   test "a fence write failure cannot produce a dispatchable restart or silently rebind", %{state: state, root: root, manifest: manifest, now: now} do
@@ -97,5 +153,39 @@ defmodule SymphonyElixir.ManagedResponsibilityAdmissionTest do
     assert {:ok, admitted} = Admission.prepare(graph, ExecutionFence.new(), manifest, Fixture.issue(1), nil, now)
     assert admitted.delegations["responsible-1"].budget == hd(manifest.entries).responsible.budget
     assert admitted.delegations["responsible-1"].budget.max_tokens == 500_000
+  end
+
+  defp write_failed_turn_journal!(issue, manifest, now) do
+    repository = manifest.repository_ref
+    profile = manifest.managed_project_profile_id
+    key = Journal.reservation_key(issue.id, profile, repository)
+
+    reservation = %{
+      issue_id: issue.id,
+      managed_project_profile_id: profile,
+      repository_ref: repository,
+      projection_id: "projection-1",
+      reservation_id: "reservation-1",
+      reservation_nonce: "nonce-1",
+      scope_keys: ["repo:#{repository}"],
+      runner_id: "runner-test",
+      generation: 1,
+      session_id: "session-1",
+      process_id: "process-1",
+      responsible_delegation_id: "responsible-1",
+      execution_fence_token: "#{issue.id}:1",
+      runtime_lease_id: "session-1"
+    }
+
+    evidence = %{
+      thread_id: "thread-1",
+      turn_id: "turn-1",
+      observed_at_ms: now,
+      payload_sha256: String.duplicate("a", 64)
+    }
+
+    {:ok, journal} = Journal.put(Journal.new(), key, reservation)
+    {:ok, journal} = Journal.put_failed_worker_turn(journal, key, "thread-1:turn-1", evidence)
+    :ok = Journal.save(Config.execution_fence_state_path() <> ".work-package", journal)
   end
 end

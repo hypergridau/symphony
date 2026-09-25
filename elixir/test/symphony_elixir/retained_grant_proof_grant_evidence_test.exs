@@ -51,6 +51,32 @@ defmodule SymphonyElixir.RetainedGrantProofGrantEvidenceTest do
     assert bounded_evidence.expires_at_ms == 60_000
   end
 
+  test "explicit progress grant has no task token maximum but keeps exact pair and expiry" do
+    progress =
+      Fixture.payload(@now)
+      |> update_in(["entries", Access.at(0)], fn entry ->
+        Enum.reduce(["accountable", "responsible"], entry, fn role, current ->
+          current
+          |> put_in([role, "budget", "mode"], "progress_scoped")
+          |> put_in([role, "budget", "max_tokens"], nil)
+        end)
+      end)
+
+    assert {:ok, evidence} =
+             GrantEvidence.decode(Jason.encode!(progress), Fixture.context(), Fixture.issue(1).id, @now)
+
+    assert evidence.max_tokens == nil
+    assert evidence.expires_at_ms == 70_000
+
+    mismatched =
+      progress
+      |> put_in(["entries", Access.at(0), "responsible", "budget", "mode"], "finite")
+      |> put_in(["entries", Access.at(0), "responsible", "budget", "max_tokens"], 500_000)
+
+    assert {:error, _} = GrantEvidence.decode(Jason.encode!(mismatched), Fixture.context(), Fixture.issue(1).id, @now)
+    assert {:error, _} = GrantEvidence.decode(Jason.encode!(progress), Fixture.context(), Fixture.issue(1).id, 70_000)
+  end
+
   test "routing, pair, authority, expiry and schema failures cannot produce grant evidence" do
     payload = Fixture.payload(@now)
     first = hd(payload["entries"])

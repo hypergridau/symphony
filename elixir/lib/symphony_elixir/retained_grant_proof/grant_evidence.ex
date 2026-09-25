@@ -25,7 +25,8 @@ defmodule SymphonyElixir.RetainedGrantProof.GrantEvidence do
     with true <- Enum.sort(Map.keys(context)) == @context_keys,
          {:ok, payload} <- Jason.decode(bytes),
          {:ok, manifest} <- ManagedResponsibility.decode(payload, context, now_ms),
-         [entry] <- Enum.filter(manifest.entries, &(&1.issue_id == issue_id)) do
+         [entry] <- Enum.filter(manifest.entries, &(&1.issue_id == issue_id)),
+         {:ok, maximum} <- grant_limit(entry.accountable.budget, entry.responsible.budget) do
       {:ok,
        %{
          original_grant_digest: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
@@ -39,7 +40,7 @@ defmodule SymphonyElixir.RetainedGrantProof.GrantEvidence do
          responsible_id: entry.responsible.id,
          actor_id: entry.responsible.actor_id,
          delegations: %{accountable: entry.accountable, responsible: entry.responsible},
-         max_tokens: min(entry.accountable.budget.max_tokens, entry.responsible.budget.max_tokens),
+         max_tokens: maximum,
          expires_at_ms: min(entry.accountable.expires_at_ms, entry.responsible.expires_at_ms)
        }}
     else
@@ -48,4 +49,16 @@ defmodule SymphonyElixir.RetainedGrantProof.GrantEvidence do
   end
 
   def decode(_, _, _, _), do: {:error, :retained_grant_evidence_invalid}
+
+  defp grant_limit(%{mode: :progress_scoped, max_tokens: nil}, %{mode: :progress_scoped, max_tokens: nil}),
+    do: {:ok, nil}
+
+  defp grant_limit(%{max_tokens: accountable} = parent, %{max_tokens: responsible} = child)
+       when is_integer(accountable) and accountable > 0 and is_integer(responsible) and responsible > 0 do
+    if Map.get(parent, :mode, :finite) == :finite and Map.get(child, :mode, :finite) == :finite,
+      do: {:ok, min(accountable, responsible)},
+      else: {:error, :retained_grant_evidence_invalid}
+  end
+
+  defp grant_limit(_, _), do: {:error, :retained_grant_evidence_invalid}
 end

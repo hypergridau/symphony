@@ -56,6 +56,11 @@ host-controlled service configuration. Workers must not edit the manifest or gra
 Loading this input grants no worker lease: fresh native eligibility, exact responsibility,
 execution fencing and the provider's durable claim remain required before a turn starts.
 
+Managed workers use the GPT-6 Luna-only high/xhigh/max retry ladder by default. The optional
+`model:gpt-6-luna` label does not override the digest-pinned managed delegation's exact model
+and effort ceiling; legacy or conflicting model labels and stale grants fail admission. Keep
+the app-server command routable without a conflicting static model pin.
+
 Optional pre-spawn recovery receipts use host-only `DAHLIA_WORK_PACKAGE_RECOVERY_DIRECTORY`
 and `DAHLIA_WORK_PACKAGE_RECOVERY_PUBLIC_KEY` settings documented in `README.md`. Workers must
 not change those settings, receipt files or private authority journals. The signing key remains
@@ -70,11 +75,14 @@ Workers must not edit this ledger, its `.pending`/`.blocked` markers, or budget 
 budget stop requires evidence-based operator reconciliation; recovery never resets consumption
 or authorizes a larger allowance. See `README.md` for the initialization and failure contract.
 
-Managed `codex.max_total_tokens` must be positive. Each issue is limited to the smaller of this
-configured per-issue ceiling and its responsible grant's `budget.max_tokens`, including across
-retries and restarts. A larger configured ceiling does not enlarge a smaller grant. Missing or
-mismatched bound authority stops running work; changing the manifest cannot widen an active lease.
-Unmanaged workflows may use zero to disable the optional cumulative cap.
+Managed `codex.max_total_tokens` must be positive. Finite grants retain the smaller of this
+configured per-issue ceiling and the responsible grant's positive `budget.max_tokens`, across
+retries and restarts. Explicit `progress_scoped` Luna grants require `budget.max_tokens: null` for
+both accountable and responsible delegations and do not stop at an arbitrary task token count.
+Usage remains monotonic and auditable; expiry, model/effort, scope, provider/cash/capacity, and
+no-progress controls still apply. Missing or mismatched bound authority stops running work;
+changing the manifest cannot widen an active lease. Unmanaged workflows may use zero to disable
+their optional cumulative cap.
 
 Managed source runs receive a runtime-prepared repository/workspace/branch identity in each turn.
 That identity takes precedence over generic branch-creation and restart instructions below.

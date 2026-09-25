@@ -1025,22 +1025,14 @@ defmodule SymphonyElixir.Orchestrator do
     no_progress_tokens = no_progress_token_count(running_entry)
     no_durable_progress_tokens = no_durable_progress_token_count(running_entry)
     issue_total_tokens = issue_token_total(state, issue_id)
-    time_stall? = timeout_ms > 0 and is_integer(elapsed_ms) and elapsed_ms > timeout_ms
-
-    total_token_budget_exhausted? =
-      max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
-
-    command_token_stall? =
-      max_no_progress_tokens > 0 and no_progress_tokens >= max_no_progress_tokens
-
-    durable_token_stall? =
-      max_no_progress_tokens > 0 and no_durable_progress_tokens >= max_no_progress_tokens
+    time_stall? = stalled_for_time?(timeout_ms, elapsed_ms)
+    total_token_budget_exhausted? = token_budget_exhausted?(max_total_tokens, issue_total_tokens)
+    command_token_stall? = no_progress_token_stall?(max_no_progress_tokens, no_progress_tokens)
+    durable_token_stall? = no_progress_token_stall?(max_no_progress_tokens, no_durable_progress_tokens)
 
     token_stall? = command_token_stall? or durable_token_stall?
 
     if time_stall? or token_stall? or total_token_budget_exhausted? do
-      identifier = Map.get(running_entry, :identifier, issue_id)
-      session_id = running_entry_session_id(running_entry)
       restart_count = Map.get(state.stall_restarts, issue_id, 0) + 1
 
       diagnostic =
@@ -1057,73 +1049,105 @@ defmodule SymphonyElixir.Orchestrator do
           max_no_progress_tokens
         )
 
-      if input_required_blocker?(running_entry) do
-        error = blocker_error(running_entry, "stalled for #{elapsed_ms}ms after Codex requested operator input")
+      context = %{
+        identifier: Map.get(running_entry, :identifier, issue_id),
+        session_id: running_entry_session_id(running_entry),
+        elapsed_ms: elapsed_ms,
+        restart_count: restart_count,
+        diagnostic: diagnostic,
+        total_token_budget_exhausted?: total_token_budget_exhausted?,
+        issue_total_tokens: issue_total_tokens,
+        max_total_tokens: max_total_tokens,
+        token_stall?: token_stall?,
+        no_progress_tokens: no_progress_tokens,
+        no_durable_progress_tokens: no_durable_progress_tokens,
+        max_no_progress_tokens: max_no_progress_tokens
+      }
 
-        Logger.warning("Issue blocked: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; #{error}")
+      handle_stalled_issue(state, issue_id, running_entry, context)
+    else
+      state
+    end
+  end
+
+  defp stalled_for_time?(timeout_ms, elapsed_ms),
+    do: timeout_ms > 0 and is_integer(elapsed_ms) and elapsed_ms > timeout_ms
+
+  defp token_budget_exhausted?(max_total_tokens, issue_total_tokens),
+    do: is_integer(max_total_tokens) and max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
+
+  defp no_progress_token_stall?(max_no_progress_tokens, observed_tokens),
+    do: max_no_progress_tokens > 0 and observed_tokens >= max_no_progress_tokens
+
+  defp handle_stalled_issue(state, issue_id, running_entry, context) do
+    cond do
+      input_required_blocker?(running_entry) ->
+        error = blocker_error(running_entry, "stalled for #{context.elapsed_ms}ms after Codex requested operator input")
+
+        Logger.warning(
+          "Issue blocked: issue_id=#{issue_id} issue_identifier=#{context.identifier} " <>
+            "session_id=#{context.session_id} elapsed_ms=#{context.elapsed_ms}; #{error}"
+        )
 
         state
         |> record_session_completion_totals(running_entry)
         |> stop_and_block_issue(issue_id, running_entry, error)
-      else
-        if total_token_budget_exhausted? do
-          error = total_token_budget_error(issue_total_tokens, max_total_tokens)
 
-          state
-          |> record_session_completion_totals(running_entry)
-          |> stop_and_block_issue(
-            issue_id,
-            Map.put(
-              running_entry,
-              :stall_diagnostic,
-              total_token_budget_diagnostic(running_entry, issue_total_tokens, max_total_tokens)
+      context.total_token_budget_exhausted? ->
+        error = total_token_budget_error(context.issue_total_tokens, context.max_total_tokens)
+
+        state
+        |> record_session_completion_totals(running_entry)
+        |> stop_and_block_issue(
+          issue_id,
+          Map.put(
+            running_entry,
+            :stall_diagnostic,
+            total_token_budget_diagnostic(running_entry, context.issue_total_tokens, context.max_total_tokens)
+          ),
+          error
+        )
+
+      context.restart_count > Config.settings!().codex.max_stall_retries ->
+        error = "codex stalled #{context.restart_count} consecutive times; automatic recovery exhausted"
+
+        Logger.warning(
+          "Issue stopped after repeated stalls: issue_id=#{issue_id} " <>
+            "issue_identifier=#{context.identifier} session_id=#{context.session_id} " <>
+            "restart_count=#{context.restart_count} elapsed_ms=#{context.elapsed_ms}"
+        )
+
+        state
+        |> record_session_completion_totals(running_entry)
+        |> put_stall_restart_count(issue_id, context.restart_count)
+        |> stop_and_block_issue(issue_id, Map.put(running_entry, :stall_diagnostic, context.diagnostic), error)
+
+      true ->
+        Logger.warning(
+          "Issue stalled: issue_id=#{issue_id} issue_identifier=#{context.identifier} " <>
+            "session_id=#{context.session_id} elapsed_ms=#{context.elapsed_ms}; restarting with backoff"
+        )
+
+        next_attempt = next_retry_attempt_from_running(running_entry)
+
+        state
+        |> put_stall_restart_count(issue_id, context.restart_count)
+        |> terminate_running_issue(issue_id, false)
+        |> put_issue_token_total(issue_id, context.issue_total_tokens)
+        |> reserve_issue_claim_for_retry(issue_id)
+        |> schedule_issue_retry(issue_id, next_attempt, %{
+          identifier: context.identifier,
+          issue_url: running_entry.issue.url,
+          error:
+            stall_retry_error(
+              context.elapsed_ms,
+              context.token_stall?,
+              context.no_progress_tokens,
+              context.no_durable_progress_tokens,
+              context.max_no_progress_tokens
             ),
-            error
-          )
-        else
-          max_retries = Config.settings!().codex.max_stall_retries
-
-          if restart_count > max_retries do
-            error = "codex stalled #{restart_count} consecutive times; automatic recovery exhausted"
-
-            Logger.warning("Issue stopped after repeated stalls: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} restart_count=#{restart_count} elapsed_ms=#{elapsed_ms}")
-
-            state
-            |> record_session_completion_totals(running_entry)
-            |> put_stall_restart_count(issue_id, restart_count)
-            |> stop_and_block_issue(
-              issue_id,
-              Map.put(running_entry, :stall_diagnostic, diagnostic),
-              error
-            )
-          else
-            Logger.warning("Issue stalled: issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} elapsed_ms=#{elapsed_ms}; restarting with backoff")
-
-            next_attempt = next_retry_attempt_from_running(running_entry)
-
-            state
-            |> put_stall_restart_count(issue_id, restart_count)
-            |> terminate_running_issue(issue_id, false)
-            |> put_issue_token_total(issue_id, issue_total_tokens)
-            |> reserve_issue_claim_for_retry(issue_id)
-            |> schedule_issue_retry(issue_id, next_attempt, %{
-              identifier: identifier,
-              issue_url: running_entry.issue.url,
-              error:
-                stall_retry_error(
-                  elapsed_ms,
-                  token_stall?,
-                  no_progress_tokens,
-                  no_durable_progress_tokens,
-                  max_no_progress_tokens
-                ),
-              stall_diagnostic: diagnostic
-            })
-          end
-        end
-      end
-    else
-      state
+          stall_diagnostic: context.diagnostic
+        })
     end
   end
 
@@ -1624,6 +1648,8 @@ defmodule SymphonyElixir.Orchestrator do
       case start_claimed_worker(state, issue, fn ->
              AgentRunner.run(issue, recipient,
                attempt: attempt,
+               managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
+               managed_model_runtime: managed_worker_model_runtime(state.work_package_runtime),
                worker_host: worker_host,
                execution_token: token,
                execution_session_id: session_id,
@@ -1713,6 +1739,16 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end
   end
+
+  defp managed_worker_model_runtime(%{managed_delegations: %{repository_ref: repository_ref}} = runtime) do
+    %{
+      journal_path: Map.get(runtime, :journal_path),
+      managed_project_profile_id: Map.get(runtime, :managed_project_profile_id),
+      repository_ref: repository_ref
+    }
+  end
+
+  defp managed_worker_model_runtime(_runtime), do: nil
 
   defp execution_supervisor_identity(%State{execution_supervisor: :systemd_user}, issue, token, session_id, nil) do
     ExecutionSupervisor.identity(issue.id, token.generation, session_id, session_id, execution_fence_now_ms())
@@ -3626,7 +3662,57 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp persist_managed_failed_turn(state, issue_id, update, sender) do
+    runtime = state.work_package_runtime
+    entry = Map.get(state.running, issue_id)
+
+    with %{pid: ^sender, codex_session_identity: %{thread_id: thread_id, turn_id: turn_id}} <- entry,
+         true <- runtime_info_belongs_to_entry?(update, entry),
+         true <- is_binary(thread_id) and thread_id != "" and is_binary(turn_id) and turn_id != "",
+         %{
+           journal_path: path,
+           managed_project_profile_id: profile_id,
+           managed_delegations: %{repository_ref: repository_ref}
+         } <- runtime,
+         true <- is_binary(path) and is_binary(profile_id) and is_binary(repository_ref),
+         %{issue_id: ^issue_id, generation: generation} <- entry.execution_token,
+         %{status: :active, generation: ^generation, repository: ^repository_ref, leases: leases} <-
+           Map.get(state.execution_fence.executions, issue_id),
+         %{status: :active} <- Map.get(leases, entry.execution_session_id),
+         {:ok, journal} <- Journal.load(path),
+         key <- Journal.reservation_key(issue_id, profile_id, repository_ref, generation),
+         %{session_id: session_id, responsible_delegation_id: delegation_id, execution_fence_token: fence_token} <-
+           Map.get(journal.reservations, key),
+         true <-
+           session_id == entry.execution_session_id and delegation_id == entry.responsibility_delegation_id and
+             fence_token == "#{issue_id}:#{generation}",
+         %{
+           "method" => "turn/failed",
+           "params" => %{"threadId" => ^thread_id, "turn" => %{"id" => ^turn_id}}
+         } <-
+           Map.get(update, :payload),
+         {:ok, encoded} <- Jason.encode(Map.get(update, :payload)),
+         evidence <- %{
+           thread_id: thread_id,
+           turn_id: turn_id,
+           observed_at_ms: execution_fence_now_ms(),
+           payload_sha256: Base.encode16(:crypto.hash(:sha256, encoded), case: :lower)
+         },
+         {:ok, next_journal} <- Journal.put_failed_worker_turn(journal, key, "#{thread_id}:#{turn_id}", evidence),
+         :ok <- Journal.save(path, next_journal) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :managed_failed_turn_identity_mismatch}
+    end
+  end
+
   @impl true
+  def handle_call({:managed_failed_turn, issue_id, %{event: :turn_failed} = update}, {sender, _tag}, %State{} = state) do
+    reply = persist_managed_failed_turn(state, issue_id, update, sender)
+    {:reply, reply, state}
+  end
+
   def handle_call({:execution_checkout_progress, issue_id, checkpoint}, {sender, _tag}, %State{} = state) do
     case Checkpoint.accept(state, issue_id, sender, checkpoint, DateTime.utc_now()) do
       {:ok, entry} -> {:reply, :ok, %{state | running: Map.put(state.running, issue_id, entry)}}
@@ -4244,7 +4330,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp enforce_total_token_budget(state, issue_id, updated_running_entry, threshold) do
-    if threshold > 0 and issue_token_total(state, issue_id) >= threshold do
+    if is_integer(threshold) and threshold > 0 and issue_token_total(state, issue_id) >= threshold do
       total_tokens = issue_token_total(state, issue_id)
       diagnostic = total_token_budget_diagnostic(updated_running_entry, total_tokens, threshold)
       error = total_token_budget_error(total_tokens, threshold)

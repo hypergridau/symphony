@@ -1,20 +1,27 @@
 defmodule SymphonyElixir.Codex.ModelRouter do
   @moduledoc """
-  Selects the least-capable Codex model admitted for a Linear issue and retry.
+  Selects a Codex model for a Linear issue and retry.
 
-  The default retry ladder is Luna high -> Luna xhigh -> Luna max -> Sol xhigh.
-  Explicit `model:*` labels override task-profile inference. Failed worker attempts
-  escalate one rung at a time and never wrap around the ladder.
+  Managed workers default to GPT-6 Luna high and may escalate to xhigh and max
+  after failed attempts. The older resolver remains available for unmanaged
+  operation and historical compatibility; it is never a managed fallback.
   """
 
   alias SymphonyElixir.Tracker.Issue
+  alias SymphonyElixir.WorkPackageClaim.Journal
 
-  @ladder [
+  @legacy_ladder [
     %{tier: "luna-high", model: "gpt-5.6-luna", effort: "high"},
     %{tier: "luna-xhigh", model: "gpt-5.6-luna", effort: "xhigh"},
     %{tier: "luna-max", model: "gpt-5.6-luna", effort: "max"},
     %{tier: "sol-xhigh", model: "gpt-5.6-sol", effort: "xhigh"}
   ]
+  @gpt6_luna_ladder [
+    %{tier: "gpt6-luna-high", model: "gpt-6-luna", effort: "high"},
+    %{tier: "gpt6-luna-xhigh", model: "gpt-6-luna", effort: "xhigh"},
+    %{tier: "gpt6-luna-max", model: "gpt-6-luna", effort: "max"}
+  ]
+  @managed_model_label "model:gpt-6-luna"
   @explicit_labels %{
     "model:luna" => "luna-high",
     "model:luna-high" => "luna-high",
@@ -30,11 +37,18 @@ defmodule SymphonyElixir.Codex.ModelRouter do
   @spec resolve(Issue.t(), non_neg_integer() | nil) :: map()
   def resolve(%Issue{labels: labels}, attempt) do
     normalized_labels = labels |> List.wrap() |> Enum.map(&normalize_label/1) |> MapSet.new()
-    {base_tier, reason} = base_route(normalized_labels)
-    base_index = Enum.find_index(@ladder, &(&1.tier == base_tier)) || 0
+    gpt6_luna? = MapSet.member?(normalized_labels, "model:gpt-6-luna")
+    ladder = if gpt6_luna?, do: @gpt6_luna_ladder, else: @legacy_ladder
+
+    {base_tier, reason} =
+      if gpt6_luna?,
+        do: {"gpt6-luna-high", "explicit model:gpt-6-luna label"},
+        else: base_route(normalized_labels)
+
+    base_index = Enum.find_index(ladder, &(&1.tier == base_tier)) || 0
     retry_count = if is_integer(attempt) and attempt > 0, do: attempt, else: 0
-    selected_index = min(base_index + retry_count, length(@ladder) - 1)
-    route = Enum.at(@ladder, selected_index)
+    selected_index = min(base_index + retry_count, length(ladder) - 1)
+    route = Enum.at(ladder, selected_index)
 
     Map.merge(route, %{
       base_tier: base_tier,
@@ -42,6 +56,65 @@ defmodule SymphonyElixir.Codex.ModelRouter do
       escalated: selected_index > base_index,
       reason: if(selected_index > base_index, do: "#{reason}; escalated after worker attempt #{retry_count}", else: reason)
     })
+  end
+
+  @doc """
+  Resolves the operator-granted managed worker route. Legacy or unknown model
+  labels are rejected instead of silently changing the requested model.
+  """
+  @spec resolve_managed(Issue.t(), non_neg_integer() | nil) :: {:ok, map()} | {:error, atom()}
+  def resolve_managed(%Issue{labels: labels}, attempt) do
+    normalized_labels = labels |> List.wrap() |> Enum.map(&normalize_label/1) |> MapSet.new()
+
+    if Enum.any?(normalized_labels, &(String.starts_with?(&1, "model:") and &1 != @managed_model_label)) do
+      {:error, :unsupported_managed_model_label}
+    else
+      retry_count = if is_integer(attempt) and attempt > 0, do: attempt, else: 0
+      selected_index = min(retry_count, length(@gpt6_luna_ladder) - 1)
+      route = Enum.at(@gpt6_luna_ladder, selected_index)
+
+      {:ok,
+       Map.merge(route, %{
+         base_tier: "gpt6-luna-high",
+         attempt: retry_count,
+         escalated: selected_index > 0,
+         reason:
+           if(selected_index > 0,
+             do: "managed GPT-6 Luna default; escalated after worker attempt #{retry_count}",
+             else: "managed GPT-6 Luna default"
+           )
+       })}
+    end
+  end
+
+  def resolve_managed(_issue, _attempt), do: {:error, :invalid_issue}
+
+  @doc "Loads the durable failed-turn count used for a managed worker route."
+  @spec resolve_managed_from_journal(Issue.t(), map()) :: {:ok, map()} | {:error, term()}
+  def resolve_managed_from_journal(
+        %Issue{} = issue,
+        %{
+          journal_path: path,
+          managed_project_profile_id: profile_id,
+          repository_ref: repository_ref
+        } = runtime
+      )
+      when is_binary(path) and is_binary(profile_id) and is_binary(repository_ref) do
+    with {:ok, journal} <- load_managed_journal(path, Map.get(runtime, :allow_missing_initial, false)),
+         {:ok, failed_turn_count} <- Journal.failed_worker_turn_count(journal, issue.id, profile_id, repository_ref) do
+      resolve_managed(issue, failed_turn_count)
+    end
+  end
+
+  def resolve_managed_from_journal(_issue, _runtime), do: {:error, :invalid_managed_model_runtime}
+
+  defp load_managed_journal(path, allow_missing_initial) do
+    case Journal.load(path) do
+      {:ok, journal} -> {:ok, journal}
+      :missing when allow_missing_initial -> {:ok, Journal.new()}
+      :missing -> {:error, :managed_journal_missing}
+      {:error, _reason} = error -> error
+    end
   end
 
   defp base_route(labels) do

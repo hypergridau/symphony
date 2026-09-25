@@ -26,6 +26,12 @@ It creates responsibility only for the exact freshly eligible issue, through the
 owner, and keeps successor admission behind predecessor cleanup and provider claims. A ready label
 does not grant execution authority. See [responsibility delegation](docs/responsibility-delegation.md).
 
+Model selection is also subject to that authority: manifest-managed workers default to GPT-6
+Luna high, escalating to xhigh and max only after failed attempts. The optional
+`model:gpt-6-luna` label is redundant for managed workers; legacy or conflicting `model:*`
+labels fail admission. A matching operator-issued model and effort grant is still required.
+Historical claims and grants are not rewritten; stale GPT-5.6 grants fail closed.
+
 A generation released before claim submission does not reserve the repository indefinitely.
 Another eligible issue may proceed only after the journal, exact delegation and absent local
 workspace prove that the released generation has no remaining mutable authority.
@@ -33,6 +39,8 @@ workspace prove that the released generation has no remaining mutable authority.
 Managed issue token totals survive scheduler restarts and claim release. Explicit historical
 baselines and per-thread cumulative observations live beside the private claim journal. Missing or
 uncertain accounting prevents further admission; recovery does not silently reset an allowance.
+An explicit progress-scoped Luna grant can omit a per-task token count while retaining that
+accounting and all independent scope, expiry, and progress controls; finite grants remain bounded.
 The sole host operator can explicitly register a genuinely new canonical issue in the existing
 ledger after verifying no prior execution. Registration preserves old usage and requires separate
 current responsibility and provider authority before execution; the scheduler never creates it.

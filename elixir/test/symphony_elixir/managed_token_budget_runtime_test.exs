@@ -11,7 +11,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetRuntimeTest do
       tracker_kind: "memory",
       max_concurrent_agents: 1,
       codex_stall_timeout_ms: 0,
-      codex_max_no_progress_tokens: 0,
+      codex_max_no_progress_tokens: if(context[:progress_scoped], do: 250_000, else: 0),
       codex_max_total_tokens: context[:configured_limit] || 500_000
     ]
 
@@ -23,6 +23,17 @@ defmodule SymphonyElixir.ManagedTokenBudgetRuntimeTest do
 
     payload =
       update_in(Fixture.payload(now), ["entries"], fn [first, second] ->
+        first =
+          if context[:progress_scoped] do
+            Enum.reduce(["accountable", "responsible"], first, fn role, entry ->
+              entry
+              |> put_in([role, "budget", "mode"], "progress_scoped")
+              |> put_in([role, "budget", "max_tokens"], nil)
+            end)
+          else
+            first
+          end
+
         second = put_in(second, ["accountable", "budget", "max_tokens"], 750_000)
         [first, put_in(second, ["responsible", "budget", "max_tokens"], 750_000)]
       end)
@@ -58,7 +69,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetRuntimeTest do
       execution_session_id: session,
       session_id: "thread-turn",
       codex_session_identity: %{thread_id: "thread", turn_id: "turn"},
-      workspace_path: nil,
+      workspace_path: if(context[:progress_scoped], do: "/workspace/task", else: nil),
       started_at: at,
       last_codex_timestamp: at,
       last_codex_event: :session_started,
@@ -98,6 +109,31 @@ defmodule SymphonyElixir.ManagedTokenBudgetRuntimeTest do
     assert restored.codex_issue_totals[c.issue.id] == 500_050
     assert {:error, _} = Orchestrator.admit_execution_for_test(restored, c.issue, nil)
     assert restored.running == %{}
+  end
+
+  @tag progress_scoped: true
+  test "a progressing Luna worker stays live past the former token ceiling", c do
+    assert Runtime.effective_limit(:sys.get_state(c.pid), c.issue.id) == {:ok, :unbounded}
+
+    for total <- 200_000..3_200_000//200_000 do
+      send_usage(c.pid, c.entry, total)
+      send_file_change(c.pid, c.entry, total)
+      state = :sys.get_state(c.pid)
+      assert state.codex_issue_totals[c.issue.id] == total
+      assert Runtime.release_totals(state, c.issue.id)[c.issue.id] == total
+      assert state.running[c.issue.id].pid == c.worker
+      assert state.running[c.issue.id].codex_durable_progress_token_baseline == total
+      assert Process.alive?(c.worker)
+      assert state.managed_token_budget_error == nil
+      refute Map.has_key?(state.blocked, c.issue.id)
+
+      send(c.pid, :run_poll_cycle)
+      polled = :sys.get_state(c.pid)
+      assert polled.running[c.issue.id].pid == c.worker
+      assert Process.alive?(c.worker)
+      assert polled.managed_token_budget_error == nil
+      refute Map.has_key?(polled.blocked, c.issue.id)
+    end
   end
 
   test "a changed ledger blocks the running worker and startup even after bytes are restored", c do
@@ -235,6 +271,32 @@ defmodule SymphonyElixir.ManagedTokenBudgetRuntimeTest do
          execution_token: entry.execution_token,
          execution_session_id: entry.execution_session_id,
          payload: %{"method" => "thread/tokenUsage/updated", "params" => %{"threadId" => "thread", "tokenUsage" => %{"total" => %{"totalTokens" => total}}}}
+       }}
+    )
+  end
+
+  defp send_file_change(pid, entry, total) do
+    send(
+      pid,
+      {:codex_worker_update, entry.issue.id,
+       %{
+         event: :notification,
+         timestamp: DateTime.utc_now(),
+         execution_token: entry.execution_token,
+         execution_session_id: entry.execution_session_id,
+         payload: %{
+           "method" => "item/completed",
+           "params" => %{
+             "threadId" => "thread",
+             "turnId" => "turn",
+             "item" => %{
+               "id" => "patch-#{total}",
+               "type" => "fileChange",
+               "status" => "completed",
+               "changes" => [%{"path" => "/workspace/task/probe.ex", "kind" => %{"type" => "update"}, "diff" => "+progress"}]
+             }
+           }
+         }
        }}
     )
   end

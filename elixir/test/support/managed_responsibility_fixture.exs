@@ -38,7 +38,7 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
       assignee_id: "owner-test",
       title: "Useful fixture task",
       state: "Todo",
-      labels: ["symphony-ready", "model:luna"],
+      labels: ["symphony-ready"],
       dispatchable: true,
       branch_name: "codex/test-#{number}"
     }
@@ -91,7 +91,7 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
         "actor_id" => "owner-test",
         "parent_delegation_id" => nil,
         "authority" => %{"class" => "routine_engineering", "capabilities" => actions ++ ~w(delegate observe reconcile), "environments" => ["repository"]},
-        "budget" => %{"model" => "gpt-5.6-luna", "effort" => "max", "max_tokens" => 500_000, "max_children" => 1}
+        "budget" => %{"model" => "gpt-6-luna", "effort" => "max", "max_tokens" => 500_000, "max_children" => 1}
       })
 
     responsible =
@@ -101,7 +101,7 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
         "actor_id" => "runner-test",
         "parent_delegation_id" => accountable["id"],
         "authority" => %{"class" => "routine_engineering", "capabilities" => actions, "environments" => ["repository"]},
-        "budget" => %{"model" => "gpt-5.6-luna", "effort" => "max", "max_tokens" => 500_000, "max_children" => 0}
+        "budget" => %{"model" => "gpt-6-luna", "effort" => "max", "max_tokens" => 500_000, "max_children" => 0}
       })
 
     %{"issue_id" => issue.id, "identifier" => issue.identifier, "owner_id" => issue.assignee_id, "accountable" => accountable, "responsible" => responsible}

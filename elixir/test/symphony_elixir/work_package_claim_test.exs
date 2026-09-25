@@ -1,7 +1,9 @@
 defmodule SymphonyElixir.WorkPackageClaimTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, ResponsibilityGraph, WorkPackageClaim}
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   @repository "hypergridau/symphony"
@@ -53,6 +55,62 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert second.attestation.reservation_nonce == "nonce-349"
     assert_receive {:replay_request, replay_url, _replay_options}
     refute String.ends_with?(replay_url, "/reservations/by-issue")
+  end
+
+  test "failed Codex turn evidence is durable, deduplicated, and scoped to its reservation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _} = WorkPackageClaim.claim(input, request_fun: request)
+    assert {:ok, journal} = Journal.load(path)
+    [{key, _reservation}] = Map.to_list(journal.reservations)
+    assert {:ok, 0} = Journal.failed_worker_turn_count(journal, @issue_id, @profile, @repository)
+
+    evidence = %{
+      thread_id: "thread-349",
+      turn_id: "turn-349",
+      observed_at_ms: 1_790_000_000_000,
+      payload_sha256: String.duplicate("a", 64)
+    }
+
+    assert {:ok, once} = Journal.put_failed_worker_turn(journal, key, "thread-349:turn-349", evidence)
+
+    assert {:ok, ^once} =
+             Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{
+               evidence
+               | observed_at_ms: evidence.observed_at_ms + 1
+             })
+
+    assert {:error, :failed_worker_turn_conflict} =
+             Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{evidence | payload_sha256: String.duplicate("b", 64)})
+
+    assert :ok = Journal.save(path, once)
+    assert {:ok, reloaded} = Journal.load(path)
+    assert {:ok, 1} = Journal.failed_worker_turn_count(reloaded, @issue_id, @profile, @repository)
+    assert {:ok, 0} = Journal.failed_worker_turn_count(reloaded, @issue_id, "other-profile", @repository)
+    assert {:ok, 0} = Journal.failed_worker_turn_count(reloaded, "other-issue", @profile, @repository)
+
+    runtime = %{journal_path: path, managed_project_profile_id: @profile, repository_ref: @repository}
+
+    assert {:ok, %{model: "gpt-6-luna", effort: "xhigh"}} =
+             ModelRouter.resolve_managed_from_journal(%Issue{id: @issue_id, labels: []}, runtime)
+
+    File.rm!(path)
+
+    assert {:error, :managed_journal_missing} =
+             ModelRouter.resolve_managed_from_journal(%Issue{id: @issue_id, labels: []}, runtime)
+
+    assert {:ok, %{model: "gpt-6-luna", effort: "high"}} =
+             ModelRouter.resolve_managed_from_journal(%Issue{id: @issue_id, labels: []}, Map.put(runtime, :allow_missing_initial, true))
+
+    assert {:error, :invalid_failed_worker_turn} =
+             Journal.put_failed_worker_turn(journal, key, "other-turn", evidence)
   end
 
   test "fails closed for expired authority and malformed provider reservation" do

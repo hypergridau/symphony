@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
 
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.ManagedTokenBudget.Limit
+  alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.Unsubmitted
 
   @efforts ~w(none minimal low medium high xhigh max ultra)
@@ -20,21 +21,50 @@ defmodule SymphonyElixir.ManagedResponsibility.Admission do
 
   @spec prepare(map(), map(), map() | nil, map(), non_neg_integer() | nil, non_neg_integer(), map() | nil) ::
           {:ok, map()} | {:error, term()}
-  def prepare(graph, _fence, nil, _issue, _attempt, _now_ms, _runtime), do: {:ok, graph}
+  def prepare(graph, _fence, nil, %Issue{} = issue, attempt, _now_ms, _runtime) do
+    if ModelRouter.resolve(issue, attempt).model == "gpt-6-luna",
+      do: {:error, :managed_responsibility_required_for_gpt6_luna},
+      else: {:ok, graph}
+  end
 
-  def prepare(graph, fence, manifest, issue, attempt, now_ms, runtime) do
+  def prepare(graph, _fence, nil, nil, _attempt, _now_ms, _runtime), do: {:ok, graph}
+  def prepare(_graph, _fence, nil, _issue, _attempt, _now_ms, _runtime), do: {:error, :invalid_issue}
+
+  def prepare(graph, fence, manifest, issue, _attempt, now_ms, runtime) do
     with true <- ResponsibilityGraph.enforced?(graph),
          :ok <- ExecutionFence.validate(fence),
+         {:ok, route} <-
+           ModelRouter.resolve_managed_from_journal(issue, managed_model_runtime(runtime, manifest, fence, issue)),
          :ok <- prior_repository_cleanup(fence, graph, manifest.repository_ref, issue.id, runtime, now_ms),
-         {:ok, next_graph} <- ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
-         {:ok, delegation} <- ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
+         {:ok, next_graph} <-
+           ManagedResponsibility.admit(graph, manifest, issue, now_ms, %{runtime: runtime, fence: fence}),
+         {:ok, delegation} <-
+           ResponsibilityGraph.admission_delegation(next_graph, issue.id, issue.identifier, manifest.repository_ref),
          :ok <- matching_budget_modes(next_graph, delegation),
-         :ok <- route_budget(delegation.budget, ModelRouter.resolve(issue, attempt)) do
+         :ok <- route_budget(delegation.budget, route) do
       {:ok, next_graph}
     else
       false -> {:error, :managed_responsibility_requires_enforcement}
       {:error, _reason} = error -> error
     end
+  end
+
+  defp managed_model_runtime(nil, manifest, fence, issue) do
+    %{
+      journal_path: Config.execution_fence_state_path() <> ".work-package",
+      managed_project_profile_id: manifest.managed_project_profile_id,
+      repository_ref: manifest.repository_ref,
+      allow_missing_initial: not Map.has_key?(fence.executions, issue.id)
+    }
+  end
+
+  defp managed_model_runtime(runtime, manifest, fence, issue) when is_map(runtime) do
+    %{
+      journal_path: Map.get(runtime, :journal_path),
+      managed_project_profile_id: Map.get(runtime, :managed_project_profile_id),
+      repository_ref: manifest.repository_ref,
+      allow_missing_initial: not Map.has_key?(fence.executions, issue.id)
+    }
   end
 
   defp prior_repository_cleanup(%{executions: executions} = fence, graph, repository, issue_id, runtime, now_ms) do

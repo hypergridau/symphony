@@ -5,6 +5,126 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
   alias SymphonyElixir.ExecutionFence.Persistence
   alias SymphonyElixir.WorkPackageClaim.Journal
 
+  test "managed failed-turn evidence requires the live worker, lease, and claimed reservation" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "memory", max_concurrent_agents: 1)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    issue_id = "HGS-failed-turn-evidence"
+    repository = "openai/symphony"
+    profile = "profile-failed-turn"
+    journal_path = Path.join(System.tmp_dir!(), "symphony-failed-turn-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(journal_path) end)
+    admission = %{issue_id: issue_id, repository: repository, branch: "codex/failed-turn", worktree: "/tmp/failed-turn"}
+    {:ok, fence, token} = ExecutionFence.admit(ExecutionFence.new(), admission, 100)
+
+    session =
+      Map.merge(admission, %{
+        generation: token.generation,
+        role: :worker,
+        session_id: "worker-failed-turn",
+        process_id: "process-failed-turn",
+        linear_state: "In Progress",
+        pr_state: "OPEN",
+        head: "unobserved",
+        last_heartbeat_at: 100
+      })
+
+    {:ok, fence, :registered} = ExecutionFence.register(fence, token, :worker, session, 100)
+    key = Journal.reservation_key(issue_id, profile, repository, token.generation)
+
+    reservation = %{
+      issue_id: issue_id,
+      managed_project_profile_id: profile,
+      repository_ref: repository,
+      projection_id: "projection-failed-turn",
+      reservation_id: "reservation-failed-turn",
+      reservation_nonce: "nonce-failed-turn",
+      scope_keys: ["repo:#{repository}"],
+      runner_id: "runner-failed-turn",
+      generation: token.generation,
+      session_id: session.session_id,
+      process_id: session.process_id,
+      responsible_delegation_id: "delegation-failed-turn",
+      execution_fence_token: "#{issue_id}:#{token.generation}",
+      runtime_lease_id: session.session_id
+    }
+
+    {:ok, journal} = Journal.put(Journal.new(), key, reservation)
+    :ok = Journal.save(journal_path, journal)
+    name = Module.concat(__MODULE__, "FailedTurn#{System.unique_integer([:positive])}")
+    pid = start_supervised!({Orchestrator, name: name})
+
+    entry = %{
+      pid: self(),
+      execution_token: token,
+      execution_session_id: session.session_id,
+      responsibility_delegation_id: reservation.responsible_delegation_id,
+      codex_session_identity: %{thread_id: "thread-failed-turn", turn_id: "turn-failed-turn"}
+    }
+
+    runtime = %{
+      journal_path: journal_path,
+      managed_project_profile_id: profile,
+      managed_delegations: %{repository_ref: repository}
+    }
+
+    :sys.replace_state(
+      pid,
+      &%{
+        &1
+        | execution_fence: fence,
+          running: %{issue_id => entry},
+          work_package_runtime: runtime
+      }
+    )
+
+    update = %{
+      event: :turn_failed,
+      execution_token: token,
+      execution_session_id: session.session_id,
+      payload: %{
+        "method" => "turn/failed",
+        "params" => %{"threadId" => "thread-failed-turn", "turn" => %{"id" => "turn-failed-turn"}}
+      }
+    }
+
+    assert :ok = GenServer.call(pid, {:managed_failed_turn, issue_id, update})
+    assert {:ok, persisted} = Journal.load(journal_path)
+    assert {:ok, 1} = Journal.failed_worker_turn_count(persisted, issue_id, profile, repository)
+    bytes = File.read!(journal_path)
+    assert :ok = GenServer.call(pid, {:managed_failed_turn, issue_id, update})
+    assert File.read!(journal_path) == bytes
+
+    for params <- [
+          %{"threadId" => "stale-thread", "turn" => %{"id" => "turn-failed-turn"}},
+          %{"threadId" => "thread-failed-turn", "turn" => %{"id" => "stale-turn"}},
+          %{"turnId" => "turn-failed-turn"}
+        ] do
+      assert {:error, :managed_failed_turn_identity_mismatch} =
+               GenServer.call(pid, {
+                 :managed_failed_turn,
+                 issue_id,
+                 put_in(update, [:payload, "params"], params)
+               })
+
+      assert File.read!(journal_path) == bytes
+    end
+
+    assert {:error, :managed_failed_turn_identity_mismatch} =
+             GenServer.call(pid, {:managed_failed_turn, issue_id, %{update | execution_session_id: "stale"}})
+
+    wrong_sender = Task.async(fn -> GenServer.call(pid, {:managed_failed_turn, issue_id, update}) end)
+    assert {:error, :managed_failed_turn_identity_mismatch} = Task.await(wrong_sender)
+
+    {:ok, released_fence, :released} = ExecutionFence.release(fence, token, session.session_id)
+    :sys.replace_state(pid, &%{&1 | execution_fence: released_fence})
+
+    assert {:error, :managed_failed_turn_identity_mismatch} =
+             GenServer.call(pid, {:managed_failed_turn, issue_id, update})
+
+    assert File.read!(journal_path) == bytes
+  end
+
   test "termination confirmation through the server persists only valid generation-bound evidence" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_kind: "memory",
