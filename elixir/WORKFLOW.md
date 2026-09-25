@@ -50,14 +50,16 @@ Managed Linux runners additionally require the complete work-package tuple docum
 `DAHLIA_MANAGED_PROJECT_PROFILE_ID`. Keep these values out of this workflow file; the runtime
 scrubs the provider token and attestation key before launching Codex.
 
-The `DAHLIA_MANAGED_DELEGATION_PATH` and `DAHLIA_MANAGED_DELEGATION_SHA256` settings are required
+The `DAHLIA_MANAGED_DELEGATION_PATH`, `DAHLIA_MANAGED_DELEGATION_SHA256`,
+`DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519`, and
+`DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519` settings are required
 for declared managed pools and are
 host-controlled service configuration. Workers must not edit the manifest or graph snapshots.
 Loading this input grants no worker lease: fresh native eligibility, exact responsibility,
 execution fencing and the provider's durable claim remain required before a turn starts.
 
 Managed workers use the GPT-6 Luna-only high/xhigh/max retry ladder by default. The optional
-`model:gpt-6-luna` label does not override the digest-pinned managed delegation's exact model
+`model:gpt-6-luna` label does not override the signed, digest-pinned managed delegation's exact model
 and effort ceiling; legacy or conflicting model labels and stale grants fail admission. Keep
 the app-server command routable without a conflicting static model pin.
 

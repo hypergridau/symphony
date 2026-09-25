@@ -723,9 +723,14 @@ from the Codex child environment.
 ### Explicit managed responsibility
 
 For an enforced managed Linux pool, the COO/runtime owner must install a non-secret, root-owned manifest
-and set both `DAHLIA_MANAGED_DELEGATION_PATH` and `DAHLIA_MANAGED_DELEGATION_SHA256` in the trusted
+and set `DAHLIA_MANAGED_DELEGATION_PATH`, `DAHLIA_MANAGED_DELEGATION_SHA256`,
+`DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519`, and
+`DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519` in the trusted
 service environment. The file must be regular, at most 256 KiB, not group/world writable, with no
-symlink ancestors. Its SHA-256 must match the pinned lowercase digest. Partial or invalid
+symlink ancestors. Its SHA-256 must match the pinned lowercase digest. The exact
+raw bytes must also verify under the domain-separated Ed25519 signature and
+host-pinned public key. Keep the signing private key off the runner guest and
+separate from the claim-witness key. Partial or invalid
 configuration fails startup. A declared managed pool also rejects both settings being absent.
 An empty manifest explicitly authorizes no work; only undeclared legacy operation may omit it.
 The runtime never grants authority from an issue's prose or labels.

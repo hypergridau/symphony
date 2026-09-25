@@ -508,6 +508,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     File.write!(manifest_path, manifest_bytes)
     File.chmod!(manifest_path, 0o644)
     manifest_digest = Base.encode16(:crypto.hash(:sha256, manifest_bytes), case: :lower)
+    {manifest_public_key, manifest_private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    manifest_signature = :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v1\0" <> manifest_bytes, [manifest_private_key, :ed25519])
 
     source_head = @runtime_source_head
 
@@ -524,6 +526,8 @@ defmodule SymphonyElixir.ExtensionsTest do
       "DAHLIA_MANAGED_PROJECT_PROFILE_ID" => "profile-live-test",
       "DAHLIA_MANAGED_DELEGATION_PATH" => manifest_path,
       "DAHLIA_MANAGED_DELEGATION_SHA256" => manifest_digest,
+      "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519" => Base.encode16(manifest_signature, case: :lower),
+      "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519" => Base.encode16(manifest_public_key, case: :lower),
       "DAHLIA_WORK_PACKAGE_JOURNAL_PATH" => journal_path,
       "DAHLIA_WORK_PACKAGE_ARCHIVE_ROOT" => archive_root
     }
@@ -596,6 +600,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "delegation_manifest" => %{
                "state" => "configured",
                "sha256" => manifest_digest,
+               "signer_key_sha256" => Base.encode16(:crypto.hash(:sha256, manifest_public_key), case: :lower),
                "authorized_issue_count" => 0
              }
            }

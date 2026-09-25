@@ -71,9 +71,9 @@ defmodule SymphonyElixir.RuntimeIdentity do
     }
   end
 
-  defp manifest_projection(projection, %{source_sha256: digest, entries: entries})
-       when is_binary(digest) and is_list(entries) do
-    Map.put(projection, :delegation_manifest, %{state: "configured", sha256: digest, authorized_issue_count: length(entries)})
+  defp manifest_projection(projection, %{source_sha256: digest, signer_key_sha256: signer, entries: entries})
+       when is_binary(digest) and is_binary(signer) and is_list(entries) do
+    Map.put(projection, :delegation_manifest, %{state: "configured", sha256: digest, signer_key_sha256: signer, authorized_issue_count: length(entries)})
   end
 
   defp manifest_projection(projection, _manifest), do: projection
