@@ -28,6 +28,8 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         faults: Keyword.get(opts, :faults, %{}),
         invalid_allocation_response: Keyword.get(opts, :invalid_allocation_response, false),
         invalid_result_ack: Keyword.get(opts, :invalid_result_ack, false),
+        invalid_abort_result_ack: Keyword.get(opts, :invalid_abort_result_ack, false),
+        invalid_abort_cleanup_response: Keyword.get(opts, :invalid_abort_cleanup_response, false),
         result: Keyword.get(opts, :result),
         checkout_mismatch: Keyword.get(opts, :checkout_mismatch, false),
         checkout_failure: Keyword.get(opts, :checkout_failure, false),
@@ -90,7 +92,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   @impl true
   def ensure_abort_cleanup(allocation, assignment, abort_reason, idempotency_key, pid) do
     with_event(pid, {:ensure_abort_cleanup, allocation.id, assignment.sha256, abort_reason, idempotency_key}, fn state ->
-      fail_once(state, :abort_cleanup, :ok)
+      abort_cleanup_response(state)
     end)
   end
 
@@ -99,7 +101,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
     with_event(
       pid,
       {:publish_or_reconcile_abort_result, allocation.id, assignment.sha256, abort_result, idempotency_key},
-      fn state -> fail_once(state, :abort_result, {:ok, "abort-result-fixture-1"}) end
+      fn state -> abort_result_response(state) end
     )
   end
 
@@ -152,6 +154,16 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
     do: {{:ok, ""}, %{state | invalid_result_ack: false}}
 
   defp result_response(state), do: fail_once(state, :result, {:ok, "result-fixture-1"})
+
+  defp abort_result_response(%{invalid_abort_result_ack: true} = state),
+    do: {:unexpected_abort_result_ack, %{state | invalid_abort_result_ack: false}}
+
+  defp abort_result_response(state), do: fail_once(state, :abort_result, {:ok, "abort-result-fixture-1"})
+
+  defp abort_cleanup_response(%{invalid_abort_cleanup_response: true} = state),
+    do: {:unexpected_abort_cleanup_response, %{state | invalid_abort_cleanup_response: false}}
+
+  defp abort_cleanup_response(state), do: fail_once(state, :abort_cleanup, :ok)
 
   defp result(%{result: nil}, assignment), do: result(%{result: :default}, assignment)
 
