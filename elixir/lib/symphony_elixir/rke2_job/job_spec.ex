@@ -4,7 +4,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
 
   Callers must preserve that provenance. This module verifies canonical bundle integrity,
   placement, and trusted image/namespace configuration; it does not verify the manifest
-  signature itself.
+  signature itself. Compiled Jobs start suspended; this module does not activate them.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
@@ -45,6 +45,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
            }
          },
          "spec" => %{
+           "suspend" => true,
            "activeDeadlineSeconds" => @active_deadline_seconds,
            "backoffLimit" => @backoff_limit,
            "ttlSecondsAfterFinished" => @ttl_seconds_after_finished,
@@ -116,6 +117,15 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   end
 
   def owned_job?(_job, _expected), do: false
+
+  @doc "Accepts exact owned Jobs in suspended or active state for cleanup only."
+  @spec owned_job_for_cleanup?(map(), map()) :: boolean()
+  def owned_job_for_cleanup?(job, expected) when is_map(job) and is_map(expected) do
+    owned_job?(job, expected) or
+      owned_job?(job, put_in(expected, ["spec", "suspend"], false))
+  end
+
+  def owned_job_for_cleanup?(_job, _expected), do: false
 
   @spec labels(map()) :: map()
   def labels(assignment) do
@@ -250,7 +260,6 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
       {"parallelism", 1},
       {"completionMode", "NonIndexed"},
       {"manualSelector", false},
-      {"suspend", false},
       {"podReplacementPolicy", "TerminatingOrFailed"}
     ]
   end
