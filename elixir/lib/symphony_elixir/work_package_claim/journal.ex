@@ -465,7 +465,6 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
 
   defp valid_reservation?(reservation) when is_map(reservation) do
     valid_required_strings?(reservation) and
-      valid_scope_ids?(reservation) and
       is_integer(reservation[:generation]) and reservation[:generation] > 0 and
       is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
       Enum.all?(reservation[:scope_keys], &present_string?/1) and
@@ -492,7 +491,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       :runtime_lease_id
     ]
 
-    Enum.all?(fields, &present_string?(Map.get(reservation, &1)))
+    Enum.all?(fields, &present_string?(Map.get(reservation, &1))) and valid_scope_ids?(reservation)
   end
 
   defp valid_scope_ids?(reservation) do
