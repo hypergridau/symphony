@@ -38,7 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
   alias SymphonyElixir.Tracker.Issue
-  alias SymphonyElixir.WorkPackageClaim.{Journal, Unsubmitted}
+  alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
 
   @continuation_retry_delay_ms 1_000
@@ -860,7 +860,12 @@ defmodule SymphonyElixir.Orchestrator do
         release_issue_claim(state, issue.id)
 
       active_issue_state?(issue.state, active_states) ->
-        refresh_blocked_issue_state(state, issue)
+        if verified_pre_spawn_claim_release?(state, issue) do
+          Logger.info("Blocked pre-spawn claim has an exact provider release receipt: #{issue_context(issue)}; releasing local block")
+          release_issue_claim(state, issue.id)
+        else
+          refresh_blocked_issue_state(state, issue)
+        end
 
       true ->
         Logger.info("Blocked issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; retaining cleanup authority")
@@ -870,6 +875,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp verified_pre_spawn_claim_release?(%State{work_package_runtime: runtime} = state, issue)
+       when is_map(runtime) do
+    blocked = Map.get(state.blocked, issue.id, %{})
+
+    is_binary(blocked[:error]) and
+      String.starts_with?(blocked.error, "Claim recovery requires reconciliation: ") and
+      Abandonment.check(runtime, state.execution_fence, issue.id) == :authorized
+  end
+
+  defp verified_pre_spawn_claim_release?(_state, _issue), do: false
 
   defp reconcile_missing_running_issue_ids(%State{} = state, requested_issue_ids, issues)
        when is_list(requested_issue_ids) and is_list(issues) do

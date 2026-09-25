@@ -154,6 +154,35 @@ defmodule SymphonyElixir.WorkPackageClaimAbandonmentTest do
     assert {:error, :stale_generation} = ExecutionFence.authorize(advanced.execution_fence, %{issue_id: c.issue.id, generation: 3}, :commit)
   end
 
+  test "paused claim block clears only after the exact signed provider release is present", c do
+    blocked = %{
+      c.state
+      | claimed: MapSet.put(c.state.claimed, c.issue.id),
+        blocked: %{
+          c.issue.id => %{
+            issue: c.issue,
+            identifier: c.issue.identifier,
+            error: "Claim recovery requires reconciliation: :global_pause"
+          }
+        }
+    }
+
+    File.rm!(c.path)
+    held = Orchestrator.reconcile_blocked_issue_states_for_test([c.issue], blocked)
+    assert Map.has_key?(held.blocked, c.issue.id)
+    assert MapSet.member?(held.claimed, c.issue.id)
+
+    sign_envelope(c, c.envelope)
+    journal_before = File.read!(c.runtime.journal_path)
+    released = Orchestrator.reconcile_blocked_issue_states_for_test([c.issue], held)
+
+    refute Map.has_key?(released.blocked, c.issue.id)
+    refute MapSet.member?(released.claimed, c.issue.id)
+    assert File.read!(c.runtime.journal_path) == journal_before
+    assert released.execution_fence == c.state.execution_fence
+    assert released.responsibility_graph == c.state.responsibility_graph
+  end
+
   test "tampered signatures, changed local journal and generation rollback are held", c do
     {_, unrelated_key} = :crypto.generate_key(:eddsa, :ed25519)
     sign_envelope(%{c | private_key: unrelated_key}, c.envelope)

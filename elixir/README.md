@@ -416,8 +416,11 @@ all issue generations must have released, unobserved leases, all issue workspace
 and the original journal bytes and provider tuple must match. A spawn marker or worker observation
 blocks adoption. Existing manifest, owner and budget checks still apply; accountable restart
 reconciliation uses the responsibility graph. Normal admission archives the previous generation
-and increments it once. An envelope already passed by a newer generation does not override that
-generation's claim/recovery checks. A reservation lookup that explicitly reports not-ready releases
+and increments it once. If a paused pre-spawn claim is blocked in memory, active-issue
+reconciliation clears that block only after the exact signed release envelope passes these checks;
+the next admission still follows normal claim recovery and global-pause gates. An envelope already
+passed by a newer generation does not override that generation's claim/recovery checks. A
+reservation lookup that explicitly reports not-ready releases
 only the current never-submitted local lease; old journal entries remain history. After restart,
 a valid journal without that generation and an untouched, unsupervised worker lease allow the normal
 recovery path to release exact responsibility before the fence and admit a higher generation.
