@@ -769,8 +769,12 @@ image and trusted namespace supplied by the caller. The Job has fixed execution 
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
 The fakeable client contract supports create/get/delete reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
-server UID. No live Kubernetes client, cluster configuration, credentials, Pod, or spawn
-path is provided or qualified by this source slice. See the
+server UID. `SymphonyElixir.RKE2Job.HTTPClient` implements the same port over HTTPS when
+explicitly called with host-owned API origin, exact namespace, bearer token, and CA
+certificate file settings. It rejects missing or mismatched authorization and configuration,
+disables redirects and retries, and bounds connection and response timeouts. The client is
+not wired into configuration loading or the orchestrator; no live API call, credential source,
+Pod, or spawn path is exercised or qualified by this source slice. See the
 [managed responsibility contract](../docs/responsibility-delegation.md#managed-assignment-bundle).
 
 Pause the existing global gate before replacing the manifest or its digest, then restart the
