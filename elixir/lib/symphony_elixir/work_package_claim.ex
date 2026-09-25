@@ -328,9 +328,9 @@ defmodule SymphonyElixir.WorkPackageClaim do
   defp parse_reservation(data, authority) when is_map(data) do
     with {:ok, projection_id} <- response_string(data, "projectionId"),
          {:ok, reservation_id} <- response_string(data, "reservationId"),
+         {:ok, nonce} <- response_string(data, "reservationNonce"),
          {:ok, workspace_id} <- response_string(data, "workspaceId"),
          {:ok, company_id} <- response_string(data, "companyId"),
-         {:ok, nonce} <- response_string(data, "reservationNonce"),
          {:ok, issue_id} <- response_string(data, "issueId"),
          {:ok, profile_id} <- response_string(data, "managedProjectProfileId"),
          {:ok, repository_ref} <- response_string(data, "repositoryRef"),
