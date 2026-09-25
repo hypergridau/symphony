@@ -15,6 +15,8 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
           optional(:dispatch) => map(),
           optional(:cleanup_receipts) => %{optional(String.t()) => map()},
           optional(:failed_worker_turns) => %{optional(String.t()) => map()},
+          optional(:workspace_id) => String.t(),
+          optional(:company_id) => String.t(),
           issue_id: String.t(),
           managed_project_profile_id: String.t(),
           repository_ref: String.t(),
@@ -28,9 +30,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
           process_id: String.t(),
           responsible_delegation_id: String.t(),
           execution_fence_token: String.t(),
-          runtime_lease_id: String.t(),
-          optional(:workspace_id) => String.t(),
-          optional(:company_id) => String.t()
+          runtime_lease_id: String.t()
         }
 
   @type state :: %{schema_version: 1, reservations: %{optional(String.t()) => reservation()}}
