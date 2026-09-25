@@ -106,12 +106,14 @@ defmodule SymphonyElixir.Config do
     |> Path.join("responsibility-graph.json")
   end
 
-  @doc "Returns the host-controlled, digest-pinned managed delegation configuration."
+  @doc "Returns the host-controlled, signed and digest-pinned managed delegation configuration."
   @spec managed_delegation_config(map()) :: map()
   def managed_delegation_config(env \\ System.get_env()) do
     %{
       path: Map.get(env, "DAHLIA_MANAGED_DELEGATION_PATH"),
       sha256: Map.get(env, "DAHLIA_MANAGED_DELEGATION_SHA256"),
+      signature_ed25519: Map.get(env, "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519"),
+      public_key_ed25519: Map.get(env, "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"),
       runner_id: Map.get(env, "DAHLIA_RUNNER_ID"),
       pool_key: Map.get(env, "SYMPHONY_POOL_KEY"),
       repository_ref: Map.get(env, "SYMPHONY_REPOSITORY_REF"),

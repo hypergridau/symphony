@@ -16,6 +16,8 @@ defmodule SymphonyElixir.ResponsibilityBootstrapTest do
     "DAHLIA_MANAGED_PROJECT_PROFILE_ID",
     "DAHLIA_MANAGED_DELEGATION_PATH",
     "DAHLIA_MANAGED_DELEGATION_SHA256",
+    "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519",
+    "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519",
     "DAHLIA_WORK_PACKAGE_JOURNAL_PATH",
     "DAHLIA_WORK_PACKAGE_ARCHIVE_ROOT",
     "SYMPHONY_GLOBAL_PAUSE_FILE"
@@ -156,8 +158,12 @@ defmodule SymphonyElixir.ResponsibilityBootstrapTest do
     File.write!(path, bytes)
     File.chmod!(path, 0o644)
     digest = Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    signature = :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v1\0" <> bytes, [private_key, :ed25519])
     System.put_env("DAHLIA_MANAGED_DELEGATION_PATH", path)
     System.put_env("DAHLIA_MANAGED_DELEGATION_SHA256", digest)
+    System.put_env("DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519", Base.encode16(signature, case: :lower))
+    System.put_env("DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519", Base.encode16(public_key, case: :lower))
   end
 
   defp save_environment(keys), do: Map.new(keys, &{&1, System.get_env(&1)})
