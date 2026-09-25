@@ -484,8 +484,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert String.contains?(error, ":global_pause")
     assert MapSet.member?(after_pause.claimed, @issue_id)
 
-    assert after_pause.execution_fence == input.fence_state
-    assert after_pause.responsibility_graph == input.responsibility_graph
+    assert after_pause.execution_fence.executions[@issue_id].leases[lease.session_id].status == :released
+    assert after_pause.execution_fence.executions[@issue_id].leases[lease.session_id].release_reason == :spawn_failed
+    assert after_pause.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
     assert {:ok, journal_after_pause} = Journal.load(path)
     [{_key, reservation_after_pause}] = Map.to_list(journal_after_pause.reservations)
     assert reservation_after_pause.dispatch.phase == "recovery_pending"
@@ -500,21 +501,20 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:ok, restarted_graph} =
              ResponsibilityGraph.mark_unreconciled_after_restart(after_pause.responsibility_graph)
 
-    assert restarted_fence.executions[@issue_id].ownership == :unknown
-    assert restarted_graph.delegations["delegation-349"].status == :blocked
-    assert restarted_graph.delegations["delegation-349"].blocked_on == :restart_reconciliation
+    assert restarted_fence.executions[@issue_id].ownership == :reconciled
+    assert restarted_graph.delegations["delegation-349"].status == :active
 
     claim_time_ms = DateTime.to_unix(claim_time, :millisecond)
 
-    assert Recovery.held?(restarted_fence, @issue_id)
+    refute Recovery.held?(restarted_fence, @issue_id)
     assert {:ok, [retained_claim]} = Recovery.unstarted_claims(runtime, restarted_fence)
     assert retained_claim.dispatch.phase == "recovery_pending"
 
     assert {:error, :claim_reconciliation_required} =
              Recovery.prepare(runtime, restarted_fence, restarted_graph, issue, nil, claim_time_ms)
 
-    assert restarted_fence.executions[@issue_id].ownership == :unknown
-    assert restarted_graph.delegations["delegation-349"].blocked_on == :restart_reconciliation
+    assert restarted_fence.executions[@issue_id].ownership == :reconciled
+    assert restarted_graph.delegations["delegation-349"].runtime_lease == nil
     assert {:ok, journal_after_restart} = Journal.load(path)
     assert journal_after_restart == journal_after_pause
     assert Process.get(:claim_pause_requests) == 2

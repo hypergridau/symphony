@@ -1658,6 +1658,22 @@ defmodule SymphonyElixir.Orchestrator do
         # still needs a separately verified provider release and host proof.
         recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
 
+        state =
+          if recovery_fence == :ok do
+            release_execution_lease(
+              state,
+              %{
+                execution_token: token,
+                execution_session_id: session_id,
+                responsibility_delegation_id: responsibility_delegation_id,
+                responsibility_runtime_lease: runtime_lease
+              },
+              :spawn_failed
+            )
+          else
+            state
+          end
+
         block_issue_from_entry(
           state,
           issue.id,
@@ -1984,6 +2000,9 @@ defmodule SymphonyElixir.Orchestrator do
       })
     )
   end
+
+  defp handle_claim_spawn_failure(state, issue, _attempt, :global_pause, entry),
+    do: state |> release_execution_lease(entry, :spawn_failed) |> block_claim_recovery(issue, :global_pause)
 
   defp handle_claim_spawn_failure(state, issue, _attempt, reason, _entry),
     do: block_claim_recovery(state, issue, reason)
