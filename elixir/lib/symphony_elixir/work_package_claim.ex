@@ -90,9 +90,12 @@ defmodule SymphonyElixir.WorkPackageClaim do
   @doc "Durably fences a confirmed claim after the final pause check wins."
   @spec begin_paused_recovery(input()) :: :ok | {:error, term()}
   def begin_paused_recovery(input) do
-    with {:ok, authority} <- authority(input, System.system_time(:millisecond)),
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
          {:ok, journal} <- Journal.load(input.journal_path),
-         {:ok, journal} <- Dispatch.begin_recovery(journal, journal_key(authority)),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         {:ok, journal} <- Dispatch.begin_recovery(journal, key, input),
          :ok <- Journal.save(input.journal_path, journal) do
       :ok
     else
@@ -150,6 +153,12 @@ defmodule SymphonyElixir.WorkPackageClaim do
   end
 
   defp authority(input, now_ms) do
+    authority(input, now_ms, :admission)
+  end
+
+  defp recovery_authority(input, now_ms), do: authority(input, now_ms, :recovery)
+
+  defp authority(input, now_ms, mode) do
     with :ok <- validate_claim_input(input),
          {:ok, base_url} <- validate_base_url(input.base_url),
          :ok <- ExecutionFence.validate(input.fence_state),
@@ -163,7 +172,7 @@ defmodule SymphonyElixir.WorkPackageClaim do
              input[:issue_identifier],
              input.repository_ref
            ),
-         :ok <- valid_delegation_lease(delegation, lease, input.repository_ref, now_ms),
+         :ok <- valid_delegation_lease(delegation, lease, input.repository_ref, now_ms, mode),
          :ok <- repository_matches(execution, input.repository_ref) do
       generation = execution.generation
       session_id = lease.session_id
@@ -244,20 +253,30 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
-  defp valid_delegation_lease(%{id: id, runtime_lease: runtime_lease} = delegation, lease, repository_ref, now_ms)
-       when is_binary(id) do
+  defp valid_delegation_lease(
+         %{id: id, runtime_lease: runtime_lease} = delegation,
+         lease,
+         repository_ref,
+         now_ms,
+         mode
+       )
+       when is_binary(id) and mode in [:admission, :recovery] do
+    expires_at_ms = Map.get(delegation, :expires_at_ms)
+    expiry_valid = is_integer(expires_at_ms) and (mode == :recovery or expires_at_ms > now_ms)
+
     if is_map(runtime_lease) and
          Map.take(runtime_lease, [:issue_id, :repository, :generation, :session_id, :process_id]) ==
            Map.take(lease, [:issue_id, :repository, :generation, :session_id, :process_id]) and
          runtime_lease.repository == repository_ref and
-         is_integer(delegation[:expires_at_ms]) and delegation.expires_at_ms > now_ms do
+         expiry_valid do
       :ok
     else
       {:error, :runtime_lease_mismatch}
     end
   end
 
-  defp valid_delegation_lease(_delegation, _lease, _repository_ref, _now_ms), do: {:error, :runtime_lease_missing}
+  defp valid_delegation_lease(_delegation, _lease, _repository_ref, _now_ms, _mode),
+    do: {:error, :runtime_lease_missing}
 
   defp load_journal(path) do
     case Journal.load(path) do

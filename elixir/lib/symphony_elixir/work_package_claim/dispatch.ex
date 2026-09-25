@@ -72,16 +72,23 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   def block(journal, key), do: change_phase(journal, key, "submitted", "blocked")
 
   @doc "Fences a submitted or confirmed claim before external recovery can begin."
-  @spec begin_recovery(map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def begin_recovery(journal, key) do
+  @spec begin_recovery(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def begin_recovery(journal, key, input) when is_map(input) do
     case journal.reservations[key] do
-      %{dispatch: %{phase: phase} = dispatch} = reservation when phase in ["submitted", "confirmed"] ->
-        Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "recovery_pending"}})
+      %{dispatch: %{phase: phase, authority_digest: digest} = dispatch} = reservation
+      when phase in ["submitted", "confirmed"] and is_binary(digest) ->
+        if digest == authority_digest(input) do
+          Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "recovery_pending"}})
+        else
+          {:error, :claim_authority_changed}
+        end
 
       _ ->
         {:error, :invalid_claim_dispatch_transition}
     end
   end
+
+  def begin_recovery(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
 
   @spec begin_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_spawn(journal, key, input) do

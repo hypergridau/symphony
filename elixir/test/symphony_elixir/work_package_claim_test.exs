@@ -48,6 +48,36 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "submitted"
   end
 
+  test "expired graph authority cannot submit a new provider claim" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    expiry = 1_000_000_000_000
+
+    delegations =
+      Enum.reduce(["owner", "delegation-349"], input.responsibility_graph.delegations, fn id, acc ->
+        Map.update!(acc, id, &Map.put(&1, :expires_at_ms, expiry))
+      end)
+
+    input = %{input | responsibility_graph: %{input.responsibility_graph | delegations: delegations}}
+
+    assert {:ok, %{expires_at_ms: ^expiry}} =
+             ResponsibilityGraph.admission_delegation(input.responsibility_graph, @issue_id, "HGS-349", @repository)
+
+    parent = self()
+
+    request_fun = fn _url, _options ->
+      send(parent, :provider_request)
+      {:ok, response(%{"data" => %{}})}
+    end
+
+    assert {:error, :runtime_lease_mismatch} =
+             WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: &DateTime.utc_now/0)
+
+    refute_receive :provider_request
+    assert :missing = Journal.load(path)
+  end
+
   test "claim response remains indeterminate when root cannot record its binding" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -651,7 +681,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
 
     {after_preflight, _runtime} =
-      post_claim_revalidation_failure(path, issue, issue, manifest_expiry_ms: System.system_time(:millisecond) - 1)
+      post_claim_revalidation_failure(path, issue, issue,
+        manifest_expiry_ms: System.system_time(:millisecond) - 1,
+        graph_expiry_ms: System.system_time(:millisecond) - 1
+      )
 
     assert Map.has_key?(after_preflight.blocked, @issue_id)
     assert after_preflight.running == %{}
@@ -691,6 +724,26 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert Map.has_key?(after_preflight.blocked, @issue_id)
     assert after_preflight.running == %{}
     assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
+  test "an expired graph lease at the final claim fence enters recovery before worker start" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue,
+        graph_expiry_ms: System.system_time(:millisecond) - 1,
+        spawn_directly: true
+      )
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
     assert {:ok, journal} = Journal.load(path)
     [{_key, reservation}] = Map.to_list(journal.reservations)
     assert reservation.dispatch.phase == "recovery_pending"
@@ -1219,6 +1272,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
 
+    state = expire_runtime_delegations(state, graph_path, Keyword.get(opts, :graph_expiry_ms))
+
     dispatch = %{
       attempt: nil,
       recipient: self(),
@@ -1246,6 +1301,19 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       end
 
     {after_preflight, runtime}
+  end
+
+  defp expire_runtime_delegations(state, _graph_path, nil), do: state
+
+  defp expire_runtime_delegations(state, graph_path, expires_at_ms) when is_integer(expires_at_ms) do
+    delegations =
+      Enum.reduce(["owner", "delegation-349"], state.responsibility_graph.delegations, fn id, acc ->
+        Map.update!(acc, id, &Map.put(&1, :expires_at_ms, expires_at_ms))
+      end)
+
+    graph = %{state.responsibility_graph | delegations: delegations}
+    :ok = ResponsibilityGraph.Persistence.save(graph_path, graph)
+    %{state | responsibility_graph: graph}
   end
 
   defp response(body, status \\ 200), do: %Req.Response{status: status, body: body}

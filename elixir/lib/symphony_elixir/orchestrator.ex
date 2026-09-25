@@ -1901,6 +1901,10 @@ defmodule SymphonyElixir.Orchestrator do
     }
   end
 
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:error, {:claim_not_spawned, reason}}) do
+    recover_post_claim_spawn_failure(state, issue, dispatch, {:pre_spawn_claim_fence_failed, reason})
+  end
+
   defp handle_claimed_spawn_result(state, issue, dispatch, {:error, reason}) do
     Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
 
@@ -2113,8 +2117,9 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} -> {:error, {:global_pause_recovery_fence_failed, reason}}
       end
     else
-      with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-        Task.Supervisor.start_child(state.task_supervisor, worker)
+      case WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
+        :ok -> Task.Supervisor.start_child(state.task_supervisor, worker)
+        {:error, reason} -> {:error, {:claim_not_spawned, reason}}
       end
     end
   end

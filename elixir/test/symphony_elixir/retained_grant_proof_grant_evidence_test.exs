@@ -82,7 +82,7 @@ defmodule SymphonyElixir.RetainedGrantProofGrantEvidenceTest do
     first = hd(payload["entries"])
 
     invalid = [
-      Map.put(payload, "schema_version", 2),
+      Map.put(payload, "schema_version", 3),
       Map.put(payload, "authority_ref", ""),
       Map.put(payload, "entries", []),
       Map.put(payload, "entries", [first, first]),
