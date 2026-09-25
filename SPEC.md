@@ -2376,3 +2376,19 @@ Extension config:
 - Cleanup and observability:
   - Operators need to know which host owns a run, where its workspace lives, and whether cleanup
     happened on the right machine.
+
+## Appendix B. Source-Only RKE2 Job Provider
+
+An implementation MAY provide a source-only internal beta RKE2 Job provider. Such a provider
+MUST validate the canonical assignment bundle and require `placement=internal_beta` with
+`target_environment=rke2`. Job identity MUST bind the issue ID, execution generation, and
+assignment digest. The worker image MUST be digest-pinned in trusted provider configuration;
+assignment data MUST NOT select an image, command, volume, namespace, or service account.
+The generated Job MUST use a fixed worker entrypoint, ephemeral workspace storage, bounded
+resource requests/limits and active deadline, and restrictive pod/container security settings.
+It MUST NOT mount host paths or persistent volumes, enable a service-account token, or include
+secret values. A provider MUST accept an existing Job only when its bound identity and
+expected spec match. Deletion MUST first read and verify the exact Job and use its server UID
+as a precondition; unknown or mismatched objects remain held. A fakeable client contract and
+deterministic compiler do not imply a live cluster client, spawn integration, or runtime
+qualification.

@@ -205,3 +205,18 @@ journal implementation. Its deterministic fake adapter suite performs no
 network or shell calls and supplies no credential values. It does not admit a
 worker, qualify a disposable runner, or establish the signed HGS-350 receipt
 implementation.
+
+The HGS-729 source-only RKE2 Job provider accepts only an assignment bundle built from an
+upstream signature-verified manifest entry, validates its canonical digest, and requires
+schema-v2 `internal_beta`/`rke2` placement. The compiler itself does not verify the manifest
+signature; callers preserve that provenance. It derives the Kubernetes Job name from issue ID,
+generation, and assignment digest; uses a trusted namespace and a digest-pinned image;
+and carries the validated non-secret assignment as structured JSON to a fixed worker
+entrypoint. The Job has only bounded ephemeral `emptyDir` workspace/temp volumes,
+fixed CPU/memory limits and deadline, a non-root read-only-root filesystem container,
+default seccomp, dropped capabilities, and no service-account token. Its create/get/delete
+port is fakeable and does no cluster I/O by itself. Existing Jobs are accepted only when
+their exact assignment identity and spec match; mismatches and unknown deletion targets
+are held, and delete uses the fetched Kubernetes UID as a precondition. It has no
+Orchestrator, spawn, live-client, credential, or Pod integration and qualifies no RKE2
+cluster or worker execution.
