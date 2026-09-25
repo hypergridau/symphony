@@ -69,3 +69,11 @@ previous-snapshot rename on platforms where replacement cannot be atomic; startu
 rehydration validates the complete bidirectional lease registry and can recover a
 valid previous snapshot if the primary is missing. Non-cleaned generations are
 marked unknown and fail closed after restart.
+
+If the global mutable-admission pause arrives after a managed provider claim is
+confirmed but before the worker task starts, the orchestrator records the issue
+in its process-local blocked/claimed maps and retains the confirmed claim journal,
+execution fence, and responsibility graph unchanged. No worker task starts. This
+is a fail-closed hold, not a durable blocked marker: restart recovery or resumption
+from this exact paused-claim state is not yet qualified. Do not infer that the
+provider claim was released or safe to replay from the in-memory block alone.

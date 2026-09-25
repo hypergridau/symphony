@@ -495,6 +495,189 @@ defmodule SymphonyElixir.CoreTest do
     assert execution.cleanup == :pending
   end
 
+  @tag :cross_process_pause_barrier
+  test "a real state snapshot acknowledges the external pause before another issue can spawn" do
+    issue_suffix = System.unique_integer([:positive])
+    test_root = Path.join(System.tmp_dir!(), "symphony-elixir-pause-barrier-#{issue_suffix}")
+    pause_path = Path.join(test_root, "global-mutable-pause.state")
+    transition_path = Path.join(test_root, "global-mutable-pause.transition")
+    hook_release = Path.join(test_root, "worker-release")
+    epoch = String.duplicate("c", 32)
+    runtime_supervisor_name = Module.concat(__MODULE__, "PauseAgentRuntimeSupervisor#{issue_suffix}")
+    task_supervisor_name = Module.concat(__MODULE__, "PauseTaskSupervisor#{issue_suffix}")
+    orchestrator_name = Module.concat(__MODULE__, "PauseOrchestrator#{issue_suffix}")
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    previous_memory_issues = Application.get_env(:symphony_elixir, :memory_tracker_issues)
+    previous_endpoint_config = Application.get_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, [])
+
+    first_issue = %Issue{
+      id: "issue-pause-first-#{issue_suffix}",
+      identifier: "MT-PAUSE-FIRST-#{issue_suffix}",
+      title: "Hold a synthetic worker during pause acknowledgement",
+      description: "Credential-free pause barrier fixture",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PAUSE-FIRST-#{issue_suffix}",
+      labels: [],
+      dispatchable: true
+    }
+
+    second_issue = %Issue{
+      id: "issue-pause-second-#{issue_suffix}",
+      identifier: "MT-PAUSE-SECOND-#{issue_suffix}",
+      title: "Must remain undispatched after pause acknowledgement",
+      description: "Credential-free pause barrier fixture",
+      state: "In Progress",
+      url: "https://example.org/issues/MT-PAUSE-SECOND-#{issue_suffix}",
+      labels: [],
+      dispatchable: true
+    }
+
+    File.mkdir_p!(test_root)
+    File.write!(pause_path, "running\n")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if File.dir?(test_root), do: File.touch(hook_release)
+
+      if pid = Process.whereis(runtime_supervisor_name), do: GenServer.stop(pid)
+
+      restore_app_env(:memory_tracker_issues, previous_memory_issues)
+      restore_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path)
+      Application.put_env(:symphony_elixir, SymphonyElixirWeb.Endpoint, previous_endpoint_config)
+      restart_default_runtime!()
+
+      eventually_value(fn -> if File.rm_rf(test_root) |> elem(0) == :ok, do: true end)
+    end)
+
+    if Process.whereis(SymphonyElixir.AgentRuntimeSupervisor) do
+      assert :ok =
+               Supervisor.terminate_child(
+                 SymphonyElixir.Supervisor,
+                 SymphonyElixir.AgentRuntimeSupervisor
+               )
+    end
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      workspace_root: test_root,
+      poll_interval_ms: 10,
+      hook_before_run:
+        ": > #{shell_escape(Path.join(test_root, "worker-started"))}; attempts=0; while [ ! -f #{shell_escape(hook_release)} ] && [ \"$attempts\" -lt 1000 ]; do sleep 0.05; attempts=$((attempts + 1)); done; exit 1",
+      hook_timeout_ms: 60_000
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [first_issue])
+
+    {:ok, runtime_supervisor_pid} =
+      SymphonyElixir.AgentRuntimeSupervisor.start_link(
+        name: runtime_supervisor_name,
+        task_supervisor_name: task_supervisor_name,
+        orchestrator_name: orchestrator_name
+      )
+
+    Process.unlink(runtime_supervisor_pid)
+
+    start_supervised!({HttpServer, host: "127.0.0.1", port: 0, orchestrator: orchestrator_name, snapshot_timeout_ms: 1_000})
+
+    port = eventually_value(fn -> HttpServer.bound_port() end)
+    assert is_integer(port)
+
+    first_worker_pid =
+      eventually_value(fn ->
+        case Map.get(:sys.get_state(orchestrator_name).running, first_issue.id) do
+          %{pid: pid} when is_pid(pid) -> pid
+          _ -> nil
+        end
+      end)
+
+    assert is_pid(first_worker_pid)
+    assert eventually_value(fn -> if File.exists?(Path.join(test_root, "worker-started")), do: true end)
+
+    external_pause_setter!(pause_path, transition_path, epoch)
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [first_issue, second_issue])
+    assert %{queued: true} = Orchestrator.request_refresh(orchestrator_name)
+
+    acknowledged =
+      eventually_value(fn ->
+        response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
+
+        if response.body["pause_gate"]["transition_epoch"] == epoch do
+          response
+        end
+      end)
+
+    assert acknowledged.status == 200
+    assert acknowledged.headers["cache-control"] == ["no-store"]
+    assert acknowledged.body["pause_gate"]["state"] == "paused"
+    assert Enum.any?(acknowledged.body["running"], &(&1["issue_id"] == first_issue.id))
+    refute Enum.any?(acknowledged.body["running"], &(&1["issue_id"] == second_issue.id))
+
+    Process.sleep(150)
+    assert %{running: [running]} = Orchestrator.snapshot(orchestrator_name, 1_000)
+    assert running.issue_id == first_issue.id
+
+    old_orchestrator_pid = Process.whereis(orchestrator_name)
+    old_task_supervisor_pid = Process.whereis(task_supervisor_name)
+    Process.exit(old_orchestrator_pid, :kill)
+
+    restarted_pid =
+      eventually_value(fn ->
+        pid = Process.whereis(orchestrator_name)
+
+        if is_pid(pid) and pid != old_orchestrator_pid and
+             is_map(Orchestrator.snapshot(orchestrator_name, 100)),
+           do: pid
+      end)
+
+    assert is_pid(restarted_pid)
+
+    assert eventually_value(fn ->
+             pid = Process.whereis(task_supervisor_name)
+             if is_pid(pid) and pid != old_task_supervisor_pid, do: pid
+           end)
+
+    restarted_response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
+    assert restarted_response.body["pause_gate"]["transition_epoch"] == epoch
+    refute Enum.any?(restarted_response.body["running"], &(&1["issue_id"] == second_issue.id))
+    refute Process.alive?(first_worker_pid)
+  end
+
+  defp external_pause_setter!(pause_path, transition_path, epoch) do
+    erlang = System.find_executable("erl")
+    assert is_binary(erlang), "erl executable is required for the cross-process pause fixture"
+
+    code = """
+    PausePath = os:getenv("PAUSE_PATH"),
+    TransitionPath = os:getenv("TRANSITION_PATH"),
+    Epoch = os:getenv("PAUSE_EPOCH"),
+    TemporaryPath = PausePath ++ ".tmp-" ++ Epoch,
+    BackupPath = PausePath ++ ".previous-" ++ Epoch,
+    ok = file:write_file(TransitionPath, ["pausing:", Epoch, "\\n"], [sync]),
+    ok = file:write_file(TemporaryPath, <<"paused\\n">>, [sync]),
+    case file:rename(TemporaryPath, PausePath) of
+      ok -> ok;
+      {error, eexist} ->
+        ok = file:rename(PausePath, BackupPath),
+        ok = file:rename(TemporaryPath, PausePath),
+        ok = file:delete(BackupPath);
+      {error, Reason} -> erlang:error({atomic_gate_replace_failed, Reason})
+    end,
+    halt().
+    """
+
+    assert {output, 0} =
+             System.cmd(erlang, ["-noshell", "-eval", code],
+               env: [
+                 {"PAUSE_PATH", pause_path},
+                 {"TRANSITION_PATH", transition_path},
+                 {"PAUSE_EPOCH", epoch}
+               ],
+               stderr_to_stdout: true
+             )
+
+    assert output == ""
+  end
+
   test "linear issue state reconciliation fetch with no running issues is a no-op" do
     assert {:ok, []} = Client.fetch_issues_by_ids([])
   end

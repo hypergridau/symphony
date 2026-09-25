@@ -20,7 +20,7 @@ defmodule SymphonyElixir.GlobalPauseTest do
       File.rm_rf(root)
     end)
 
-    %{path: path}
+    %{path: path, transition: Path.join(root, "global-mutable-pause.transition")}
   end
 
   test "missing state is configured and paused", %{path: path} do
@@ -44,6 +44,60 @@ defmodule SymphonyElixir.GlobalPauseTest do
     File.write!(path, "running-now\n")
     assert GlobalPause.paused?()
     assert GlobalPause.snapshot().reason == "invalid_pause_file_state"
+  end
+
+  test "non-regular state paths fail closed even if a symlink target says running", %{path: path} do
+    File.mkdir!(path)
+    assert GlobalPause.snapshot().reason == "invalid_pause_file_type"
+    assert GlobalPause.paused?()
+    File.rmdir!(path)
+
+    if match?({:unix, _}, :os.type()) do
+      target = Path.join(Path.dirname(path), "running-target")
+      File.write!(target, "running\n")
+      File.ln_s!(target, path)
+      assert GlobalPause.snapshot().reason == "invalid_pause_file_type"
+      assert GlobalPause.paused?()
+      File.rm!(path)
+    end
+  end
+
+  test "a root transition epoch pauses admission and is echoed by the barrier", %{path: path, transition: transition} do
+    epoch = String.duplicate("a", 32)
+    File.write!(path, "running\n")
+    File.write!(transition, "pausing:#{epoch}\n")
+
+    assert %{
+             configured?: true,
+             paused?: true,
+             state: "paused",
+             reason: "pause_transition",
+             transition_epoch: ^epoch
+           } = GlobalPause.snapshot()
+
+    File.write!(path, "paused\n")
+    assert GlobalPause.snapshot().transition_epoch == epoch
+    File.rm!(transition)
+    assert GlobalPause.snapshot().reason == "operator_paused"
+  end
+
+  test "malformed or non-regular transition markers fail closed", %{path: path, transition: transition} do
+    File.write!(path, "running\n")
+    File.write!(transition, "pausing:wrong\n")
+    assert GlobalPause.snapshot().reason == "invalid_pause_transition"
+    assert GlobalPause.paused?()
+
+    File.rm!(transition)
+    File.mkdir!(transition)
+    assert GlobalPause.snapshot().reason == "invalid_pause_transition"
+    assert GlobalPause.paused?()
+
+    if match?({:unix, _}, :os.type()) do
+      File.rmdir!(transition)
+      File.ln_s!(path, transition)
+      assert GlobalPause.snapshot().reason == "invalid_pause_transition"
+      assert GlobalPause.paused?()
+    end
   end
 
   test "unset path is explicitly reported as unconfigured" do

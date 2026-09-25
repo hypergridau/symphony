@@ -64,6 +64,7 @@ defmodule SymphonyElixir.WorkPackageRuntime do
          runner_token: values[@runner_token],
          attestation_key: values[@attestation_key],
          runner_id: values[@runner_id],
+         pool_key: Map.get(env, "SYMPHONY_POOL_KEY"),
          managed_project_profile_id: values[@profile_id],
          journal_path: journal_path,
          archive_root: archive_root,

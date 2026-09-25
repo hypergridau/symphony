@@ -48,6 +48,8 @@ defmodule SymphonyElixir.WorkPackageClaimAbandonmentTest do
       managed_project_profile_id: "profile-test",
       projection_id: "package-1",
       reservation_id: "reservation-1",
+      workspace_id: "ws-test",
+      company_id: "company-test",
       reservation_nonce: "test-recovery-nonce",
       generation: 1,
       session_id: session,
@@ -189,6 +191,33 @@ defmodule SymphonyElixir.WorkPackageClaimAbandonmentTest do
     :ok = Journal.save(c.runtime.journal_path, marked)
     sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
     assert {:error, :claim_abandonment_local_state_changed} = Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
+  end
+
+  test "journal scope IDs must match the signed provider claim", c do
+    [key] = Map.keys(c.journal.reservations)
+
+    scoped =
+      c.journal
+      |> put_in([:reservations, key, :workspace_id], "ws-test")
+      |> put_in([:reservations, key, :company_id], "company-test")
+
+    :ok = Journal.save(c.runtime.journal_path, scoped)
+    sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
+    assert :authorized = Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
+
+    changed = put_in(scoped, [:reservations, key, :company_id], "other-company")
+    :ok = Journal.save(c.runtime.journal_path, changed)
+    sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
+
+    assert {:error, :claim_abandonment_local_state_changed} =
+             Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
+
+    missing = update_in(scoped, [:reservations, key], &Map.delete(&1, :workspace_id))
+    :ok = Journal.save(c.runtime.journal_path, missing)
+    sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
+
+    assert {:error, :claim_abandonment_local_state_changed} =
+             Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
   end
 
   test "recovery cannot replace the current native owner", c do

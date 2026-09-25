@@ -125,7 +125,14 @@ defmodule SymphonyElixir.WorkPackageClaim.Abandonment do
 
   defp matching_claim?(reservation, claim) do
     Enum.all?(@journal_fields, fn {local, remote} -> reservation[local] == claim[remote] end) and
+      scope_matches?(reservation, claim) and
       Enum.sort(reservation.scope_keys) == Enum.sort(claim["scopeKeys"]) and sha256(reservation.reservation_nonce) == claim["nonceHash"]
+  end
+
+  defp scope_matches?(reservation, claim) do
+    Enum.all?([{:workspace_id, "workspaceId"}, {:company_id, "companyId"}], fn {local, remote} ->
+      reservation[local] == claim[remote]
+    end)
   end
 
   defp unstarted_reservation?(reservation, claim, maximum) do

@@ -2,13 +2,17 @@ defmodule SymphonyElixir.GlobalPause do
   @moduledoc """
   Reads the operator-controlled global mutable-admission gate.
 
-  A configured gate is fail-closed: only an exact `running` file value permits
-  new mutable workers. Missing, unreadable, or invalid state is reported as
-  paused. An unset path preserves the upstream runtime's unconfigured/test
-  behavior; production pool launchers always provide the path.
+  A configured gate is fail-closed: only an exact `running` value in a regular
+  file with no pause-transition marker permits new mutable workers. The
+  root-owned marker carries an epoch that a synchronous state snapshot echoes
+  for the operator's pause barrier. Missing, unreadable, or invalid state is
+  reported as paused.
+  An unset path preserves the upstream runtime's unconfigured/test behavior;
+  production pool launchers always provide the path.
   """
 
   @pause_file_env "SYMPHONY_GLOBAL_PAUSE_FILE"
+  @transition_file "global-mutable-pause.transition"
   @running_state "running"
   @paused_state "paused"
 
@@ -27,7 +31,13 @@ defmodule SymphonyElixir.GlobalPause do
   def snapshot do
     case System.get_env(@pause_file_env) do
       path when is_binary(path) and path != "" ->
-        read_state(Path.expand(path))
+        path = Path.expand(path)
+
+        case read_transition(Path.join(Path.dirname(path), @transition_file)) do
+          :none -> read_state(path)
+          {:active, epoch} -> Map.put(paused_status(path, "pause_transition"), :transition_epoch, epoch)
+          {:error, reason} -> paused_status(path, reason)
+        end
 
       _ ->
         %{
@@ -40,7 +50,42 @@ defmodule SymphonyElixir.GlobalPause do
     end
   end
 
+  defp read_transition(path) do
+    case File.lstat(path) do
+      {:error, :enoent} ->
+        :none
+
+      {:ok, %{type: :regular, size: size}} when size <= 48 ->
+        case File.read(path) do
+          {:ok, "pausing:" <> epoch_and_newline} ->
+            parse_transition_epoch(epoch_and_newline)
+
+          _ ->
+            {:error, "invalid_pause_transition"}
+        end
+
+      _ ->
+        {:error, "invalid_pause_transition"}
+    end
+  end
+
+  defp parse_transition_epoch(<<epoch::binary-size(32), "\n">>) do
+    if String.match?(epoch, ~r/\A[0-9a-f]{32}\z/),
+      do: {:active, epoch},
+      else: {:error, "invalid_pause_transition"}
+  end
+
+  defp parse_transition_epoch(_), do: {:error, "invalid_pause_transition"}
+
   defp read_state(path) do
+    case File.lstat(path) do
+      {:ok, %{type: :regular}} -> read_regular_state(path)
+      {:ok, _} -> paused_status(path, "invalid_pause_file_type")
+      {:error, reason} -> paused_status(path, Atom.to_string(reason))
+    end
+  end
+
+  defp read_regular_state(path) do
     case File.read(path) do
       {:ok, @running_state <> "\n"} -> running_status(path)
       {:ok, @running_state} -> running_status(path)

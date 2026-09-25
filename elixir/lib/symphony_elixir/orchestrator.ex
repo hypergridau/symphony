@@ -729,6 +729,28 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec spawn_fenced_issue_for_test(term(), Issue.t(), term(), String.t(), String.t() | nil, term()) ::
+          term()
+  def spawn_fenced_issue_for_test(
+        %State{} = state,
+        %Issue{} = issue,
+        token,
+        session_id,
+        delegation_id,
+        runtime_lease
+      ) do
+    spawn_fenced_issue(state, issue, nil, self(), nil, token, session_id, delegation_id, runtime_lease)
+  end
+
+  @doc false
+  @spec start_claimed_worker_for_test(term(), Issue.t(), (-> term())) ::
+          {:ok, pid()} | {:error, term()}
+  def start_claimed_worker_for_test(%State{} = state, %Issue{} = issue, worker)
+      when is_function(worker, 0) do
+    start_claimed_worker(state, issue, worker)
+  end
+
+  @doc false
   @spec handle_claim_failure_for_test(term(), Issue.t(), term(), map()) :: term()
   def handle_claim_failure_for_test(%State{} = state, %Issue{} = issue, reason, entry) do
     handle_claim_failure(state, issue, reason, entry)
@@ -1631,7 +1653,39 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.debug("Global mutable admission paused immediately before worker spawn for #{issue_context(issue)}")
 
       if is_map(state.work_package_runtime) do
-        state
+        # A confirmed provider claim may already hold capacity and scope here.
+        # Fence local replay before returning from the pause barrier. Recovery
+        # still needs a separately verified provider release and host proof.
+        recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
+
+        state =
+          if recovery_fence == :ok do
+            release_execution_lease(
+              state,
+              %{
+                execution_token: token,
+                execution_session_id: session_id,
+                responsibility_delegation_id: responsibility_delegation_id,
+                responsibility_runtime_lease: runtime_lease
+              },
+              :spawn_failed
+            )
+          else
+            state
+          end
+
+        block_issue_from_entry(
+          state,
+          issue.id,
+          %{
+            issue: issue,
+            identifier: issue.identifier,
+            worker_host: worker_host,
+            execution_token: token,
+            execution_session_id: session_id
+          },
+          "Claim recovery requires reconciliation: #{inspect({:global_pause, recovery_fence})}"
+        )
       else
         release_execution_lease(
           state,
@@ -1887,14 +1941,33 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp start_claimed_worker(%State{work_package_runtime: nil} = state, _issue, worker),
-    do: Task.Supervisor.start_child(state.task_supervisor, worker)
+    do: spawn_if_unpaused(state, worker)
 
   defp start_claimed_worker(state, issue, worker) do
-    with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-      if GlobalPause.paused?(),
-        do: {:error, :global_pause},
-        else: Task.Supervisor.start_child(state.task_supervisor, worker)
+    # The last pause decision must precede the durable spawn_started journal
+    # write. Once that write succeeds, a later pause read could reject the
+    # child and falsely record a never-started worker as an attempted spawn.
+    # The root setter waits for this GenServer callback's state snapshot before
+    # returning. If the child starts, it does so before that acknowledgment;
+    # begin_spawn or the supervisor can still fail without starting a child.
+    if GlobalPause.paused?() do
+      case WorkPackageClaim.begin_paused_recovery(claim_input(state, issue)) do
+        :ok -> {:error, :global_pause}
+        {:error, reason} -> {:error, {:global_pause_recovery_fence_failed, reason}}
+      end
+    else
+      with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
+        Task.Supervisor.start_child(state.task_supervisor, worker)
+      end
     end
+  end
+
+  # Keep the unmanaged final gate read and Task start in this GenServer
+  # callback. A synchronous :snapshot call drains any start past the gate.
+  defp spawn_if_unpaused(state, worker) do
+    if GlobalPause.paused?(),
+      do: {:error, :global_pause},
+      else: Task.Supervisor.start_child(state.task_supervisor, worker)
   end
 
   defp handle_claim_failure(state, _issue, {:claim_indeterminate, _reason}, _entry), do: state
@@ -1927,6 +2000,9 @@ defmodule SymphonyElixir.Orchestrator do
       })
     )
   end
+
+  defp handle_claim_spawn_failure(state, issue, _attempt, :global_pause, entry),
+    do: state |> release_execution_lease(entry, :spawn_failed) |> block_claim_recovery(issue, :global_pause)
 
   defp handle_claim_spawn_failure(state, issue, _attempt, reason, _entry),
     do: block_claim_recovery(state, issue, reason)

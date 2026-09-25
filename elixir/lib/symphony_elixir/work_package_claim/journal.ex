@@ -15,6 +15,8 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
           optional(:dispatch) => map(),
           optional(:cleanup_receipts) => %{optional(String.t()) => map()},
           optional(:failed_worker_turns) => %{optional(String.t()) => map()},
+          optional(:workspace_id) => String.t(),
+          optional(:company_id) => String.t(),
           issue_id: String.t(),
           managed_project_profile_id: String.t(),
           repository_ref: String.t(),
@@ -286,6 +288,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
     ]
 
     with {:ok, values} <- required_fields(payload, fields),
+         {:ok, scope_ids} <- optional_scope_ids(payload),
          true <-
            Enum.all?(
              [
@@ -310,7 +313,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
          {:ok, failed_worker_turns} <- decode_failed_worker_turns(Map.get(payload, "failed_worker_turns")),
          {:ok, dispatch} <- Dispatch.decode(Map.get(payload, "dispatch")) do
       {:ok,
-       values
+       Map.merge(values, scope_ids)
        |> maybe_put_decoded(:cleanup_receipts, cleanup_receipts)
        |> maybe_put_decoded(:failed_worker_turns, failed_worker_turns)
        |> maybe_put_decoded(:dispatch, dispatch)}
@@ -321,6 +324,18 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   end
 
   defp decode_reservation(_payload), do: {:error, :invalid_reservation}
+
+  defp optional_scope_ids(payload) do
+    ids = [{:workspace_id, "workspace_id"}, {:company_id, "company_id"}]
+
+    if Enum.all?(ids, fn {_key, json_key} ->
+         not Map.has_key?(payload, json_key) or present_string?(Map.get(payload, json_key))
+       end) do
+      {:ok, Map.new(for {key, json_key} <- ids, Map.has_key?(payload, json_key), do: {key, payload[json_key]})}
+    else
+      {:error, :invalid_reservation_scope}
+    end
+  end
 
   defp decode_failed_worker_turns(nil), do: {:ok, nil}
 
@@ -449,7 +464,19 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   defp maybe_put_decoded(map, key, value), do: Map.put(map, key, value)
 
   defp valid_reservation?(reservation) when is_map(reservation) do
-    string_fields = [
+    valid_required_strings?(reservation) and
+      is_integer(reservation[:generation]) and reservation[:generation] > 0 and
+      is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
+      Enum.all?(reservation[:scope_keys], &present_string?/1) and
+      valid_cleanup_receipts?(Map.get(reservation, :cleanup_receipts, %{})) and
+      valid_failed_worker_turns?(Map.get(reservation, :failed_worker_turns, %{})) and
+      Dispatch.valid?(Map.get(reservation, :dispatch))
+  end
+
+  defp valid_reservation?(_reservation), do: false
+
+  defp valid_required_strings?(reservation) do
+    fields = [
       :issue_id,
       :managed_project_profile_id,
       :repository_ref,
@@ -464,16 +491,14 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       :runtime_lease_id
     ]
 
-    Enum.all?(string_fields, &present_string?(Map.get(reservation, &1))) and
-      is_integer(reservation[:generation]) and reservation[:generation] > 0 and
-      is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
-      Enum.all?(reservation[:scope_keys], &present_string?/1) and
-      valid_cleanup_receipts?(Map.get(reservation, :cleanup_receipts, %{})) and
-      valid_failed_worker_turns?(Map.get(reservation, :failed_worker_turns, %{})) and
-      Dispatch.valid?(Map.get(reservation, :dispatch))
+    Enum.all?(fields, &present_string?(Map.get(reservation, &1))) and valid_scope_ids?(reservation)
   end
 
-  defp valid_reservation?(_reservation), do: false
+  defp valid_scope_ids?(reservation) do
+    Enum.all?([:workspace_id, :company_id], fn key ->
+      not Map.has_key?(reservation, key) or present_string?(Map.get(reservation, key))
+    end)
+  end
 
   defp valid_cleanup_receipts?(receipts) when is_map(receipts) do
     Enum.all?(receipts, fn {kind, receipt} ->

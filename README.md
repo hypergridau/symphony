@@ -32,6 +32,13 @@ Luna high, escalating to xhigh and max only after failed attempts. The optional
 labels fail admission. A matching operator-issued model and effort grant is still required.
 Historical claims and grants are not rewritten; stale GPT-5.6 grants fail closed.
 
+On the Linux runner, the root-owned global pause transition fences new Task
+spawns by waiting for epoch-matched, synchronous state snapshots from every
+active repository pool. The marker denies new admission callbacks while the
+barrier is pending or interrupted. A callback already past its final gate may
+start a child before the setter acknowledges the pause; none may start after
+that acknowledgment. The pause does not terminate workers already running.
+
 A generation released before claim submission does not reserve the repository indefinitely.
 Another eligible issue may proceed only after the journal, exact delegation and absent local
 workspace prove that the released generation has no remaining mutable authority.
