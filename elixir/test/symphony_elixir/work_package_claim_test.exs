@@ -80,9 +80,11 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     }
 
     assert {:ok, once} = Journal.put_failed_worker_turn(journal, key, "thread-349:turn-349", evidence)
+
     assert {:ok, ^once} =
              Journal.put_failed_worker_turn(once, key, "thread-349:turn-349", %{
-               evidence | observed_at_ms: evidence.observed_at_ms + 1
+               evidence
+               | observed_at_ms: evidence.observed_at_ms + 1
              })
 
     assert {:error, :failed_worker_turn_conflict} =

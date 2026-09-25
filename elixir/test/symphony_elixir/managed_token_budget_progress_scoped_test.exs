@@ -211,6 +211,7 @@ defmodule SymphonyElixir.ManagedTokenBudgetProgressScopedTest do
 
     bad_scope =
       put_in(Fixture.payload(c.now), ["entries", Access.at(0), "responsible", "scope", "repository"], "other/repository")
+
     assert {:error, _} = ManagedResponsibility.decode(bad_scope, Fixture.context(), c.now)
   end
 
