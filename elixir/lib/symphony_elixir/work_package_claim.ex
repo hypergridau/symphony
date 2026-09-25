@@ -84,6 +84,20 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
+  @doc "Durably fences a confirmed claim after the final pause check wins."
+  @spec begin_paused_recovery(input()) :: :ok | {:error, term()}
+  def begin_paused_recovery(input) do
+    with {:ok, authority} <- authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         {:ok, journal} <- Dispatch.begin_recovery(journal, journal_key(authority)),
+         :ok <- Journal.save(input.journal_path, journal) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      error -> error
+    end
+  end
+
   @doc "Builds the provider HMAC canonical JSON in wire-field order."
   @spec canonical_json(map()) :: {:ok, String.t()} | {:error, term()}
   def canonical_json(attestation) when is_map(attestation) do

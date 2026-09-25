@@ -216,7 +216,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
       else: {:ok, []}
   end
 
-  defp unstarted?(%{dispatch: %{phase: phase}}), do: phase in ["submitted", "confirmed", "blocked"]
+  defp unstarted?(%{dispatch: %{phase: phase}}), do: phase in ["submitted", "confirmed", "recovery_pending", "blocked"]
   defp unstarted?(_reservation), do: false
 
   defp new_without_claim(runtime, issue_id) do

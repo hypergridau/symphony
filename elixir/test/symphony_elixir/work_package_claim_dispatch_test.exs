@@ -87,4 +87,19 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
     assert {:error, :claim_reconciliation_required} = Dispatch.submit(journal, key, @input, @now)
     assert {:error, :claim_reconciliation_required} = Dispatch.find(journal, "issue", "profile", "repo", 1)
   end
+
+  test "a confirmed claim can be durably fenced for recovery before spawn", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+    {:ok, pending} = Dispatch.begin_recovery(confirmed, key)
+    assert pending.reservations[key].dispatch.phase == "recovery_pending"
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_spawn(pending, key, @input)
+    assert {:error, :claim_reconciliation_required} = Dispatch.submit(pending, key, @input, @now)
+    assert {:error, :claim_reconciliation_required} = Dispatch.find(pending, "issue", "profile", "repo", 1)
+
+    path = Path.join(System.tmp_dir!(), "claim-recovery-pending-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+    assert :ok = Journal.save(path, pending)
+    assert {:ok, ^pending} = Journal.load(path)
+  end
 end

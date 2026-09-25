@@ -3,7 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  @phases ~w(submitted confirmed spawn_started blocked)
+  @phases ~w(submitted confirmed recovery_pending spawn_started blocked)
   @keys ~w(phase attempts retry_at_ms authority_digest)
   @max_attempts 6
 
@@ -51,6 +51,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     do: {:error, :claim_authority_changed}
 
   defp retry_allowed(%{phase: "spawn_started"}, _digest), do: {:error, :claim_spawn_already_attempted}
+  defp retry_allowed(%{phase: "recovery_pending"}, _digest), do: {:error, :claim_reconciliation_required}
   defp retry_allowed(%{phase: "blocked"}, _digest), do: {:error, :claim_reconciliation_required}
 
   defp retry_allowed(%{phase: "confirmed", attempts: attempts}, _digest) when attempts >= @max_attempts,
@@ -69,6 +70,10 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   @spec block(map(), String.t()) :: {:ok, map()} | {:error, term()}
   def block(journal, key), do: change_phase(journal, key, "submitted", "blocked")
+
+  @doc "Fences a confirmed claim before an external never-spawned recovery can begin."
+  @spec begin_recovery(map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def begin_recovery(journal, key), do: change_phase(journal, key, "confirmed", "recovery_pending")
 
   @spec begin_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_spawn(journal, key, input) do
@@ -90,6 +95,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     case journal.reservations[key] do
       %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed"] -> {:ok, reservation}
       %{dispatch: %{phase: "spawn_started"}} -> {:error, :claim_spawn_already_attempted}
+      %{dispatch: %{phase: "recovery_pending"}} -> {:error, :claim_reconciliation_required}
       %{dispatch: %{phase: "blocked"}} -> {:error, :claim_reconciliation_required}
       _ -> {:error, :claim_recovery_journal_missing}
     end

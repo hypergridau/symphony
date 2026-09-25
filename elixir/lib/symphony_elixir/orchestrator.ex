@@ -1654,9 +1654,9 @@ defmodule SymphonyElixir.Orchestrator do
 
       if is_map(state.work_package_runtime) do
         # A confirmed provider claim may already hold capacity and scope here.
-        # Preserve its exact generation for the supported pre-spawn recovery;
-        # silently returning would leave the claim active without an operator
-        # visible blocked issue.
+        # Fence local replay before returning from the pause barrier. Recovery
+        # still needs a separately verified provider release and host proof.
+        recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
         block_issue_from_entry(
           state,
           issue.id,
@@ -1667,7 +1667,7 @@ defmodule SymphonyElixir.Orchestrator do
             execution_token: token,
             execution_session_id: session_id
           },
-          "Claim recovery requires reconciliation: :global_pause"
+          "Claim recovery requires reconciliation: #{inspect({:global_pause, recovery_fence})}"
         )
       else
         release_execution_lease(
@@ -1934,7 +1934,10 @@ defmodule SymphonyElixir.Orchestrator do
     # returning. If the child starts, it does so before that acknowledgment;
     # begin_spawn or the supervisor can still fail without starting a child.
     if GlobalPause.paused?() do
-      {:error, :global_pause}
+      case WorkPackageClaim.begin_paused_recovery(claim_input(state, issue)) do
+        :ok -> {:error, :global_pause}
+        {:error, reason} -> {:error, {:global_pause_recovery_fence_failed, reason}}
+      end
     else
       with :ok <- WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
         Task.Supervisor.start_child(state.task_supervisor, worker)
