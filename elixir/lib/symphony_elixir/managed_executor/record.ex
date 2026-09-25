@@ -9,7 +9,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :checkout_ready,
     :credential_lease_pending,
     :credential_lease_ready,
-    :credential_candidate_revocation_pending,
     :credential_request_revocation_pending,
     :execution_started,
     :result_recorded,
@@ -29,7 +28,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     checkout_ready: [:allocation, :checkout],
     credential_lease_pending: [:allocation, :checkout],
     credential_lease_ready: [:allocation, :checkout],
-    credential_candidate_revocation_pending: [:allocation, :checkout],
     credential_request_revocation_pending: [:allocation, :checkout, :candidate_lease_operation],
     execution_started: [:allocation, :checkout],
     result_recorded: [:allocation, :checkout, :execution_result],
@@ -45,7 +43,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :checkout_ready,
     :credential_lease_pending,
     :credential_lease_ready,
-    :credential_candidate_revocation_pending,
     :credential_request_revocation_pending,
     :execution_started,
     :result_recorded,
@@ -85,15 +82,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   @spec checkpoint(map(), atom(), module(), term(), map()) :: {:ok, map()} | {:error, term()}
   def checkpoint(record, phase, journal, context, attrs) do
-    base_keys = [
-      :schema_version,
-      :key,
-      :assignment_digest,
-      :phase,
-      :version,
-      :credential_lease,
-      :candidate_lease_ref
-    ]
+    base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
 
     keys = base_keys ++ Map.fetch!(@phase_fields, phase)
 
@@ -102,7 +91,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
       |> Map.merge(attrs)
       |> Map.put(:phase, phase)
       |> Map.put(:version, record.version + 1)
-      |> Map.put_new(:candidate_lease_ref, nil)
       |> Map.take(keys)
 
     case journal.compare_and_swap(record.key, record.version, next, context) do
@@ -132,7 +120,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     expected_keys = [:lease_ref, :assignment_digest, :allocation_id, :expires_at_ms]
     exact_keys = Enum.sort(Map.keys(lease)) == Enum.sort(expected_keys)
 
-    if exact_keys and is_binary(lease_ref) and candidate_lease_ref(%{lease_ref: lease_ref}) == lease_ref and
+    if exact_keys and lease_ref == credential_lease_handle(assignment) and
          digest == assignment.sha256 and
          allocation_id == allocation.id and is_integer(expiry) and expiry >= 0 do
       :ok
@@ -143,12 +131,38 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   def validate_credential_lease(_lease, _allocation, _assignment), do: {:error, :credential_lease_invalid}
 
-  @spec candidate_lease_ref(term()) :: String.t() | nil
-  def candidate_lease_ref(%{lease_ref: ref}) when is_binary(ref) do
-    if Regex.match?(~r/\A[a-zA-Z0-9:_-]{1,128}\z/, ref), do: ref, else: nil
+  @spec validate_credential_lease_response(term(), map(), map()) :: :ok | {:error, :credential_lease_invalid}
+  def validate_credential_lease_response(
+        %{assignment_digest: digest, allocation_id: allocation_id, expires_at_ms: expiry} = response,
+        allocation,
+        assignment
+      ) do
+    expected_keys = [:assignment_digest, :allocation_id, :expires_at_ms]
+    exact_keys = Enum.sort(Map.keys(response)) == Enum.sort(expected_keys)
+
+    if exact_keys and digest == assignment.sha256 and allocation_id == allocation.id and
+         is_integer(expiry) and expiry >= 0 do
+      :ok
+    else
+      {:error, :credential_lease_invalid}
+    end
   end
 
-  def candidate_lease_ref(_lease), do: nil
+  def validate_credential_lease_response(_response, _allocation, _assignment),
+    do: {:error, :credential_lease_invalid}
+
+  @spec credential_lease_handle(map()) :: String.t()
+  def credential_lease_handle(assignment), do: "#{assignment.sha256}:credential-acquire"
+
+  @spec credential_lease_from_response(map(), map()) :: map()
+  def credential_lease_from_response(response, assignment) do
+    %{
+      lease_ref: credential_lease_handle(assignment),
+      assignment_digest: response.assignment_digest,
+      allocation_id: response.allocation_id,
+      expires_at_ms: response.expires_at_ms
+    }
+  end
 
   @spec validate_checkout(term(), map(), map()) :: :ok | {:error, :checkout_intent_mismatch}
   def validate_checkout(receipt, assignment, intent) when is_map(receipt) do
@@ -246,13 +260,12 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp create_or_load(journal, key, assignment, context) do
     initial = %{
-      schema_version: 3,
+      schema_version: 4,
       key: key,
       assignment_digest: assignment.sha256,
       phase: :planned,
       version: 0,
-      credential_lease: nil,
-      candidate_lease_ref: nil
+      credential_lease: nil
     }
 
     case journal.compare_and_swap(key, 0, initial, context) do
@@ -271,7 +284,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   end
 
   defp verify(
-         %{schema_version: 3, key: key, assignment_digest: digest, phase: phase, version: version} = record,
+         %{schema_version: 4, key: key, assignment_digest: digest, phase: phase, version: version} = record,
          key,
          assignment
        )
@@ -286,13 +299,13 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   defp verify(_record, _key, _assignment), do: {:error, :invalid_lifecycle_journal}
 
   defp valid_payload?(record, assignment) do
-    base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease, :candidate_lease_ref]
+    base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
 
     valid_phase_keys?(record, base_keys) and valid_allocation_phase?(record) and
       valid_checkout_phase?(record, assignment) and valid_result_phase?(record, assignment) and
       valid_reported_phase?(record) and valid_cleanup_phase?(record, assignment) and
       valid_abort_phase?(record, assignment) and valid_credential_lease_phase?(record, assignment) and
-      valid_candidate_lease_phase?(record)
+      valid_lease_quarantine_phase?(record)
   end
 
   defp valid_phase_keys?(record, base_keys) do
@@ -357,15 +370,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     validate_credential_lease(lease, allocation, assignment) == :ok
   end
 
-  defp valid_credential_lease_phase?(%{phase: :credential_candidate_revocation_pending, credential_lease: nil}, _assignment),
-    do: true
-
-  defp valid_credential_lease_phase?(
-         %{phase: :credential_candidate_revocation_pending, credential_lease: lease, allocation: allocation},
-         assignment
-       ),
-       do: validate_credential_lease(lease, allocation, assignment) == :ok
-
   defp valid_credential_lease_phase?(
          %{phase: :credential_request_revocation_pending, credential_lease: nil, candidate_lease_operation: :acquire},
          _assignment
@@ -391,12 +395,8 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
        when phase in [:abort_pending, :abort_result_pending, :abort_cleanup_pending],
        do: validate_credential_lease(lease, allocation, assignment) == :ok
 
-  defp valid_candidate_lease_phase?(%{phase: :credential_candidate_revocation_pending, candidate_lease_ref: ref}),
-    do: candidate_lease_ref(%{lease_ref: ref}) == ref
-
-  defp valid_candidate_lease_phase?(%{phase: :credential_request_revocation_pending, candidate_lease_ref: nil, candidate_lease_operation: operation}),
+  defp valid_lease_quarantine_phase?(%{phase: :credential_request_revocation_pending, candidate_lease_operation: operation}),
     do: operation in [:acquire, :renew]
 
-  defp valid_candidate_lease_phase?(%{candidate_lease_ref: nil}), do: true
-  defp valid_candidate_lease_phase?(_record), do: false
+  defp valid_lease_quarantine_phase?(_record), do: true
 end

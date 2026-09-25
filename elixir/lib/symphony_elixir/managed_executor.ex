@@ -61,9 +61,6 @@ defmodule SymphonyElixir.ManagedExecutor do
   defp advance(%{phase: :abort_cleanup_pending} = record, assignment, ports),
     do: ensure_abort_cleanup(record, assignment, ports)
 
-  defp advance(%{phase: :credential_candidate_revocation_pending} = record, assignment, ports),
-    do: revoke_candidate_lease(record, assignment, ports)
-
   defp advance(%{phase: :credential_request_revocation_pending} = record, assignment, ports),
     do: revoke_candidate_request(record, assignment, ports)
 
@@ -204,13 +201,14 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
-  defp save_credential_lease(record, lease, assignment, ports) do
-    case Record.validate_credential_lease(lease, record.allocation, assignment) do
+  defp save_credential_lease(record, lease_response, assignment, ports) do
+    case Record.validate_credential_lease_response(lease_response, record.allocation, assignment) do
       :ok ->
+        lease = Record.credential_lease_from_response(lease_response, assignment)
         persist_or_revoke_credential_lease(record, lease, assignment, ports)
 
       {:error, _reason} ->
-        quarantine_candidate_lease(record, lease, assignment, ports, :credential_lease_invalid, :acquire)
+        quarantine_candidate_request(record, assignment, ports, :acquire)
     end
   end
 
@@ -225,15 +223,13 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
-  defp save_renewed_credential_lease(record, renewed, assignment, ports) do
-    case Record.validate_credential_lease(renewed, record.allocation, assignment) do
-      :ok when renewed.lease_ref == record.credential_lease.lease_ref ->
+  defp save_renewed_credential_lease(record, renewed_response, assignment, ports) do
+    case Record.validate_credential_lease_response(renewed_response, record.allocation, assignment) do
+      :ok ->
+        renewed = Record.credential_lease_from_response(renewed_response, assignment)
         persist_renewed_credential_lease(record, renewed, assignment, ports)
 
-      :ok ->
-        quarantine_candidate_lease(record, renewed, assignment, ports, :credential_lease_invalid, :renew)
-
-      _ ->
+      {:error, _reason} ->
         quarantine_candidate_request(record, assignment, ports, :renew)
     end
   end
@@ -279,19 +275,6 @@ defmodule SymphonyElixir.ManagedExecutor do
     )
   end
 
-  defp quarantine_candidate_lease(record, lease, assignment, ports, reason, operation) do
-    case Record.candidate_lease_ref(lease) do
-      nil ->
-        quarantine_candidate_request(record, assignment, ports, operation)
-
-      ref ->
-        case checkpoint(record, :credential_candidate_revocation_pending, ports, %{candidate_lease_ref: ref}) do
-          {:ok, pending} -> revoke_candidate_lease(pending, assignment, ports, reason)
-          {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
-        end
-    end
-  end
-
   defp quarantine_candidate_request(record, assignment, ports, operation) do
     attrs = %{candidate_lease_operation: operation}
 
@@ -313,22 +296,6 @@ defmodule SymphonyElixir.ManagedExecutor do
            ports.adapter_context
          ) do
       :ok -> abort_before_execution(record, assignment, :credential_lease_invalid, ports)
-      _ -> {:held, :credential_lease_candidate_revocation_failed, record}
-    end
-  end
-
-  defp revoke_candidate_lease(record, assignment, ports, reason \\ :credential_lease_invalid) do
-    ref = record.candidate_lease_ref
-    revoke_key = key(assignment, "credential-candidate-revoke:#{:crypto.hash(:sha256, ref) |> Base.encode16(case: :lower)}")
-
-    case ports.adapter.revoke_credential_lease(
-           record.allocation,
-           assignment,
-           ref,
-           revoke_key,
-           ports.adapter_context
-         ) do
-      :ok -> abort_before_execution(record, assignment, reason, ports)
       _ -> {:held, :credential_lease_candidate_revocation_failed, record}
     end
   end
@@ -480,7 +447,7 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp abort_before_execution(record, assignment, reason, ports) do
-    attrs = %{abort_reason: reason, candidate_lease_ref: nil}
+    attrs = %{abort_reason: reason}
 
     case checkpoint(record, :abort_pending, ports, attrs) do
       {:ok, pending} -> advance(pending, assignment, ports)

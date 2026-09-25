@@ -6,13 +6,12 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   the signed assignment contract and non-secret references only; host credentials
   belong to the execution adapter and must never be returned here.
 
-  Credential lease references are non-authorizing, non-secret identifiers using
-  only ASCII letters, digits, colon, underscore, or hyphen. Acquisition and
-  renewal reconcile by key. A malformed response with a safe reference is
-  durably quarantined by the journal and revoked before abort. An unsafe or
-  absent reference is quarantined by the stable acquire/renew request key and
-  revoked through the request-reconciliation port. Revocation by reference or
-  request key is idempotent and verifies ownership before revoking. Execution adapters
+  The executor derives each lease handle from the signed assignment digest and
+  acquire request key. Adapter responses never contain a lease reference or
+  credential material. Acquire and renew reconcile by the supplied request key;
+  revocation by the executor-derived handle or by an uncertain request key is
+  idempotent, verifies ownership, and reports success only after cleanup.
+  Execution adapters
   must recheck lease expiry at the side-effect boundary, since journal persistence
   can take long enough for a locally checked expiry to pass.
   """
@@ -21,6 +20,11 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   @type allocation :: %{id: String.t(), status: :ready}
   @type credential_lease :: %{
           lease_ref: String.t(),
+          assignment_digest: String.t(),
+          allocation_id: String.t(),
+          expires_at_ms: non_neg_integer()
+        }
+  @type credential_lease_response :: %{
           assignment_digest: String.t(),
           allocation_id: String.t(),
           expires_at_ms: non_neg_integer()
@@ -73,9 +77,9 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   @callback prepare_checkout(allocation(), assignment(), checkout_intent(), String.t(), term()) ::
               {:ok, checkout_receipt()} | {:error, term()}
   @callback acquire_credential_lease(allocation(), assignment(), String.t(), term()) ::
-              {:ok, credential_lease()} | {:error, :denied | term()}
+              {:ok, credential_lease_response()} | {:error, :denied | term()}
   @callback renew_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
-              {:ok, credential_lease()} | {:error, :denied | term()}
+              {:ok, credential_lease_response()} | {:error, :denied | term()}
   @callback revoke_credential_lease(allocation(), assignment(), String.t(), String.t(), term()) ::
               :ok | {:error, term()}
   @callback revoke_credential_lease_request(allocation(), assignment(), String.t(), String.t(), term()) ::
