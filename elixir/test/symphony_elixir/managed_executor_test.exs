@@ -69,11 +69,57 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert Enum.count(events, &(elem(&1, 0) == :reconcile_execution)) == 1
   end
 
-  test "holds checkout drift before execution" do
+  test "cleans up a checkout intent mismatch without executing" do
     {adapter, _journal, opts} = ports(checkout_mismatch: true)
     assignment = assignment()
 
-    assert {:held, :checkout_intent_mismatch, %{phase: :checkout_pending}} = ManagedExecutor.run(assignment, opts)
+    assert {:ok, %{phase: :aborted, abort_reason: :checkout_intent_mismatch}} =
+             ManagedExecutor.run(assignment, opts)
+
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+    assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :ensure_abort_cleanup))
+  end
+
+  test "records pre-execution cleanup debt and retries uncertain cleanup without re-preparing checkout" do
+    {adapter, _journal, opts} = ports(checkout_failure: true, faults: %{abort_cleanup: 1})
+    assignment = assignment()
+
+    assert {:held, :abort_cleanup_unverified, %{phase: :abort_pending, allocation: %{id: allocation_id}}} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert {:ok, %{phase: :aborted, allocation: %{id: ^allocation_id}, abort_cleanup_evidence: evidence}} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert evidence.abort_reason == :checkout_preparation_failed
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :prepare_checkout)) == 1
+    assert Enum.count(events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 2
+    refute Enum.any?(events, &(elem(&1, 0) == :execute))
+
+    assert {:ok, %{phase: :aborted}} = ManagedExecutor.run(assignment, opts)
+    replay_events = FakeAdapter.events(adapter)
+    assert Enum.count(replay_events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 2
+    assert Enum.count(replay_events, &(elem(&1, 0) == :verify_abort_cleanup)) == 2
+  end
+
+  test "rejects a noncanonical checkout head and cleans up before execution" do
+    {adapter, _journal, opts} = ports(checkout_head: String.duplicate("a", 41))
+    assignment = assignment()
+
+    assert {:ok, %{phase: :aborted, abort_reason: :checkout_intent_mismatch}} =
+             ManagedExecutor.run(assignment, opts)
+
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+  end
+
+  test "does not terminalize abort cleanup evidence for another allocation" do
+    {adapter, _journal, opts} = ports(checkout_failure: true, abort_cleanup_mismatch: true)
+    assignment = assignment()
+
+    assert {:held, :abort_cleanup_evidence_invalid, %{phase: :abort_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert {:ok, %{phase: :aborted}} = ManagedExecutor.run(assignment, opts)
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
   end
 

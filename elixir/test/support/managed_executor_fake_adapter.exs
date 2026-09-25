@@ -28,8 +28,11 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         faults: Keyword.get(opts, :faults, %{}),
         result: Keyword.get(opts, :result),
         checkout_mismatch: Keyword.get(opts, :checkout_mismatch, false),
+        checkout_failure: Keyword.get(opts, :checkout_failure, false),
+        checkout_head: Keyword.get(opts, :checkout_head, "0123456789abcdef0123456789abcdef01234567"),
         execution_reconciliation: Keyword.get(opts, :execution_reconciliation),
         cleanup_invalid: Keyword.get(opts, :cleanup_invalid, false),
+        abort_cleanup_mismatch: Keyword.get(opts, :abort_cleanup_mismatch, false),
         signature_invalid: Keyword.get(opts, :signature_invalid, false)
       }
     end)
@@ -46,16 +49,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
 
   @impl true
   def prepare_checkout(allocation, assignment, intent, idempotency_key, pid) do
-    with_event(pid, {:prepare_checkout, allocation.id, intent, idempotency_key}, fn state ->
-      receipt =
-        Map.merge(intent, %{
-          assignment_digest: assignment.sha256,
-          head: "0123456789abcdef0123456789abcdef01234567"
-        })
-
-      receipt = if state.checkout_mismatch, do: %{receipt | branch: "codex/other"}, else: receipt
-      {{:ok, receipt}, state}
-    end)
+    with_event(pid, {:prepare_checkout, allocation.id, intent, idempotency_key}, &checkout_response(&1, assignment, intent))
   end
 
   @impl true
@@ -93,8 +87,29 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   end
 
   @impl true
+  def ensure_abort_cleanup(allocation, assignment, abort_reason, idempotency_key, pid) do
+    with_event(pid, {:ensure_abort_cleanup, allocation.id, assignment.sha256, abort_reason, idempotency_key}, fn state ->
+      evidence = abort_cleanup_evidence(allocation, assignment, abort_reason)
+
+      if state.abort_cleanup_mismatch do
+        {{:ok, %{evidence | allocation_id: "another-allocation"}}, %{state | abort_cleanup_mismatch: false}}
+      else
+        fail_once(state, :abort_cleanup, {:ok, evidence})
+      end
+    end)
+  end
+
+  @impl true
   def verify_terminal_cleanup(evidence, _allocation, _assignment, _execution_result, pid) do
     with_event(pid, {:verify_terminal_cleanup, evidence.evidence_ref}, fn state ->
+      response = if evidence.signature == "synthetic-signature", do: :ok, else: {:error, :signature_invalid}
+      {response, state}
+    end)
+  end
+
+  @impl true
+  def verify_abort_cleanup(evidence, _allocation, _assignment, _abort_reason, pid) do
+    with_event(pid, {:verify_abort_cleanup, evidence.evidence_ref}, fn state ->
       response = if evidence.signature == "synthetic-signature", do: :ok, else: {:error, :signature_invalid}
       {response, state}
     end)
@@ -115,6 +130,20 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
       _ ->
         {success, state}
     end
+  end
+
+  defp checkout_response(%{checkout_failure: true} = state, _assignment, _intent),
+    do: {{:error, :synthetic_checkout_failure}, %{state | checkout_failure: false}}
+
+  defp checkout_response(state, assignment, intent) do
+    receipt =
+      Map.merge(intent, %{
+        assignment_digest: assignment.sha256,
+        head: state.checkout_head
+      })
+
+    receipt = if state.checkout_mismatch, do: %{receipt | branch: "codex/other"}, else: receipt
+    {{:ok, receipt}, state}
   end
 
   defp result(%{result: nil}, assignment), do: result(%{result: :default}, assignment)
@@ -148,6 +177,28 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
       reviewer_leases_released: true,
       evidence_ref: "cleanup-fixture-1",
       checksum: String.duplicate("a", 64),
+      signer_id: "synthetic-cleanup-signer",
+      signature: "synthetic-signature"
+    }
+  end
+
+  defp abort_cleanup_evidence(allocation, assignment, abort_reason) do
+    %{
+      contract_version: "managed-executor-abort-receipt.v1",
+      receipt_kind: "pre_execution_cleanup_verified",
+      assignment_digest: assignment.sha256,
+      allocation_id: allocation.id,
+      issue_id: assignment.lease.issue_id,
+      generation: assignment.lease.generation,
+      session_id: assignment.lease.session_id,
+      process_id: assignment.lease.process_id,
+      repository_ref: assignment.repository_ref,
+      abort_reason: abort_reason,
+      workspace_removed: true,
+      credentials_revoked: true,
+      reviewer_leases_released: true,
+      evidence_ref: "abort-cleanup-fixture-1",
+      checksum: String.duplicate("b", 64),
       signer_id: "synthetic-cleanup-signer",
       signature: "synthetic-signature"
     }

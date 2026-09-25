@@ -151,9 +151,16 @@ adapter and durable-journal behaviors. Its allocation, checkout, execution,
 result-publication and cleanup calls all carry stable keys derived from the
 validated assignment digest. Checkout intent is projected only from the signed
 assignment's repository, base ref and branch; an adapter receipt that differs is
-held before execution. The adapter return shapes are deliberately narrow so
-workspace paths, command strings, credential values and raw process output are
-not lifecycle fields.
+aborted before execution through a journaled cleanup-debt phase. A failed or
+uncertain pre-execution cleanup remains in `abort_pending`; replay retries only
+the exact allocation-bound cleanup operation with its stable key, never checkout
+or execution. The `aborted` terminal state requires signed evidence bound to
+the assignment digest, allocation, lease identity, repository and abort reason,
+confirming workspace removal, credential revocation and reviewer-lease release.
+Replay re-verifies this evidence. Checkout heads must be canonical 40- or
+64-character hexadecimal Git object identifiers. The adapter return shapes are
+deliberately narrow so workspace paths, command strings, credential values and
+raw process output are not lifecycle fields.
 
 The journal uses versioned compare-and-swap and must be durable and atomic in any
 future implementation. Allocation and checkout interruptions can retry through

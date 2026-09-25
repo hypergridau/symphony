@@ -52,6 +52,31 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
+  defp advance(%{phase: :aborted} = record, assignment, ports) do
+    with :ok <-
+           Record.validate_abort_cleanup_evidence(
+             record.abort_cleanup_evidence,
+             record.allocation,
+             assignment,
+             record.abort_reason
+           ),
+         :ok <-
+           ports.adapter.verify_abort_cleanup(
+             record.abort_cleanup_evidence,
+             record.allocation,
+             assignment,
+             record.abort_reason,
+             ports.adapter_context
+           ) do
+      {:ok, record}
+    else
+      _ -> {:held, :abort_cleanup_reverification_failed, record}
+    end
+  end
+
+  defp advance(%{phase: :abort_pending} = record, assignment, ports),
+    do: ensure_abort_cleanup(record, assignment, ports)
+
   defp advance(%{phase: :execution_started} = record, assignment, ports) do
     case reconcile_execution(record, assignment, ports) do
       {:ok, nil} -> {:held, :execution_outcome_unknown, record}
@@ -129,8 +154,8 @@ defmodule SymphonyElixir.ManagedExecutor do
            ports.adapter_context
          ) do
       {:ok, receipt} -> save_checkout(record, receipt, assignment, intent, ports)
-      {:error, _reason} -> {:held, :checkout_preparation_failed, record}
-      _ -> {:held, :checkout_intent_mismatch, record}
+      {:error, _reason} -> abort_before_execution(record, assignment, :checkout_preparation_failed, ports)
+      _ -> abort_before_execution(record, assignment, :checkout_intent_mismatch, ports)
     end
   end
 
@@ -139,7 +164,7 @@ defmodule SymphonyElixir.ManagedExecutor do
          {:ok, ready} <- checkpoint(record, :checkout_ready, ports, %{checkout: receipt}) do
       advance(ready, assignment, ports)
     else
-      {:error, _reason} -> {:held, :checkout_intent_mismatch, record}
+      {:error, _reason} -> abort_before_execution(record, assignment, :checkout_intent_mismatch, ports)
     end
   end
 
@@ -279,6 +304,55 @@ defmodule SymphonyElixir.ManagedExecutor do
     end
   end
 
+  defp abort_before_execution(record, assignment, reason, ports) do
+    case checkpoint(record, :abort_pending, ports, %{abort_reason: reason}) do
+      {:ok, pending} -> ensure_abort_cleanup(pending, assignment, ports)
+      {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
+    end
+  end
+
+  defp ensure_abort_cleanup(record, assignment, ports) do
+    response =
+      ports.adapter.ensure_abort_cleanup(
+        record.allocation,
+        assignment,
+        record.abort_reason,
+        key(assignment, "abort-cleanup"),
+        ports.adapter_context
+      )
+
+    case response do
+      {:ok, evidence} -> verify_and_record_abort_cleanup(record, evidence, assignment, ports)
+      {:error, _reason} -> {:held, :abort_cleanup_unverified, record}
+      _ -> {:held, :abort_cleanup_evidence_invalid, record}
+    end
+  end
+
+  defp verify_and_record_abort_cleanup(record, evidence, assignment, ports) do
+    with :ok <-
+           Record.validate_abort_cleanup_evidence(
+             evidence,
+             record.allocation,
+             assignment,
+             record.abort_reason
+           ),
+         :ok <-
+           ports.adapter.verify_abort_cleanup(
+             evidence,
+             record.allocation,
+             assignment,
+             record.abort_reason,
+             ports.adapter_context
+           ),
+         {:ok, aborted} <- checkpoint(record, :aborted, ports, %{abort_cleanup_evidence: evidence}) do
+      {:ok, aborted}
+    else
+      {:error, :abort_cleanup_evidence_invalid} -> {:held, :abort_cleanup_evidence_invalid, record}
+      {:error, _reason} -> {:held, :abort_cleanup_unverified, record}
+      _ -> {:held, :abort_cleanup_evidence_invalid, record}
+    end
+  end
+
   defp checkpoint(record, phase, ports, attrs \\ %{}) do
     Record.checkpoint(record, phase, ports.journal, ports.journal_context, attrs)
   end
@@ -297,7 +371,9 @@ defmodule SymphonyElixir.ManagedExecutor do
         {:reconcile_execution, 5},
         {:publish_or_reconcile_result, 5},
         {:ensure_terminal_cleanup, 5},
-        {:verify_terminal_cleanup, 5}
+        {:verify_terminal_cleanup, 5},
+        {:ensure_abort_cleanup, 5},
+        {:verify_abort_cleanup, 5}
       ]
 
       adapter_valid? =

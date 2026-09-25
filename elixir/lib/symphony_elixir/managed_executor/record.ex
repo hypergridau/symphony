@@ -12,7 +12,9 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :result_pending,
     :result_reported,
     :cleanup_pending,
-    :terminal
+    :terminal,
+    :abort_pending,
+    :aborted
   ]
   @checkout_phases [
     :checkout_ready,
@@ -26,6 +28,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   @result_phases [:result_recorded, :result_pending, :result_reported, :cleanup_pending, :terminal]
   @reported_phases [:result_reported, :cleanup_pending, :terminal]
   @outcomes [:completed, :failed, :blocked]
+  @abort_reasons [:checkout_preparation_failed, :checkout_intent_mismatch]
 
   @spec load_or_create(module(), String.t(), map(), term()) :: {:ok, map()} | {:error, term()}
   def load_or_create(journal, key, assignment, context) do
@@ -65,7 +68,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     exact_keys = MapSet.new(Map.keys(receipt)) == MapSet.new(Map.keys(expected) ++ [:head])
 
     if exact_keys and Enum.all?(expected, fn {key, value} -> Map.get(receipt, key) == value end) and
-         nonempty_text?(Map.get(receipt, :head)),
+         valid_head?(Map.get(receipt, :head)),
        do: :ok,
        else: {:error, :checkout_intent_mismatch}
   end
@@ -121,10 +124,47 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   def validate_cleanup_evidence(_evidence, _allocation, _assignment, _result), do: {:error, :cleanup_evidence_invalid}
 
+  @spec validate_abort_cleanup_evidence(term(), map(), map(), atom()) ::
+          :ok | {:error, :abort_cleanup_evidence_invalid}
+  def validate_abort_cleanup_evidence(evidence, allocation, assignment, abort_reason) when is_map(evidence) do
+    expected = %{
+      contract_version: "managed-executor-abort-receipt.v1",
+      receipt_kind: "pre_execution_cleanup_verified",
+      assignment_digest: assignment.sha256,
+      allocation_id: allocation.id,
+      issue_id: assignment.lease.issue_id,
+      generation: assignment.lease.generation,
+      session_id: assignment.lease.session_id,
+      process_id: assignment.lease.process_id,
+      repository_ref: assignment.repository_ref,
+      abort_reason: abort_reason,
+      workspace_removed: true,
+      credentials_revoked: true,
+      reviewer_leases_released: true
+    }
+
+    exact_keys =
+      MapSet.new(Map.keys(evidence)) ==
+        MapSet.new(Map.keys(expected) ++ [:evidence_ref, :checksum, :signer_id, :signature])
+
+    valid = Enum.all?(expected, fn {key, value} -> Map.get(evidence, key) == value end)
+    signed = Enum.all?([:evidence_ref, :signer_id, :signature], &nonempty_text?(Map.get(evidence, &1)))
+    checksum = Map.get(evidence, :checksum)
+    checksum_valid? = is_binary(checksum) and Regex.match?(~r/\A[a-f0-9]{64}\z/, checksum)
+
+    if exact_keys and valid and signed and checksum_valid?,
+      do: :ok,
+      else: {:error, :abort_cleanup_evidence_invalid}
+  end
+
+  def validate_abort_cleanup_evidence(_evidence, _allocation, _assignment, _abort_reason),
+    do: {:error, :abort_cleanup_evidence_invalid}
+
   @spec nonempty_text?(term()) :: boolean()
   def nonempty_text?(value), do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
 
-  defp valid_head?(head), do: is_binary(head) and Regex.match?(~r/\A[0-9a-fA-F]{40,64}\z/, head)
+  defp valid_head?(head),
+    do: is_binary(head) and Regex.match?(~r/\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z/, head)
 
   defp create_or_load(journal, key, assignment, context) do
     initial = %{schema_version: 1, key: key, assignment_digest: assignment.sha256, phase: :planned, version: 0}
@@ -164,7 +204,8 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
     valid_phase_keys?(record, base_keys) and valid_allocation_phase?(record) and
       valid_checkout_phase?(record, assignment) and valid_result_phase?(record, assignment) and
-      valid_reported_phase?(record) and valid_cleanup_phase?(record, assignment)
+      valid_reported_phase?(record) and valid_cleanup_phase?(record, assignment) and
+      valid_abort_phase?(record, assignment)
   end
 
   defp valid_phase_keys?(record, base_keys) do
@@ -187,6 +228,12 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
         :terminal ->
           [:allocation, :checkout, :execution_result, :result_ref, :cleanup_evidence]
+
+        :abort_pending ->
+          [:allocation, :abort_reason]
+
+        :aborted ->
+          [:allocation, :abort_reason, :abort_cleanup_evidence]
       end
 
     MapSet.new(Map.keys(record)) == MapSet.new(base_keys ++ phase_keys)
@@ -218,4 +265,19 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
         assignment,
         Map.get(record, :execution_result)
       ) == :ok
+
+  defp valid_abort_phase?(%{phase: phase}, _assignment) when phase not in [:abort_pending, :aborted], do: true
+
+  defp valid_abort_phase?(record, assignment) do
+    abort_reason = Map.get(record, :abort_reason)
+
+    abort_reason in @abort_reasons and validate_allocation(Map.get(record, :allocation)) == :ok and
+      (record.phase == :abort_pending or
+         validate_abort_cleanup_evidence(
+           Map.get(record, :abort_cleanup_evidence),
+           Map.get(record, :allocation),
+           assignment,
+           abort_reason
+         ) == :ok)
+  end
 end
