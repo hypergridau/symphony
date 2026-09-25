@@ -24,7 +24,9 @@ message_file=$(mktemp /dev/shm/symphony-grant-sign.XXXXXXXX)
 trap 'rm -f -- "$snapshot_file" "$message_file"' EXIT
 cat -- "$manifest" >"$snapshot_file"
 [[ $(stat -c '%s' -- "$snapshot_file") -le 262144 ]]
-printf '%s\0' 'hypergrid.symphony.managed-delegation.v1' >"$message_file"
+schema_version=$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1], encoding="utf-8")).get("schema_version"); print(value if value in (1,2) else "")' "$snapshot_file")
+[[ $schema_version == 1 || $schema_version == 2 ]]
+printf 'hypergrid.symphony.managed-delegation.v%s\0' "$schema_version" >"$message_file"
 cat -- "$snapshot_file" >>"$message_file"
 signature_hex=$(openssl pkeyutl -sign -rawin -inkey "$private_key" \
   -in "$message_file" \

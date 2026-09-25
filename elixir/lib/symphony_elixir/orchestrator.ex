@@ -14,6 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
     ExecutionSupervisor,
     GlobalPause,
     ManagedAssignmentBundle,
+    ManagedResponsibility,
     ResponsibilityGraph,
     ReviewHandoff,
     ReviewHandoffEvidence,
@@ -2127,11 +2128,11 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp managed_assignment_bundle(%State{work_package_runtime: runtime} = state, issue, token, session_id, delegation_id)
        when is_map(runtime) do
-    context = Map.get(runtime, :assignment_context, %{})
     delegation = get_in(state.responsibility_graph, [:delegations, delegation_id])
     execution = get_in(state.execution_fence, [:executions, issue.id])
 
-    with true <- is_map(context) and is_map(delegation) and is_map(execution),
+    with true <- is_map(delegation) and is_map(execution),
+         {:ok, context} <- ManagedResponsibility.assignment_context(Map.get(runtime, :managed_delegations), issue, delegation_id),
          true <-
            is_map(delegation.runtime_lease) and delegation.runtime_lease.issue_id == issue.id and
              delegation.runtime_lease.generation == token.generation and
@@ -2141,8 +2142,8 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, bundle} <-
            ManagedAssignmentBundle.build(%{
              objective: %{
-               id: get_in(delegation, [:scope, :objective_id]),
-               identity: Map.get(context, :objective_identity),
+               id: Map.get(context, :objective_id),
+               identity: Map.get(context, :objective_id),
                content: Map.get(context, :objective_content)
              },
              repository_ref: execution.repository,
@@ -2154,6 +2155,7 @@ defmodule SymphonyElixir.Orchestrator do
              acceptance: %{deliverable: delegation.expected_deliverable, evidence: delegation.expected_evidence},
              context_secret_refs: Map.get(runtime, :secret_environment_names, []),
              platform: Map.get(context, :platform),
+             environment_classification: Map.get(context, :environment_classification),
              environment_constraints: Map.get(context, :environment_constraints)
            }) do
       {:ok, bundle}

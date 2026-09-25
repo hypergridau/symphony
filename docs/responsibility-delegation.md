@@ -62,19 +62,21 @@ An enforced managed Linux pool must load explicit COO/runtime-owner authorizatio
 `DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519`, and
 `DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519`. The latter two are lowercase
 hex for a detached 64-byte Ed25519 signature and its 32-byte trusted public key.
-The signer signs the exact raw file bytes prefixed by
-`hypergrid.symphony.managed-delegation.v1` and one zero byte. The trusted service
+The signer signs the exact raw file bytes prefixed by the schema-matched domain
+`hypergrid.symphony.managed-delegation.v1` or
+`hypergrid.symphony.managed-delegation.v2`, followed by one zero byte. The trusted service
 environment pins the exact bytes of a root-owned regular file and the verifying
 key; links, writable-by-others files, oversized input, partial configuration,
 digest or signature mismatches fail closed. Keep the signing private key off the
 runner guest and separate from the HGS-719 claim-witness key. The file contains
 authorization inputs, never runtime leases, statuses, clock history or graph events.
 
-The JSON object has `schema_version:1`, `pool_key`, `repository_ref`,
+The JSON object has `schema_version`, `pool_key`, `repository_ref`,
 `managed_project_profile_id`, a nonempty `authority_ref`, and at most 20 `entries`.
-An empty list explicitly authorizes no work and must also be signed. A declared
-managed pool cannot omit manifest settings to select legacy admission; only an
-undeclared legacy runtime may omit them.
+An empty signed v1 or v2 list explicitly authorizes no work and remains loadable
+while managed admission is paused. Nonempty v1 grants lack the assignment snapshot
+and fail closed at admission. A declared managed pool cannot omit manifest
+settings to select legacy admission; only an undeclared legacy runtime may omit them.
 Each entry contains `issue_id` (UUID), `identifier`, `owner_id`, and `accountable`/`responsible`
 delegation inputs using the existing graph field names. The accountable actor is the current
 native issue owner; the responsible actor must match the configured `DAHLIA_RUNNER_ID`. Scope identifies
@@ -83,13 +85,23 @@ Paths are explicit repository-relative paths, with `.` allowed for the fresh iss
 environment is `repository`. Both grants use `routine_engineering` authority, future expiry,
 bounded model/effort/token budgets and a deliverable/evidence return contract. The responsible
 child cannot delegate children. This is authority metadata, not a claim of OS sandbox isolation.
+Each nonempty v2 entry additionally signs an `assignment_context` with an
+`objective` `{id, content}`, `base_ref`, and `environment` `{platform,
+classification, constraints}`. The objective ID must equal the delegation
+scope's objective ID. Content is exactly the freshly fetched native issue title,
+optionally followed by a blank line and its nonblank description; admission
+rejects drift. `base_ref` is fixed to `refs/remotes/origin/main`. This slice
+allows target platform `linux-x86_64` and requires classification `repository`
+plus at least one nonempty constraint. The assignment bundle context comes from
+this decoded signed entry, never ambient runtime or prompt fields.
 
 To issue or rotate a grant, keep an Ed25519 PEM private key on a trusted root
 signing host outside the runner guest, owned by root with mode `0600`. Freeze the
 manifest's exact bytes, copy that non-secret file to the signing host, and run
 [`scripts/sign-managed-delegation.sh`](../scripts/sign-managed-delegation.sh)
 with the private-key and manifest paths on Linux with Bash, GNU coreutils,
-OpenSSL Ed25519 support, and `/dev/shm` available. The tool prints the file digest,
+Python 3, OpenSSL Ed25519 support, and `/dev/shm` available. It selects the
+signature domain from `schema_version` and rejects unsupported versions. The tool prints the file digest,
 detached signature, and raw public key as the three service settings above;
 it does not print private key material. Install the same manifest bytes as a
 root-owned regular file and update all three settings together in the trusted
@@ -124,8 +136,10 @@ contract, secret environment variable names, and target platform constraints int
 SHA-256 assignment bundle. Secret values are never included. The worker validates the bundle
 before workspace creation.
 
-The current runtime configuration does not yet populate the required objective content/identity,
-base ref, platform or environment constraints. Until a trusted source supplies those fields through
-`work_package_runtime.assignment_context`, managed spawn fails closed before recording `spawn_started`.
-This is an incomplete source slice; it does not qualify managed runtime admission or workload
-execution.
+The runtime carries the decoded, signature-verified manifest entry, and admission
+compares its objective snapshot with the canonical issue before graph writes.
+Managed spawn reuses that signed entry to build the assignment bundle. This is a
+source slice only: the cross-repository manifest issuer must emit and sign v2
+nonempty entries before such grants can run. Keep the managed gate paused until
+that issuer and its rollout are reviewed. No runtime admission, production host,
+or workload execution is qualified by this change.

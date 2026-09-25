@@ -1,7 +1,10 @@
+Code.require_file("../support/managed_responsibility_fixture.exs", __DIR__)
+
 defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{AgentRunner, ExecutionFence, Orchestrator, ResponsibilityGraph}
+  alias SymphonyElixir.{AgentRunner, ExecutionFence, ManagedResponsibility, Orchestrator, ResponsibilityGraph}
+  alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
 
   test "orchestrator callback persists, authorizes, and revokes a delegation" do
     {fence, token} = active_fence()
@@ -131,12 +134,24 @@ defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
   end
 
   test "orchestrator assignment construction produces the bundle accepted by AgentRunner" do
+    issue = Fixture.issue(300)
+
+    managed_scope =
+      scope()
+      |> Map.merge(%{
+        objective_id: "objective-test",
+        issue_id: issue.id,
+        repository: "openai/symphony",
+        paths: ["."],
+        environments: ["repository"]
+      })
+
     {:ok, graph, :activated} = ResponsibilityGraph.activate(ResponsibilityGraph.new(), 0)
 
     {:ok, graph, _owner} =
       ResponsibilityGraph.delegate(
         graph,
-        delegation("owner", :accountable, scope: Map.put(scope(), :repository, "openai/symphony")),
+        delegation("owner", :accountable, actor_id: issue.assignee_id, scope: managed_scope, authority: Map.put(authority(), :environments, ["repository"])),
         1
       )
 
@@ -146,26 +161,43 @@ defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
         delegation(
           "worker",
           :responsible,
+          actor_id: "runner-test",
           parent_delegation_id: "owner",
-          scope: Map.put(scope(), :repository, "openai/symphony")
+          scope: managed_scope,
+          authority: Map.put(authority(), :environments, ["repository"])
         ),
         2
       )
 
-    issue = %Issue{id: "HGS-300", identifier: "HGS-300", title: "Managed assignment", state: "Todo", branch_name: "codex/hgs-300"}
     state = %Orchestrator.State{execution_fence: ExecutionFence.new(), responsibility_graph: graph}
 
     assert {:ok, admitted, token, session_id, "worker", lease} =
              Orchestrator.admit_execution_for_test(state, issue, nil)
 
+    payload = Fixture.payload(System.system_time(:millisecond), "openai/symphony")
+    [signed_entry | rest] = payload["entries"]
+
+    signed_entry =
+      signed_entry
+      |> Map.put("issue_id", issue.id)
+      |> Map.put("identifier", issue.identifier)
+      |> Map.put("owner_id", issue.assignee_id)
+      |> update_in(["accountable", "id"], fn _ -> "owner" end)
+      |> update_in(["responsible", "id"], fn _ -> "worker" end)
+      |> update_in(["responsible", "parent_delegation_id"], fn _ -> "owner" end)
+      |> update_in(["accountable", "scope", "objective_id"], fn _ -> "objective-test" end)
+      |> update_in(["responsible", "scope", "objective_id"], fn _ -> "objective-test" end)
+      |> update_in(["accountable", "scope", "issue_id"], fn _ -> issue.id end)
+      |> update_in(["responsible", "scope", "issue_id"], fn _ -> issue.id end)
+      |> update_in(["accountable", "scope", "repository"], fn _ -> "openai/symphony" end)
+      |> update_in(["responsible", "scope", "repository"], fn _ -> "openai/symphony" end)
+      |> update_in(["responsible", "actor_id"], fn _ -> "runner-test" end)
+
+    payload = %{payload | "entries" => [signed_entry | rest]}
+    {:ok, signed_manifest} = ManagedResponsibility.decode(payload, Fixture.context(), System.system_time(:millisecond))
+
     runtime = %{
-      assignment_context: %{
-        objective_identity: "objective-1",
-        objective_content: "Ship the managed runner.\nPreserve the execution fence.",
-        base_ref: "refs/remotes/origin/main",
-        platform: "linux-x86_64",
-        environment_constraints: ["repository"]
-      },
+      managed_delegations: signed_manifest,
       secret_environment_names: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"]
     }
 

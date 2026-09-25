@@ -48,6 +48,7 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
         acceptance: %{deliverable: "Managed checkout", evidence: "Observed branch and head"},
         context_secret_refs: [],
         platform: "linux-x86_64",
+        environment_classification: "repository",
         environment_constraints: ["repository"]
       })
 

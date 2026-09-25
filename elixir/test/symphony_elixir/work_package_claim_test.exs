@@ -91,6 +91,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
     %{input: input, token: token, lease: lease} = authority_fixture(path)
+    input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Spawn order"})
 
     previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
     pause_root = Path.join(System.tmp_dir!(), "symphony-spawn-order-#{System.unique_integer([:positive])}")
@@ -123,8 +124,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     runtime =
       input
-      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
-      |> Map.put(:assignment_context, assignment_context())
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
 
     task_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
 
@@ -185,6 +185,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
     %{input: input, token: token, lease: lease} = authority_fixture(path)
+    input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier"})
 
     previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
     pause_root = Path.join(System.tmp_dir!(), "symphony-managed-barrier-#{System.unique_integer([:positive])}")
@@ -241,8 +242,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     runtime =
       input
-      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
-      |> Map.put(:assignment_context, assignment_context())
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
 
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "ManagedBarrier#{System.unique_integer([:positive])}")
@@ -336,6 +336,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
     %{input: input} = authority_fixture(path)
+    input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Successful barrier"})
 
     pause_root = Path.join(System.tmp_dir!(), "symphony-successful-barrier-#{System.unique_integer([:positive])}")
     File.mkdir_p!(pause_root)
@@ -386,8 +387,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     runtime =
       input
-      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
-      |> Map.put(:assignment_context, assignment_context())
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
 
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Successful barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "SuccessfulBarrier#{System.unique_integer([:positive])}")
@@ -504,6 +504,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
     %{input: input, token: token, lease: lease} = authority_fixture(path)
+    input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Pause race"})
 
     previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
     pause_root = Path.join(System.tmp_dir!(), "symphony-claim-pause-#{System.unique_integer([:positive])}")
@@ -519,8 +520,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     runtime =
       input
-      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
-      |> Map.put(:assignment_context, assignment_context())
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"
@@ -1057,14 +1057,37 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     }
   end
 
-  defp assignment_context do
+  defp assignment_manifest(issue) do
     %{
-      objective_identity: "objective",
-      objective_content: "Execute the authorized repository work package",
-      base_ref: "refs/remotes/origin/main",
-      platform: "linux-x86_64",
-      environment_constraints: ["repository"]
+      schema_version: 2,
+      repository_ref: @repository,
+      entries: [
+        %{
+          issue_id: issue.id,
+          identifier: issue.identifier,
+          responsible: %{id: "delegation-349", scope: %{objective_id: "objective", repository: @repository}},
+          assignment_context: %{
+            objective_id: "objective",
+            objective_content: issue.title,
+            base_ref: "refs/remotes/origin/main",
+            platform: "linux-x86_64",
+            environment_classification: "repository",
+            environment_constraints: ["repository"]
+          }
+        }
+      ]
     }
+  end
+
+  defp with_assignment_manifest(input, issue) do
+    graph =
+      input.responsibility_graph
+      |> put_in([:delegations, "owner", :scope, :work_package_id], "projection-349")
+      |> put_in([:delegations, "delegation-349", :scope, :work_package_id], "projection-349")
+
+    input
+    |> Map.put(:managed_delegations, assignment_manifest(issue))
+    |> Map.put(:responsibility_graph, graph)
   end
 
   defp response(body, status \\ 200), do: %Req.Response{status: status, body: body}

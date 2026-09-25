@@ -47,18 +47,25 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
   @spec payload(integer(), String.t()) :: map()
   def payload(now, repository \\ "openai/symphony") do
     %{
-      "schema_version" => 1,
+      "schema_version" => 2,
       "pool_key" => "test-pool",
       "repository_ref" => repository,
       "managed_project_profile_id" => "profile-test",
       "authority_ref" => "test:explicit-coo-authority",
-      "entries" => Enum.map([1, 2], &entry(&1, now, repository))
+      "entries" => Enum.map([1, 2], &entry(&1, now, repository, 2))
     }
+  end
+
+  @spec payload_v1(integer(), String.t()) :: map()
+  def payload_v1(now, repository \\ "openai/symphony") do
+    payload(now, repository)
+    |> Map.put("schema_version", 1)
+    |> Map.update!("entries", fn entries -> Enum.map(entries, &Map.delete(&1, "assignment_context")) end)
   end
 
   defp id(number), do: "11111111-1111-4111-8111-" <> String.pad_leading(Integer.to_string(number), 12, "0")
 
-  defp entry(number, now, repository) do
+  defp entry(number, now, repository, version) do
     issue = issue(number)
     actions = ~w(read edit commit push state_mutation cleanup report)
 
@@ -104,6 +111,16 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
         "budget" => %{"model" => "gpt-6-luna", "effort" => "max", "max_tokens" => 500_000, "max_children" => 0}
       })
 
-    %{"issue_id" => issue.id, "identifier" => issue.identifier, "owner_id" => issue.assignee_id, "accountable" => accountable, "responsible" => responsible}
+    entry = %{"issue_id" => issue.id, "identifier" => issue.identifier, "owner_id" => issue.assignee_id, "accountable" => accountable, "responsible" => responsible}
+
+    if version == 2 do
+      Map.put(entry, "assignment_context", %{
+        "objective" => %{"id" => scope["objective_id"], "content" => issue.title},
+        "base_ref" => "refs/remotes/origin/main",
+        "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]}
+      })
+    else
+      entry
+    end
   end
 end

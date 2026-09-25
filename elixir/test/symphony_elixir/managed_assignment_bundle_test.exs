@@ -53,6 +53,15 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
     assert {:error, :assignment_bundle_context_missing} =
              ManagedAssignmentBundle.build(Map.delete(attrs, :environment_constraints))
 
+    assert {:error, :assignment_bundle_context_missing} =
+             ManagedAssignmentBundle.build(Map.delete(attrs, :environment_classification))
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.build(Map.put(attrs, :platform, "unknown-platform"))
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.build(Map.put(attrs, :environment_classification, "production"))
+
     assert {:error, :assignment_bundle_objective_invalid} =
              ManagedAssignmentBundle.build(put_in(attrs, [:objective, :identity], "other-objective"))
   end
@@ -110,6 +119,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
       acceptance: %{deliverable: "Assignment bundle", evidence: "Focused test coverage"},
       context_secret_refs: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
       platform: "linux-x86_64",
+      environment_classification: "repository",
       environment_constraints: ["repository", "no-production-workload"]
     }
   end

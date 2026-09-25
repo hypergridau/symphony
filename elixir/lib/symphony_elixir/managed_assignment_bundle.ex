@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   """
 
   @schema_version 1
+  @supported_platforms ["linux-x86_64"]
   @type t :: %{
           schema_version: 1,
           objective: %{id: String.t(), identity: String.t(), content: String.t()},
@@ -18,7 +19,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
           intent_ancestry: [String.t()],
           acceptance: %{deliverable: String.t(), evidence: String.t()},
           context_secret_refs: [String.t()],
-          environment: %{platform: String.t(), constraints: [String.t()]},
+          environment: %{platform: String.t(), classification: String.t(), constraints: [String.t()]},
           sha256: String.t()
         }
 
@@ -40,6 +41,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
          bundle = Map.update!(bundle, :context_secret_refs, &(Enum.uniq(&1) |> Enum.sort())),
          environment = %{
            platform: attrs.platform,
+           classification: attrs.environment_classification,
            constraints: attrs.environment_constraints |> Enum.uniq() |> Enum.sort()
          },
          bundle = Map.put(bundle, :environment, environment),
@@ -67,12 +69,12 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
 
   def validate_bundle(_bundle), do: {:error, :invalid_assignment_bundle}
 
-  defp bundle_attributes(%{environment: %{platform: platform, constraints: constraints} = environment} = bundle)
-       when map_size(environment) == 2 do
+  defp bundle_attributes(%{environment: %{platform: platform, classification: classification, constraints: constraints} = environment} = bundle)
+       when map_size(environment) == 3 do
     attrs =
       bundle
       |> Map.drop([:schema_version, :sha256, :environment])
-      |> Map.merge(%{platform: platform, environment_constraints: constraints})
+      |> Map.merge(%{platform: platform, environment_classification: classification, environment_constraints: constraints})
 
     {:ok, attrs}
   end
@@ -80,7 +82,9 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   defp bundle_attributes(_bundle), do: {:error, :assignment_bundle_environment_invalid}
 
   defp validate(attrs) do
-    with :ok <- required_text(attrs, [:repository_ref, :base_ref, :branch, :seat, :platform]),
+    with :ok <- required_text(attrs, [:repository_ref, :base_ref, :branch, :seat, :platform, :environment_classification]),
+         :ok <- valid_platform(attrs.platform),
+         :ok <- valid_environment_classification(attrs.environment_classification),
          :ok <- valid_objective(Map.get(attrs, :objective)),
          :ok <- valid_lease(Map.get(attrs, :lease), Map.get(attrs, :repository_ref)),
          :ok <- valid_nonempty_text_list(Map.get(attrs, :intent_ancestry)),
@@ -91,6 +95,12 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
       :ok
     end
   end
+
+  defp valid_environment_classification("repository"), do: :ok
+  defp valid_environment_classification(_classification), do: {:error, :assignment_bundle_environment_invalid}
+
+  defp valid_platform(platform) when platform in @supported_platforms, do: :ok
+  defp valid_platform(_platform), do: {:error, :assignment_bundle_environment_invalid}
 
   defp required_text(attrs, keys) do
     if Enum.all?(keys, fn key -> valid_text?(Map.get(attrs, key)) end),
