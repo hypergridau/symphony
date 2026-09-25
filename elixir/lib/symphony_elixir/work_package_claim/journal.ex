@@ -20,8 +20,6 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
           repository_ref: String.t(),
           projection_id: String.t(),
           reservation_id: String.t(),
-          optional(:workspace_id) => String.t(),
-          optional(:company_id) => String.t(),
           reservation_nonce: String.t(),
           scope_keys: [String.t()],
           runner_id: String.t(),
@@ -30,7 +28,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
           process_id: String.t(),
           responsible_delegation_id: String.t(),
           execution_fence_token: String.t(),
-          runtime_lease_id: String.t()
+          runtime_lease_id: String.t(),
+          optional(:workspace_id) => String.t(),
+          optional(:company_id) => String.t()
         }
 
   @type state :: %{schema_version: 1, reservations: %{optional(String.t()) => reservation()}}
