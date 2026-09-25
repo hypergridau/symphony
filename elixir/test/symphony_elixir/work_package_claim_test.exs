@@ -43,6 +43,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:ok, journal} = Journal.load(path)
     [{_key, reservation}] = Map.to_list(journal.reservations)
     assert reservation.dispatch.phase == "confirmed"
+    assert reservation.workspace_id == "workspace-349"
+    assert reservation.company_id == "company-349"
 
     runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
     task_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
@@ -905,6 +907,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     %{
       "projectionId" => "projection-349",
       "reservationId" => "reservation-349",
+      "workspaceId" => "workspace-349",
+      "companyId" => "company-349",
       "reservationNonce" => "nonce-349",
       "issueId" => @issue_id,
       "managedProjectProfileId" => @profile,

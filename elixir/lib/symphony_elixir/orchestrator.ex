@@ -1657,6 +1657,7 @@ defmodule SymphonyElixir.Orchestrator do
         # Fence local replay before returning from the pause barrier. Recovery
         # still needs a separately verified provider release and host proof.
         recovery_fence = WorkPackageClaim.begin_paused_recovery(claim_input(state, issue))
+
         block_issue_from_entry(
           state,
           issue.id,

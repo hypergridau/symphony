@@ -793,6 +793,8 @@ defmodule SymphonyElixir.WorkPackageClaimRecoveryTest do
     %{
       "projectionId" => "package-1",
       "reservationId" => "reservation",
+      "workspaceId" => "workspace-test",
+      "companyId" => "company-test",
       "reservationNonce" => "test-private-nonce",
       "issueId" => issue_id,
       "managedProjectProfileId" => "profile-test",
