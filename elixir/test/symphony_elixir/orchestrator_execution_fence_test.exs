@@ -74,7 +74,10 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
       event: :turn_failed,
       execution_token: token,
       execution_session_id: session.session_id,
-      payload: %{"method" => "turn/failed", "params" => %{"turnId" => "turn-failed-turn"}}
+      payload: %{
+        "method" => "turn/failed",
+        "params" => %{"threadId" => "thread-failed-turn", "turn" => %{"id" => "turn-failed-turn"}}
+      }
     }
 
     assert :ok = GenServer.call(pid, {:managed_failed_turn, issue_id, update})
@@ -83,6 +86,17 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
     bytes = File.read!(journal_path)
     assert :ok = GenServer.call(pid, {:managed_failed_turn, issue_id, update})
     assert File.read!(journal_path) == bytes
+
+    for params <- [
+          %{"threadId" => "stale-thread", "turn" => %{"id" => "turn-failed-turn"}},
+          %{"threadId" => "thread-failed-turn", "turn" => %{"id" => "stale-turn"}},
+          %{"turnId" => "turn-failed-turn"}
+        ] do
+      assert {:error, :managed_failed_turn_identity_mismatch} =
+               GenServer.call(pid, {:managed_failed_turn, issue_id, put_in(update, [:payload, "params"], params)})
+
+      assert File.read!(journal_path) == bytes
+    end
 
     assert {:error, :managed_failed_turn_identity_mismatch} =
              GenServer.call(pid, {:managed_failed_turn, issue_id, %{update | execution_session_id: "stale"}})

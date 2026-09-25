@@ -3658,7 +3658,8 @@ defmodule SymphonyElixir.Orchestrator do
          true <-
            session_id == entry.execution_session_id and delegation_id == entry.responsibility_delegation_id and
              fence_token == "#{issue_id}:#{generation}",
-         true <- is_map(Map.get(update, :payload)),
+         %{"method" => "turn/failed", "params" => %{"threadId" => ^thread_id, "turn" => %{"id" => ^turn_id}}} <-
+           Map.get(update, :payload),
          {:ok, encoded} <- Jason.encode(Map.get(update, :payload)),
          evidence <- %{
            thread_id: thread_id,
