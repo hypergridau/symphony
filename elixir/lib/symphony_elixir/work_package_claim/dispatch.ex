@@ -90,6 +90,26 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   def begin_recovery(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
 
+  @doc "Fences only a synchronously rejected pre-witness spawn attempt."
+  @spec begin_pre_witness_recovery(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def begin_pre_witness_recovery(journal, key, input) when is_map(input) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "spawn_started", authority_digest: digest} = dispatch} = reservation
+      when is_binary(digest) ->
+        if digest == authority_digest(input) do
+          Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "recovery_pending"}})
+        else
+          {:error, :claim_authority_changed}
+        end
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def begin_pre_witness_recovery(_journal, _key, _input),
+    do: {:error, :invalid_claim_dispatch_transition}
+
   @spec begin_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_spawn(journal, key, input) do
     case get_in(journal, [:reservations, key, :dispatch]) do

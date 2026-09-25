@@ -78,6 +78,87 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert :missing = Journal.load(path)
   end
 
+  test "authority expiry after spawn_started is fenced before a spawn witness" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    parent = self()
+
+    input = %{
+      input
+      | host_witness_fun: fn %{"operation" => operation} ->
+          send(parent, {:spawn_fence_witness, operation})
+          {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue"),
+        do: {:ok, response(%{"data" => reservation_payload()})},
+        else: {:ok, response(%{"data" => claim_result_payload()})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assert_receive {:spawn_fence_witness, "claim_intent"}
+    assert_receive {:spawn_fence_witness, "claim_bound"}
+    expiry = input.responsibility_graph.delegations["delegation-349"].expires_at_ms
+    before_expiry = DateTime.from_unix!(expiry - 1, :millisecond)
+    after_expiry = DateTime.from_unix!(expiry + 1, :millisecond)
+    times = :atomics.new(1, [])
+
+    now_fun = fn ->
+      case :atomics.add_get(times, 1, 1) do
+        1 -> before_expiry
+        _ -> after_expiry
+      end
+    end
+
+    assert {:error, {:pre_spawn_recovery_pending, :runtime_lease_mismatch}} =
+             WorkPackageClaim.begin_spawn(input, now_fun: now_fun)
+
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    refute_receive {:spawn_fence_witness, "spawn_intent"}
+    assert {:error, :invalid_claim_dispatch_transition} = WorkPackageClaim.begin_paused_recovery(input)
+  end
+
+  test "spawn witness failure keeps the attempted reservation held" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue"),
+        do: {:ok, response(%{"data" => reservation_payload()})},
+        else: {:ok, response(%{"data" => claim_result_payload()})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    input = %{
+      input
+      | host_witness_fun: fn %{"operation" => "spawn_intent"} ->
+          {:error, :root_witness_unavailable}
+        end
+    }
+
+    assert {:error, :root_witness_unavailable} = WorkPackageClaim.begin_spawn(input)
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "spawn_started"
+    assert {:error, :invalid_claim_dispatch_transition} = WorkPackageClaim.begin_paused_recovery(input)
+  end
+
   test "claim response remains indeterminate when root cannot record its binding" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -167,7 +248,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Spawn order", state: "Todo"}
     pause_pattern = {SymphonyElixir.GlobalPause, :paused?, 0}
-    spawn_pattern = {WorkPackageClaim, :begin_spawn, 1}
+    spawn_pattern = {WorkPackageClaim, :begin_spawn, 2}
     parent = self()
     tracer = spawn(fn -> forward_trace(parent) end)
 
@@ -749,6 +830,24 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
   end
 
+  test "expiry after spawn_started releases the local lease only after pre-witness fencing" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, spawn_expiry_boundary: true)
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].release_reason == :spawn_failed
+    assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
   test "claims a reservation and replays the same journaled tuple after restart" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1224,28 +1323,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   defp post_claim_revalidation_failure(path, issue, refreshed_issue, opts \\ []) do
     %{input: input, token: token, lease: lease} = authority_fixture(path)
     input = with_assignment_manifest(input, issue)
-
-    input =
-      case Keyword.get(opts, :manifest_expiry_ms) do
-        expiry when is_integer(expiry) ->
-          [entry] = input.managed_delegations.entries
-
-          manifest = %{
-            input.managed_delegations
-            | entries: [
-                %{
-                  entry
-                  | accountable: %{entry.accountable | expires_at_ms: expiry},
-                    responsible: %{entry.responsible | expires_at_ms: expiry}
-                }
-              ]
-          }
-
-          %{input | managed_delegations: manifest}
-
-        _ ->
-          input
-      end
+    input = expire_assignment_manifest(input, Keyword.get(opts, :manifest_expiry_ms))
 
     runtime =
       input
@@ -1274,6 +1352,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     state = expire_runtime_delegations(state, graph_path, Keyword.get(opts, :graph_expiry_ms))
 
+    state = maybe_add_spawn_expiry_clock(state, input, opts)
+
     dispatch = %{
       attempt: nil,
       recipient: self(),
@@ -1285,22 +1365,69 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     }
 
     after_preflight =
-      if Keyword.get(opts, :spawn_directly, false) do
-        Orchestrator.spawn_fenced_issue_for_test(
-          state,
-          issue,
-          token,
-          lease.session_id,
-          "delegation-349",
-          lease
-        )
-      else
-        Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
-          {:ok, [refreshed_issue]}
-        end)
+      cond do
+        Keyword.get(opts, :spawn_expiry_boundary, false) ->
+          Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
+            {:ok, [refreshed_issue]}
+          end)
+
+        Keyword.get(opts, :spawn_directly, false) ->
+          Orchestrator.spawn_fenced_issue_for_test(
+            state,
+            issue,
+            token,
+            lease.session_id,
+            "delegation-349",
+            lease
+          )
+
+        true ->
+          Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
+            {:ok, [refreshed_issue]}
+          end)
       end
 
     {after_preflight, runtime}
+  end
+
+  defp expire_assignment_manifest(input, expiry) when is_integer(expiry) do
+    [entry] = input.managed_delegations.entries
+
+    manifest = %{
+      input.managed_delegations
+      | entries: [
+          %{
+            entry
+            | accountable: %{entry.accountable | expires_at_ms: expiry},
+              responsible: %{entry.responsible | expires_at_ms: expiry}
+          }
+        ]
+    }
+
+    %{input | managed_delegations: manifest}
+  end
+
+  defp expire_assignment_manifest(input, _expiry), do: input
+
+  defp maybe_add_spawn_expiry_clock(state, input, opts) do
+    if Keyword.get(opts, :spawn_expiry_boundary, false) do
+      expiry = input.responsibility_graph.delegations["delegation-349"].expires_at_ms
+      now_fun = spawn_expiry_clock(expiry)
+      %{state | work_package_runtime: Map.put(state.work_package_runtime, :now_fun, now_fun)}
+    else
+      state
+    end
+  end
+
+  defp spawn_expiry_clock(expiry) do
+    times = :atomics.new(1, [])
+
+    fn ->
+      case :atomics.add_get(times, 1, 1) do
+        1 -> DateTime.from_unix!(expiry - 1, :millisecond)
+        _ -> DateTime.from_unix!(expiry + 1, :millisecond)
+      end
+    end
   end
 
   defp expire_runtime_delegations(state, _graph_path, nil), do: state

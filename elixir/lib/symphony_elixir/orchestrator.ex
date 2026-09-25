@@ -1905,6 +1905,22 @@ defmodule SymphonyElixir.Orchestrator do
     recover_post_claim_spawn_failure(state, issue, dispatch, {:pre_spawn_claim_fence_failed, reason})
   end
 
+  defp handle_claimed_spawn_result(state, issue, dispatch, {:error, {:claim_recovery_pending, reason}}) do
+    state =
+      release_execution_lease(
+        state,
+        %{
+          execution_token: dispatch.token,
+          execution_session_id: dispatch.session_id,
+          responsibility_delegation_id: dispatch.delegation_id,
+          responsibility_runtime_lease: dispatch.runtime_lease
+        },
+        :spawn_failed
+      )
+
+    block_claim_recovery(state, issue, {:pre_spawn_authority_expired, reason})
+  end
+
   defp handle_claimed_spawn_result(state, issue, dispatch, {:error, reason}) do
     Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
 
@@ -2117,9 +2133,17 @@ defmodule SymphonyElixir.Orchestrator do
         {:error, reason} -> {:error, {:global_pause_recovery_fence_failed, reason}}
       end
     else
-      case WorkPackageClaim.begin_spawn(claim_input(state, issue)) do
-        :ok -> Task.Supervisor.start_child(state.task_supervisor, worker)
-        {:error, reason} -> {:error, {:claim_not_spawned, reason}}
+      begin_spawn_opts = maybe_claim_option([], state.work_package_runtime, :now_fun)
+
+      case WorkPackageClaim.begin_spawn(claim_input(state, issue), begin_spawn_opts) do
+        :ok ->
+          Task.Supervisor.start_child(state.task_supervisor, worker)
+
+        {:error, {:pre_spawn_recovery_pending, reason}} ->
+          {:error, {:claim_recovery_pending, reason}}
+
+        {:error, reason} ->
+          {:error, {:claim_not_spawned, reason}}
       end
     end
   end

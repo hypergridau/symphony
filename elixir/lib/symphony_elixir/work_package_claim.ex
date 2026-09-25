@@ -73,13 +73,59 @@ defmodule SymphonyElixir.WorkPackageClaim do
 
   @doc "Durably closes the replay window before attempting to start a worker."
   @spec begin_spawn(input()) :: :ok | {:error, term()}
-  def begin_spawn(input) do
-    with {:ok, authority} <- authority(input, System.system_time(:millisecond)),
+  @spec begin_spawn(input(), keyword()) :: :ok | {:error, term()}
+  def begin_spawn(input, opts \\ []) when is_map(input) and is_list(opts) do
+    now_fun = Keyword.get(opts, :now_fun, &DateTime.utc_now/0)
+
+    with %DateTime{} = now <- now_fun.(),
+         {:ok, authority} <- authority(input, DateTime.to_unix(now, :millisecond)),
          {:ok, journal} <- Journal.load(input.journal_path),
          {:ok, journal} <- Dispatch.begin_spawn(journal, journal_key(authority), input),
          :ok <- Journal.save(input.journal_path, journal),
-         {:ok, _authority} <- authority(input, System.system_time(:millisecond)),
-         :ok <- HostWitness.record(input, "spawn_intent", journal.reservations[journal_key(authority)]) do
+         :ok <-
+           revalidate_spawn_authority(
+             input,
+             now_fun,
+             journal.reservations[journal_key(authority)]
+           ) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      error -> error
+    end
+  end
+
+  defp revalidate_spawn_authority(input, now_fun, reservation) do
+    case now_fun.() do
+      %DateTime{} = now ->
+        case authority(input, DateTime.to_unix(now, :millisecond)) do
+          {:ok, _authority} ->
+            HostWitness.record(input, "spawn_intent", reservation)
+
+          {:error, reason} ->
+            fence_failed_spawn_authority(input, reason)
+        end
+
+      _ ->
+        {:error, :invalid_spawn_revalidation_time}
+    end
+  end
+
+  defp fence_failed_spawn_authority(input, reason) do
+    case fence_pre_witness_spawn_failure(input) do
+      :ok -> {:error, {:pre_spawn_recovery_pending, reason}}
+      {:error, fence_reason} -> {:error, {:spawn_authority_revalidation_failed, reason, fence_reason}}
+    end
+  end
+
+  defp fence_pre_witness_spawn_failure(input) do
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         {:ok, journal} <- Dispatch.begin_pre_witness_recovery(journal, key, input),
+         :ok <- Journal.save(input.journal_path, journal) do
       :ok
     else
       :missing -> {:error, :claim_journal_missing}
