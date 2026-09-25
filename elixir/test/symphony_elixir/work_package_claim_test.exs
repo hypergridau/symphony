@@ -1302,7 +1302,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
             base_ref: "refs/remotes/origin/main",
             platform: "linux-x86_64",
             environment_classification: "repository",
-            environment_constraints: ["repository"]
+            environment_constraints: ["repository"],
+            placement: :internal_beta,
+            target_environment: :rke2
           }
         }
       ]

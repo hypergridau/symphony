@@ -49,7 +49,9 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
         context_secret_refs: [],
         platform: "linux-x86_64",
         environment_classification: "repository",
-        environment_constraints: ["repository"]
+        environment_constraints: ["repository"],
+        placement: :internal_beta,
+        target_environment: :rke2
       })
 
     trace = Path.join(root, "codex.jsonl")

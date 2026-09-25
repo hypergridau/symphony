@@ -6,10 +6,10 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   not infer missing authority from host state or worker prompts.
   """
 
-  @schema_version 1
+  @schema_version 2
   @supported_platforms ["linux-x86_64"]
   @type t :: %{
-          schema_version: 1,
+          schema_version: 2,
           objective: %{id: String.t(), identity: String.t(), content: String.t()},
           repository_ref: String.t(),
           base_ref: String.t(),
@@ -19,7 +19,13 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
           intent_ancestry: [String.t()],
           acceptance: %{deliverable: String.t(), evidence: String.t()},
           context_secret_refs: [String.t()],
-          environment: %{platform: String.t(), classification: String.t(), constraints: [String.t()]},
+          environment: %{
+            platform: String.t(),
+            classification: String.t(),
+            constraints: [String.t()],
+            placement: :internal_beta | :hosted_production,
+            target_environment: :rke2 | :lke
+          },
           sha256: String.t()
         }
 
@@ -42,7 +48,9 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
          environment = %{
            platform: attrs.platform,
            classification: attrs.environment_classification,
-           constraints: attrs.environment_constraints |> Enum.uniq() |> Enum.sort()
+           constraints: attrs.environment_constraints |> Enum.uniq() |> Enum.sort(),
+           placement: attrs.placement,
+           target_environment: attrs.target_environment
          },
          bundle = Map.put(bundle, :environment, environment),
          bundle = Map.put(bundle, :schema_version, @schema_version),
@@ -69,12 +77,25 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
 
   def validate_bundle(_bundle), do: {:error, :invalid_assignment_bundle}
 
-  defp bundle_attributes(%{environment: %{platform: platform, classification: classification, constraints: constraints} = environment} = bundle)
-       when map_size(environment) == 3 do
+  defp bundle_attributes(%{environment: environment} = bundle) when map_size(environment) == 5 do
+    %{
+      platform: platform,
+      classification: classification,
+      constraints: constraints,
+      placement: placement,
+      target_environment: target_environment
+    } = environment
+
     attrs =
       bundle
       |> Map.drop([:schema_version, :sha256, :environment])
-      |> Map.merge(%{platform: platform, environment_classification: classification, environment_constraints: constraints})
+      |> Map.merge(%{
+        platform: platform,
+        environment_classification: classification,
+        environment_constraints: constraints,
+        placement: placement,
+        target_environment: target_environment
+      })
 
     {:ok, attrs}
   end
@@ -93,6 +114,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
            ]),
          :ok <- valid_platform(attrs.platform),
          :ok <- valid_environment_classification(attrs.environment_classification),
+         :ok <- valid_placement(attrs.placement, attrs.target_environment),
          :ok <- valid_objective(Map.get(attrs, :objective)),
          :ok <- valid_lease(Map.get(attrs, :lease), Map.get(attrs, :repository_ref)),
          :ok <- valid_nonempty_text_list(Map.get(attrs, :intent_ancestry)),
@@ -105,6 +127,10 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
 
   defp valid_environment_classification("repository"), do: :ok
   defp valid_environment_classification(_classification), do: {:error, :assignment_bundle_environment_invalid}
+
+  defp valid_placement(:internal_beta, :rke2), do: :ok
+  defp valid_placement(:hosted_production, :lke), do: :ok
+  defp valid_placement(_placement, _target_environment), do: {:error, :assignment_bundle_environment_invalid}
 
   defp valid_platform(platform) when platform in @supported_platforms, do: :ok
   defp valid_platform(_platform), do: {:error, :assignment_bundle_environment_invalid}

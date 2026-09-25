@@ -117,7 +117,9 @@ defmodule SymphonyElixir.ManagedResponsibilityFixture do
       Map.put(entry, "assignment_context", %{
         "objective" => %{"id" => scope["objective_id"], "content" => issue.title},
         "base_ref" => "refs/remotes/origin/main",
-        "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]}
+        "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]},
+        "placement" => "internal_beta",
+        "target_environment" => "rke2"
       })
     else
       entry

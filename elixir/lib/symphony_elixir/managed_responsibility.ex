@@ -184,7 +184,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
   defp decode_assignment_context(raw, 2) do
     context = raw["assignment_context"]
 
-    with true <- is_map(context) and exact_keys?(context, ~w(objective base_ref environment)),
+    with true <- is_map(context) and exact_keys?(context, ~w(objective base_ref environment placement target_environment)),
          objective when is_map(objective) <- context["objective"],
          true <- exact_keys?(objective, ~w(id content)),
          true <- valid_assignment_text?(objective["id"]) and valid_assignment_text?(objective["content"]),
@@ -193,6 +193,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
          true <- exact_keys?(environment, ~w(platform classification constraints)),
          true <- environment["platform"] in @supported_platforms,
          true <- environment["classification"] == "repository",
+         {:ok, placement, target_environment} <- decode_placement(context["placement"], context["target_environment"]),
          constraints when is_list(constraints) and constraints != [] <- environment["constraints"],
          true <- Enum.all?(constraints, &valid_assignment_text?/1),
          true <- length(constraints) <= 32 do
@@ -203,7 +204,9 @@ defmodule SymphonyElixir.ManagedResponsibility do
          base_ref: context["base_ref"],
          platform: environment["platform"],
          environment_classification: environment["classification"],
-         environment_constraints: Enum.uniq(constraints) |> Enum.sort()
+         environment_constraints: Enum.uniq(constraints) |> Enum.sort(),
+         placement: placement,
+         target_environment: target_environment
        }}
     else
       _ -> {:error, :invalid_managed_assignment_context}
@@ -228,6 +231,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
     if Map.get(context, :objective_id) == scope_objective_id and
          Map.get(context, :objective_content) == expected_content and Map.get(context, :base_ref) == @base_ref and
          Map.get(context, :environment_classification) == "repository" and
+         valid_placement?(Map.get(context, :placement), Map.get(context, :target_environment)) and
          scope_repository == repository do
       :ok
     else
@@ -256,6 +260,14 @@ defmodule SymphonyElixir.ManagedResponsibility do
   end
 
   defp valid_assignment_text?(_value), do: false
+
+  defp decode_placement("internal_beta", "rke2"), do: {:ok, :internal_beta, :rke2}
+  defp decode_placement("hosted_production", "lke"), do: {:ok, :hosted_production, :lke}
+  defp decode_placement(_placement, _target_environment), do: {:error, :invalid_managed_assignment_context}
+
+  defp valid_placement?(:internal_beta, :rke2), do: true
+  defp valid_placement?(:hosted_production, :lke), do: true
+  defp valid_placement?(_placement, _target_environment), do: false
 
   defp valid_revocation_ref?(ref) when is_binary(ref), do: Regex.match?(~r/\Asha256:[0-9a-f]{64}\z/, ref)
   defp valid_revocation_ref?(_ref), do: false

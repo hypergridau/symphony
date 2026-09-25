@@ -752,6 +752,13 @@ manifest bytes). The manifest signing script requires Python 3 to select that ve
 
 The current Dahlia/Grid grant issuer and its rollout still need to emit and sign v2 nonempty entries.
 Keep managed admission paused until the issuer change is reviewed and the signed manifest is installed.
+
+Nonempty v2 assignment contexts must include signed placement fields matching HGS-728 policy:
+`internal_beta` targets `rke2`, and `hosted_production` targets `lke`. Older nonempty v2 grants without
+those fields fail closed and must be reissued by the cross-repository issuer. The source-only managed
+executor also defines an assignment-bound JIT credential lease port with acquire, renew and revoke
+callbacks; it does not implement a broker or issue credentials. Admission stays paused until the
+issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
 
 Pause the existing global gate before replacing the manifest or its digest, then restart the

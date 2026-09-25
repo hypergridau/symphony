@@ -51,7 +51,9 @@ defmodule SymphonyElixir.ManagedResponsibilityTest do
     signed_context = %{
       "objective" => %{"id" => "objective-test", "content" => issue.title <> "\n\n" <> issue.description},
       "base_ref" => "refs/remotes/origin/main",
-      "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]}
+      "environment" => %{"platform" => "linux-x86_64", "classification" => "repository", "constraints" => ["repository"]},
+      "placement" => "internal_beta",
+      "target_environment" => "rke2"
     }
 
     payload =
@@ -77,10 +79,28 @@ defmodule SymphonyElixir.ManagedResponsibilityTest do
     for candidate <- [
           put_in(payload, ["entries", Access.at(0), "assignment_context", "base_ref"], "refs/heads/other"),
           put_in(payload, ["entries", Access.at(0), "assignment_context", "environment", "platform"], "unknown-platform"),
-          put_in(payload, ["entries", Access.at(0), "assignment_context", "environment", "constraints"], [])
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "environment", "constraints"], []),
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "placement"], "hosted_production"),
+          put_in(payload, ["entries", Access.at(0), "assignment_context", "target_environment"], "lke")
         ] do
       assert {:error, :invalid_managed_assignment_context} = ManagedResponsibility.decode(candidate, Fixture.context(), now)
     end
+  end
+
+  test "v2 signed placement binds internal beta to RKE2 and hosted production to LKE", %{now: now} do
+    payload = Fixture.payload(now)
+
+    hosted =
+      payload
+      |> put_in(["entries", Access.at(0), "assignment_context", "placement"], "hosted_production")
+      |> put_in(["entries", Access.at(0), "assignment_context", "target_environment"], "lke")
+
+    assert {:ok, manifest} = ManagedResponsibility.decode(hosted, Fixture.context(), now)
+    assert hd(manifest.entries).assignment_context.placement == :hosted_production
+    assert hd(manifest.entries).assignment_context.target_environment == :lke
+
+    legacy_v2 = update_in(payload["entries"], fn [entry | rest] -> [Map.update!(entry, "assignment_context", &Map.drop(&1, ["placement", "target_environment"])) | rest] end)
+    assert {:error, :invalid_managed_assignment_context} = ManagedResponsibility.decode(legacy_v2, Fixture.context(), now)
   end
 
   test "the selected responsible actor must be the configured managed runner", %{now: now} do
