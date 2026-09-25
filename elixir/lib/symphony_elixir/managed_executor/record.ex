@@ -51,8 +51,21 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   @result_phases [:result_recorded, :result_pending, :result_reported, :cleanup_pending, :terminal]
   @reported_phases [:result_reported, :cleanup_pending, :terminal]
   @outcomes [:completed, :failed, :blocked]
-  @lease_phases [:credential_lease_ready, :execution_started, :result_recorded, :result_pending, :result_reported, :cleanup_pending]
-  @abort_reasons [:checkout_preparation_failed, :checkout_intent_mismatch, :credential_lease_denied, :credential_lease_expired]
+  @lease_phases [
+    :credential_lease_ready,
+    :execution_started,
+    :result_recorded,
+    :result_pending,
+    :result_reported,
+    :cleanup_pending
+  ]
+  @abort_reasons [
+    :checkout_preparation_failed,
+    :checkout_intent_mismatch,
+    :credential_lease_denied,
+    :credential_lease_expired,
+    :credential_lease_invalid
+  ]
 
   @spec load_or_create(module(), String.t(), map(), term()) :: {:ok, map()} | {:error, term()}
   def load_or_create(journal, key, assignment, context) do
@@ -92,7 +105,8 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
         allocation,
         assignment
       ) do
-    exact_keys = MapSet.new(Map.keys(lease)) == MapSet.new([:lease_ref, :assignment_digest, :allocation_id, :expires_at_ms])
+    expected_keys = MapSet.new([:lease_ref, :assignment_digest, :allocation_id, :expires_at_ms])
+    exact_keys = MapSet.new(Map.keys(lease)) == expected_keys
 
     if exact_keys and nonempty_text?(lease_ref) and digest == assignment.sha256 and
          allocation_id == allocation.id and is_integer(expiry) and expiry >= 0 do
@@ -189,6 +203,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   def pre_execution_summary(:checkout_intent_mismatch), do: "Checkout intent or commit did not match the assignment."
   def pre_execution_summary(:credential_lease_denied), do: "The assignment credential lease was denied before execution."
   def pre_execution_summary(:credential_lease_expired), do: "The assignment credential lease expired before execution."
+  def pre_execution_summary(:credential_lease_invalid), do: "The assignment credential lease response was invalid before execution."
   def pre_execution_summary(_reason), do: "Assignment was blocked before execution."
 
   @spec nonempty_text?(term()) :: boolean()
@@ -198,7 +213,14 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     do: is_binary(head) and Regex.match?(~r/\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z/, head)
 
   defp create_or_load(journal, key, assignment, context) do
-    initial = %{schema_version: 2, key: key, assignment_digest: assignment.sha256, phase: :planned, version: 0, credential_lease: nil}
+    initial = %{
+      schema_version: 2,
+      key: key,
+      assignment_digest: assignment.sha256,
+      phase: :planned,
+      version: 0,
+      credential_lease: nil
+    }
 
     case journal.compare_and_swap(key, 0, initial, context) do
       :ok -> {:ok, initial}
@@ -284,7 +306,15 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   end
 
   defp valid_credential_lease_phase?(%{phase: phase, credential_lease: lease}, _assignment)
-       when phase in [:planned, :allocation_pending, :allocated, :checkout_pending, :checkout_ready, :credential_lease_pending, :terminal] do
+       when phase in [
+              :planned,
+              :allocation_pending,
+              :allocated,
+              :checkout_pending,
+              :checkout_ready,
+              :credential_lease_pending,
+              :terminal
+            ] do
     is_nil(lease)
   end
 

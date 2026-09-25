@@ -5,6 +5,15 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   Implementations must reconcile by the supplied idempotency key. They receive
   the signed assignment contract and non-secret references only; host credentials
   belong to the execution adapter and must never be returned here.
+
+  Credential lease acquisition must reconcile by key and return only an exact
+  assignment/allocation binding. If a result cannot be returned in that shape,
+  the adapter must leave no active lease behind; replay of an uncertain result
+  must resolve to the same lease or a denial. Renewal must reconcile by key and
+  preserve the lease reference. It must not create an alternate active lease if
+  its result cannot be returned. Revocation is idempotent. Execution adapters
+  must recheck lease expiry at the side-effect boundary, since journal persistence
+  can take long enough for a locally checked expiry to pass.
   """
 
   @type assignment :: map()
@@ -70,7 +79,14 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
               :ok | {:error, term()}
   @callback execute(allocation(), assignment(), checkout_receipt(), credential_lease(), String.t(), term()) ::
               {:ok, execution_result()} | {:error, term()}
-  @callback reconcile_execution(allocation(), assignment(), checkout_receipt(), credential_lease(), String.t(), term()) ::
+  @callback reconcile_execution(
+              allocation(),
+              assignment(),
+              checkout_receipt(),
+              credential_lease(),
+              String.t(),
+              term()
+            ) ::
               {:ok, execution_result() | nil} | {:error, term()}
   @callback publish_or_reconcile_result(allocation(), assignment(), execution_result(), String.t(), term()) ::
               {:ok, String.t()} | {:error, term()}

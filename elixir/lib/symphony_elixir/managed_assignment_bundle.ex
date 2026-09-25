@@ -77,10 +77,15 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
 
   def validate_bundle(_bundle), do: {:error, :invalid_assignment_bundle}
 
-  defp bundle_attributes(
-         %{environment: %{platform: platform, classification: classification, constraints: constraints, placement: placement, target_environment: target_environment} = environment} = bundle
-       )
-       when map_size(environment) == 5 do
+  defp bundle_attributes(%{environment: environment} = bundle) when map_size(environment) == 5 do
+    %{
+      platform: platform,
+      classification: classification,
+      constraints: constraints,
+      placement: placement,
+      target_environment: target_environment
+    } = environment
+
     attrs =
       bundle
       |> Map.drop([:schema_version, :sha256, :environment])

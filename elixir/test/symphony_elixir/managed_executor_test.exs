@@ -81,7 +81,39 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assignment = assignment()
 
     assert {:held, :invalid_credential_lease, %{phase: :credential_lease_pending}} = ManagedExecutor.run(assignment, opts)
-    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) in [:renew_credential_lease, :execute]))
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+    assert FakeAdapter.active_credential_refs(adapter) == []
+
+    assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, opts)
+    keys = for {:acquire_credential_lease, _allocation, _digest, key} <- FakeAdapter.events(adapter), do: key
+    assert keys == ["#{assignment.sha256}:credential-acquire", "#{assignment.sha256}:credential-acquire"]
+    assert Enum.count(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute)) == 1
+  end
+
+  test "a changed renewal reference revokes the known lease and blocks execution" do
+    {adapter, _journal, opts} = ports(credential_renew_wrong_ref: true)
+    assignment = assignment()
+
+    assert {:blocked, :credential_lease_invalid, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    refute Enum.any?(events, &(elem(&1, 0) == :execute))
+    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 2
+    assert FakeAdapter.active_credential_refs(adapter) == []
+  end
+
+  test "lease expiry during the execution-started journal write prevents execution" do
+    {adapter, _journal, opts} =
+      ports(credential_short_renewal: true, execution_started_delay_ms: 150)
+
+    assignment = assignment()
+
+    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending}} =
+             ManagedExecutor.run(assignment, opts)
+
+    events = FakeAdapter.events(adapter)
+    assert Enum.any?(events, &(elem(&1, 0) == :revoke_credential_lease))
+    refute Enum.any?(events, &(elem(&1, 0) == :execute))
+    assert FakeAdapter.active_credential_refs(adapter) == []
   end
 
   test "renewal denial revokes the lease and blocks before execution" do
@@ -112,12 +144,15 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert {:held, :credential_lease_revocation_failed, %{phase: :cleanup_pending}} =
              ManagedExecutor.run(assignment, revoke_opts)
 
+    assert FakeAdapter.active_credential_refs(revoke_adapter) == ["credential-lease-fixture-1"]
+
     assert {:ok, %{phase: :terminal}} = ManagedExecutor.run(assignment, revoke_opts)
     revoke_events = FakeAdapter.events(revoke_adapter)
     revoke_keys = for {:revoke_credential_lease, _allocation, _digest, _ref, key} <- revoke_events, do: key
     assert revoke_keys == ["#{assignment.sha256}:credential-revoke", "#{assignment.sha256}:credential-revoke"]
     assert Enum.count(revoke_events, &(elem(&1, 0) == :execute)) == 1
     assert Enum.count(revoke_events, &(elem(&1, 0) == :ensure_terminal_cleanup)) == 1
+    assert FakeAdapter.active_credential_refs(revoke_adapter) == []
   end
 
   test "expired leases are revoked and cannot reach execution" do
@@ -464,7 +499,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
   defp ports(adapter_opts \\ []) do
     {:ok, adapter} = FakeAdapter.start_link(adapter_opts)
-    {:ok, journal} = FakeJournal.start_link()
+    {:ok, journal} = FakeJournal.start_link(adapter_opts)
     {adapter, journal, [adapter: FakeAdapter, adapter_context: adapter, journal: FakeJournal, journal_context: journal]}
   end
 
