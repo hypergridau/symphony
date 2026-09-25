@@ -744,6 +744,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @doc false
+  @spec managed_assignment_bundle_for_test(term(), Issue.t(), map(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def managed_assignment_bundle_for_test(%State{} = state, %Issue{} = issue, token, session_id, delegation_id) do
+    managed_assignment_bundle(state, issue, token, session_id, delegation_id)
+  end
+
+  @doc false
   @spec start_claimed_worker_for_test(term(), Issue.t(), (-> term())) ::
           {:ok, pid()} | {:error, term()}
   def start_claimed_worker_for_test(%State{} = state, %Issue{} = issue, worker)
@@ -2163,7 +2170,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp delegation_ancestry(graph, delegation), do: delegation_ancestry(graph, delegation, [])
 
   defp delegation_ancestry(_graph, %{id: id, parent_delegation_id: nil}, acc) when is_binary(id),
-    do: Enum.reverse([id | acc])
+    do: [id | acc]
 
   defp delegation_ancestry(graph, %{id: id, parent_delegation_id: parent_id}, acc)
        when is_binary(id) and is_binary(parent_id) do

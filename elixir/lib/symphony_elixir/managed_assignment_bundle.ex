@@ -54,15 +54,8 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   @spec validate_bundle(map()) :: :ok | {:error, term()}
   def validate_bundle(%{schema_version: @schema_version, sha256: digest} = bundle)
       when is_binary(digest) do
-    attrs =
-      bundle
-      |> Map.drop([:schema_version, :sha256])
-      |> Map.merge(%{
-        platform: get_in(bundle, [:environment, :platform]),
-        environment_constraints: get_in(bundle, [:environment, :constraints])
-      })
-
-    with :ok <- validate(attrs),
+    with {:ok, attrs} <- bundle_attributes(bundle),
+         :ok <- validate(attrs),
          {:ok, expected} <- build(attrs),
          true <- expected == bundle do
       :ok
@@ -73,6 +66,18 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   end
 
   def validate_bundle(_bundle), do: {:error, :invalid_assignment_bundle}
+
+  defp bundle_attributes(%{environment: %{platform: platform, constraints: constraints} = environment} = bundle)
+       when map_size(environment) == 2 do
+    attrs =
+      bundle
+      |> Map.drop([:schema_version, :sha256, :environment])
+      |> Map.merge(%{platform: platform, environment_constraints: constraints})
+
+    {:ok, attrs}
+  end
+
+  defp bundle_attributes(_bundle), do: {:error, :assignment_bundle_environment_invalid}
 
   defp validate(attrs) do
     with :ok <- required_text(attrs, [:repository_ref, :base_ref, :branch, :seat, :platform]),
@@ -172,7 +177,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
 
   defp valid_text?(value) when is_binary(value) do
     byte_size(value) in 1..8_192 and String.valid?(value) and String.trim(value) != "" and
-      Enum.all?(:binary.bin_to_list(value), &(&1 > 31 and &1 != 127))
+      Enum.all?(:binary.bin_to_list(value), &(&1 in [9, 10, 13] or (&1 > 31 and &1 != 127)))
   end
 
   defp valid_text?(_value), do: false

@@ -72,6 +72,26 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
              ManagedAssignmentBundle.build(%{attrs | repository_ref: "hypergridau/other"})
   end
 
+  test "accepts multiline assignment text while rejecting malformed environment projections" do
+    attrs =
+      valid_attrs()
+      |> put_in([:objective, :content], "Ship the managed runner.\nPreserve the execution fence.\tKeep evidence readable.")
+      |> put_in([:acceptance, :deliverable], "Deliver the assignment bundle.\nInclude objective context.")
+      |> put_in([:acceptance, :evidence], "Focused tests pass.\r\nSpawn seam verifies the same bundle.")
+
+    assert {:ok, bundle} = ManagedAssignmentBundle.build(attrs)
+    assert :ok = ManagedAssignmentBundle.validate_bundle(bundle)
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.validate_bundle(%{bundle | environment: "linux-x86_64"})
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.validate_bundle(%{bundle | environment: %{platform: "linux-x86_64"}})
+
+    assert {:error, :assignment_bundle_environment_invalid} =
+             ManagedAssignmentBundle.validate_bundle(%{bundle | environment: Map.put(bundle.environment, :extra, "value")})
+  end
+
   defp valid_attrs do
     %{
       objective: %{id: "objective-1", identity: "objective-1", content: "Ship the managed runner"},

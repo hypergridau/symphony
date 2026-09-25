@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
   use SymphonyElixir.TestSupport
 
-  alias SymphonyElixir.{ExecutionFence, Orchestrator, ResponsibilityGraph}
+  alias SymphonyElixir.{AgentRunner, ExecutionFence, Orchestrator, ResponsibilityGraph}
 
   test "orchestrator callback persists, authorizes, and revokes a delegation" do
     {fence, token} = active_fence()
@@ -128,6 +128,61 @@ defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
 
     assert held.running == %{}
     assert Map.has_key?(held.blocked, issue.id)
+  end
+
+  test "orchestrator assignment construction produces the bundle accepted by AgentRunner" do
+    {:ok, graph, :activated} = ResponsibilityGraph.activate(ResponsibilityGraph.new(), 0)
+
+    {:ok, graph, _owner} =
+      ResponsibilityGraph.delegate(
+        graph,
+        delegation("owner", :accountable, scope: Map.put(scope(), :repository, "openai/symphony")),
+        1
+      )
+
+    {:ok, graph, _worker} =
+      ResponsibilityGraph.delegate(
+        graph,
+        delegation(
+          "worker",
+          :responsible,
+          parent_delegation_id: "owner",
+          scope: Map.put(scope(), :repository, "openai/symphony")
+        ),
+        2
+      )
+
+    issue = %Issue{id: "HGS-300", identifier: "HGS-300", title: "Managed assignment", state: "Todo", branch_name: "codex/hgs-300"}
+    state = %Orchestrator.State{execution_fence: ExecutionFence.new(), responsibility_graph: graph}
+
+    assert {:ok, admitted, token, session_id, "worker", lease} =
+             Orchestrator.admit_execution_for_test(state, issue, nil)
+
+    runtime = %{
+      assignment_context: %{
+        objective_identity: "objective-1",
+        objective_content: "Ship the managed runner.\nPreserve the execution fence.",
+        base_ref: "refs/remotes/origin/main",
+        platform: "linux-x86_64",
+        environment_constraints: ["repository"]
+      },
+      secret_environment_names: ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"]
+    }
+
+    managed = %{admitted | work_package_runtime: runtime}
+
+    assert {:ok, bundle} =
+             Orchestrator.managed_assignment_bundle_for_test(managed, issue, token, session_id, "worker")
+
+    assert bundle.lease == lease
+    assert bundle.intent_ancestry == ["owner", "worker"]
+
+    assert :ok =
+             AgentRunner.assignment_bundle_preflight_for_test(
+               assignment_bundle: bundle,
+               execution_checkout: %{branch: bundle.branch},
+               managed_model_route: true
+             )
   end
 
   defp delegation(id, role, overrides \\ []) do
