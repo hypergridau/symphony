@@ -20,6 +20,10 @@ defmodule SymphonyElixir.WorkPackageClaimRecoveryTest do
       runner_token: "test-token",
       attestation_key: "test-key",
       runner_id: "runner-test",
+      pool_key: "midgard",
+      host_witness_fun: fn _request ->
+        {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+      end,
       managed_project_profile_id: "profile-test",
       journal_path: Path.join(root, "claims.json")
     }

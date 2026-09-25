@@ -9,7 +9,7 @@ defmodule SymphonyElixir.WorkPackageClaim do
 
   alias SymphonyElixir.ExecutionFence
   alias SymphonyElixir.ResponsibilityGraph
-  alias SymphonyElixir.WorkPackageClaim.Dispatch
+  alias SymphonyElixir.WorkPackageClaim.{Dispatch, HostWitness}
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   @connect_timeout_ms 5_000
@@ -43,7 +43,8 @@ defmodule SymphonyElixir.WorkPackageClaim do
          {:ok, reservation, journal} <- ensure_reservation(authority, journal, request_fun),
          {:ok, attestation} <- attestation(authority, reservation, now),
          {:ok, journal} <- Dispatch.submit(journal, journal_key(authority), input, now),
-         :ok <- Journal.save(input.journal_path, journal) do
+         :ok <- Journal.save(input.journal_path, journal),
+         :ok <- HostWitness.record(input, "claim_intent", reservation) do
       submit_claim(input, authority, reservation, attestation, journal, request_fun)
     end
   end
@@ -52,6 +53,7 @@ defmodule SymphonyElixir.WorkPackageClaim do
     with {:ok, response} <- request_claim(authority, reservation, attestation, request_fun),
          {:ok, body} <- response_data(response),
          {:ok, result} <- validate_claim_result(body, authority, reservation),
+         :ok <- HostWitness.record(input, "claim_bound", reservation),
          {:ok, journal} <- Dispatch.confirm(journal, journal_key(authority)),
          :ok <- Journal.save(input.journal_path, journal) do
       {:ok, %{reservation: reservation, attestation: attestation, response: result}}
@@ -76,7 +78,8 @@ defmodule SymphonyElixir.WorkPackageClaim do
          {:ok, journal} <- Journal.load(input.journal_path),
          {:ok, journal} <- Dispatch.begin_spawn(journal, journal_key(authority), input),
          :ok <- Journal.save(input.journal_path, journal),
-         {:ok, _authority} <- authority(input, System.system_time(:millisecond)) do
+         {:ok, _authority} <- authority(input, System.system_time(:millisecond)),
+         :ok <- HostWitness.record(input, "spawn_intent", journal.reservations[journal_key(authority)]) do
       :ok
     else
       :missing -> {:error, :claim_journal_missing}

@@ -12,6 +12,81 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
   @canonical_json_fixture ~s({"contractVersion":"work-package-runtime-attestation.v1","runnerId":"runner-349","managedProjectProfileId":"profile-349","reservationId":"reservation-349","reservationNonce":"nonce-349","issueId":"issue-349","generation":1,"sessionId":"worker-349","processId":"process-349","responsibleDelegationId":"delegation-349","executionFenceToken":"issue-349:1","runtimeLeaseId":"worker-349","repositoryRef":"hypergridau/symphony","scopeKeys":["repo:hypergridau/symphony","work:349"],"attestedAt":"2026-09-06T10:00:00.000Z"})
 
+  test "root witness rejection prevents the provider claim request" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    parent = self()
+
+    input = %{
+      input
+      | host_witness_fun: fn request ->
+          send(parent, {:witness, request})
+          {:error, :root_witness_unavailable}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue") do
+        {:ok, response(%{"data" => reservation_payload()})}
+      else
+        send(parent, :provider_claim_requested)
+        {:ok, response(%{"data" => claim_result_payload()})}
+      end
+    end
+
+    assert {:error, :root_witness_unavailable} =
+             WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+
+    assert_receive {:witness, %{"operation" => "claim_intent", "claim" => claim}}
+    assert claim["reservationId"] == "reservation-349"
+    expected_nonce_hash = :crypto.hash(:sha256, "nonce-349") |> Base.encode16(case: :lower)
+    assert claim["nonceHash"] == expected_nonce_hash
+    refute_receive :provider_claim_requested
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "submitted"
+  end
+
+  test "claim response remains indeterminate when root cannot record its binding" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    parent = self()
+
+    input = %{
+      input
+      | host_witness_fun: fn %{"operation" => operation} ->
+          send(parent, {:witness_operation, operation})
+
+          if operation == "claim_bound" do
+            {:error, :root_witness_unavailable}
+          else
+            {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+          end
+        end
+    }
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue") do
+        {:ok, response(%{"data" => reservation_payload()})}
+      else
+        send(parent, :provider_claim_requested)
+        {:ok, response(%{"data" => claim_result_payload()})}
+      end
+    end
+
+    assert {:error, {:claim_indeterminate, :root_witness_unavailable}} =
+             WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+
+    assert_receive {:witness_operation, "claim_intent"}
+    assert_receive :provider_claim_requested
+    assert_receive {:witness_operation, "claim_bound"}
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "submitted"
+  end
+
   test "managed final pause read precedes the durable spawn marker" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -46,7 +121,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.workspace_id == "workspace-349"
     assert reservation.company_id == "company-349"
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
     task_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
 
     state = %Orchestrator.State{
@@ -160,7 +235,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     held_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
     on_exit(fn -> if Process.alive?(held_supervisor), do: :sys.resume(held_supervisor) end)
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
 
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "ManagedBarrier#{System.unique_integer([:positive])}")
@@ -301,7 +376,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     held_supervisor = start_supervised!({Task.Supervisor, max_children: 1})
     on_exit(fn -> if Process.alive?(held_supervisor), do: :sys.resume(held_supervisor) end)
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Successful barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "SuccessfulBarrier#{System.unique_integer([:positive])}")
     {:ok, orchestrator} = Orchestrator.start_link(name: name)
@@ -430,7 +505,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       File.rm_rf(pause_root)
     end)
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path])
+    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"
@@ -884,6 +959,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       runner_token: "runner-token",
       attestation_key: "attestation-key",
       runner_id: "runner-349",
+      pool_key: "midgard",
+      host_witness_fun: fn _request ->
+        {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+      end,
       managed_project_profile_id: @profile,
       issue_id: @issue_id,
       issue_identifier: "HGS-349",
