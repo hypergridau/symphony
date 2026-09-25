@@ -121,7 +121,11 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.workspace_id == "workspace-349"
     assert reservation.company_id == "company-349"
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+    runtime =
+      input
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+      |> Map.put(:assignment_context, assignment_context())
+
     task_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
 
     state = %Orchestrator.State{
@@ -235,7 +239,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     held_supervisor = start_supervised!({Task.Supervisor, max_children: 0})
     on_exit(fn -> if Process.alive?(held_supervisor), do: :sys.resume(held_supervisor) end)
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+    runtime =
+      input
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+      |> Map.put(:assignment_context, assignment_context())
 
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "ManagedBarrier#{System.unique_integer([:positive])}")
@@ -376,7 +383,12 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     held_supervisor = start_supervised!({Task.Supervisor, max_children: 1})
     on_exit(fn -> if Process.alive?(held_supervisor), do: :sys.resume(held_supervisor) end)
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+
+    runtime =
+      input
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+      |> Map.put(:assignment_context, assignment_context())
+
     issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Successful barrier", state: "Todo"}
     name = Module.concat(__MODULE__, "SuccessfulBarrier#{System.unique_integer([:positive])}")
     {:ok, orchestrator} = Orchestrator.start_link(name: name)
@@ -505,7 +517,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       File.rm_rf(pause_root)
     end)
 
-    runtime = Map.take(input, [:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+    runtime =
+      input
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun])
+      |> Map.put(:assignment_context, assignment_context())
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"
@@ -1039,6 +1054,16 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       repository_ref: @repository,
       scope_keys: ["work:349", "repo:#{@repository}"],
       attested_at: "2026-09-06T10:00:00.000Z"
+    }
+  end
+
+  defp assignment_context do
+    %{
+      objective_identity: "objective",
+      objective_content: "Execute the authorized repository work package",
+      base_ref: "refs/remotes/origin/main",
+      platform: "linux-x86_64",
+      environment_constraints: ["repository"]
     }
   end
 

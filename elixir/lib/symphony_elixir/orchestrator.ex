@@ -13,6 +13,7 @@ defmodule SymphonyElixir.Orchestrator do
     ExecutionFence,
     ExecutionSupervisor,
     GlobalPause,
+    ManagedAssignmentBundle,
     ResponsibilityGraph,
     ReviewHandoff,
     ReviewHandoffEvidence,
@@ -1646,6 +1647,44 @@ defmodule SymphonyElixir.Orchestrator do
          responsibility_delegation_id,
          runtime_lease
        ) do
+    case managed_assignment_bundle(state, issue, token, session_id, responsibility_delegation_id) do
+      {:ok, bundle} ->
+        spawn_fenced_issue_with_bundle(
+          state,
+          issue,
+          attempt,
+          recipient,
+          worker_host,
+          token,
+          session_id,
+          responsibility_delegation_id,
+          runtime_lease,
+          bundle
+        )
+
+      {:error, reason} ->
+        handle_claim_spawn_failure(state, issue, attempt, reason, %{
+          worker_host: worker_host,
+          execution_token: token,
+          execution_session_id: session_id,
+          responsibility_delegation_id: responsibility_delegation_id,
+          responsibility_runtime_lease: runtime_lease
+        })
+    end
+  end
+
+  defp spawn_fenced_issue_with_bundle(
+         %State{} = state,
+         issue,
+         attempt,
+         recipient,
+         worker_host,
+         token,
+         session_id,
+         responsibility_delegation_id,
+         runtime_lease,
+         assignment_bundle
+       ) do
     supervisor_identity = execution_supervisor_identity(state, issue, token, session_id, worker_host)
     runtime = if is_map(state.work_package_runtime), do: state.work_package_runtime, else: %{}
 
@@ -1702,6 +1741,7 @@ defmodule SymphonyElixir.Orchestrator do
       case start_claimed_worker(state, issue, fn ->
              AgentRunner.run(issue, recipient,
                attempt: attempt,
+               assignment_bundle: assignment_bundle,
                managed_model_route: is_map(get_in(state.work_package_runtime || %{}, [:managed_delegations])),
                managed_model_runtime: managed_worker_model_runtime(state.work_package_runtime),
                worker_host: worker_host,
@@ -1751,6 +1791,7 @@ defmodule SymphonyElixir.Orchestrator do
               execution_session_id: session_id,
               responsibility_delegation_id: responsibility_delegation_id,
               responsibility_runtime_lease: runtime_lease,
+              assignment_bundle: assignment_bundle,
               last_codex_message: nil,
               last_codex_timestamp: nil,
               last_codex_event: nil,
@@ -2073,6 +2114,66 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.take([:issue_id, :generation, :repository, :branch, :worktree])
     |> Map.put(:session_id, session_id)
   end
+
+  defp managed_assignment_bundle(%State{work_package_runtime: nil}, _issue, _token, _session_id, _delegation_id),
+    do: {:ok, nil}
+
+  defp managed_assignment_bundle(%State{work_package_runtime: runtime} = state, issue, token, session_id, delegation_id)
+       when is_map(runtime) do
+    context = Map.get(runtime, :assignment_context, %{})
+    delegation = get_in(state.responsibility_graph, [:delegations, delegation_id])
+    execution = get_in(state.execution_fence, [:executions, issue.id])
+
+    with true <- is_map(context) and is_map(delegation) and is_map(execution),
+         true <-
+           is_map(delegation.runtime_lease) and delegation.runtime_lease.issue_id == issue.id and
+             delegation.runtime_lease.generation == token.generation and
+             delegation.runtime_lease.session_id == session_id and
+             delegation.runtime_lease.repository == execution.repository,
+         ancestry when is_list(ancestry) <- delegation_ancestry(state.responsibility_graph, delegation),
+         {:ok, bundle} <-
+           ManagedAssignmentBundle.build(%{
+             objective: %{
+               id: get_in(delegation, [:scope, :objective_id]),
+               identity: Map.get(context, :objective_identity),
+               content: Map.get(context, :objective_content)
+             },
+             repository_ref: execution.repository,
+             base_ref: Map.get(context, :base_ref),
+             branch: execution.branch,
+             seat: delegation.actor_id,
+             lease: delegation.runtime_lease,
+             intent_ancestry: ancestry,
+             acceptance: %{deliverable: delegation.expected_deliverable, evidence: delegation.expected_evidence},
+             context_secret_refs: Map.get(runtime, :secret_environment_names, []),
+             platform: Map.get(context, :platform),
+             environment_constraints: Map.get(context, :environment_constraints)
+           }) do
+      {:ok, bundle}
+    else
+      false -> {:error, :assignment_bundle_authority_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :assignment_bundle_authority_missing}
+    end
+  end
+
+  defp managed_assignment_bundle(_state, _issue, _token, _session_id, _delegation_id),
+    do: {:error, :assignment_bundle_authority_missing}
+
+  defp delegation_ancestry(graph, delegation), do: delegation_ancestry(graph, delegation, [])
+
+  defp delegation_ancestry(_graph, %{id: id, parent_delegation_id: nil}, acc) when is_binary(id),
+    do: Enum.reverse([id | acc])
+
+  defp delegation_ancestry(graph, %{id: id, parent_delegation_id: parent_id}, acc)
+       when is_binary(id) and is_binary(parent_id) do
+    case get_in(graph, [:delegations, parent_id]) do
+      %{id: ^parent_id} = parent -> delegation_ancestry(graph, parent, [id | acc])
+      _ -> nil
+    end
+  end
+
+  defp delegation_ancestry(_graph, _delegation, _acc), do: nil
 
   defp execution_attributes(%Issue{id: issue_id, identifier: identifier, branch_name: branch_name}, worker_host) do
     workspace_root =

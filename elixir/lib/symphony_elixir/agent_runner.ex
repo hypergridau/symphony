@@ -5,7 +5,7 @@ defmodule SymphonyElixir.AgentRunner do
 
   require Logger
   alias SymphonyElixir.Codex.{AppServer, ModelRouter}
-  alias SymphonyElixir.{Config, ManagedCheckout, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, ManagedAssignmentBundle, ManagedCheckout, PromptBuilder, Tracker, Workspace}
   alias SymphonyElixir.ManagedCheckout.Progress, as: CheckoutProgress
   alias SymphonyElixir.Tracker.Issue
 
@@ -18,6 +18,10 @@ defmodule SymphonyElixir.AgentRunner do
       when is_function(issue_state_fetcher, 1) do
     continue_with_issue?(issue, issue_state_fetcher)
   end
+
+  @doc false
+  @spec assignment_bundle_preflight_for_test(keyword()) :: :ok | {:error, term()}
+  def assignment_bundle_preflight_for_test(opts) when is_list(opts), do: assignment_bundle_preflight(opts)
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -39,7 +43,8 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 
-    with :ok <- execution_fence_preflight(opts) do
+    with :ok <- assignment_bundle_preflight(opts),
+         :ok <- execution_fence_preflight(opts) do
       case create_workspace(issue, worker_host, opts) do
         {:ok, workspace} ->
           opts = CheckoutProgress.attach(workspace, opts)
@@ -65,6 +70,18 @@ defmodule SymphonyElixir.AgentRunner do
         {:error, reason} ->
           {:error, reason}
       end
+    end
+  end
+
+  defp assignment_bundle_preflight(opts) do
+    case Keyword.get(opts, :assignment_bundle) do
+      nil ->
+        if is_nil(Keyword.get(opts, :execution_checkout)) and not Keyword.get(opts, :managed_model_route, false),
+          do: :ok,
+          else: {:error, :assignment_bundle_missing}
+
+      bundle ->
+        ManagedAssignmentBundle.validate_bundle(bundle)
     end
   end
 
@@ -289,6 +306,8 @@ defmodule SymphonyElixir.AgentRunner do
 
     #{PromptBuilder.build_prompt(issue, opts)}
 
+    #{assignment_bundle_guidance(opts)}
+
     #{managed_checkout_guidance(opts)}
     """
   end
@@ -305,6 +324,26 @@ defmodule SymphonyElixir.AgentRunner do
 
     #{managed_checkout_guidance(opts)}
     """
+  end
+
+  defp assignment_bundle_guidance(opts) do
+    case Keyword.get(opts, :assignment_bundle) do
+      nil ->
+        ""
+
+      bundle ->
+        """
+        Managed assignment bundle (sha256 #{bundle.sha256}):
+        Objective #{bundle.objective.id}: #{bundle.objective.content}
+        Repository #{bundle.repository_ref}, base #{bundle.base_ref}, branch #{bundle.branch}.
+        Assigned seat #{bundle.seat}; execution lease #{bundle.lease.session_id} generation #{bundle.lease.generation}.
+        Intent ancestry: #{Enum.join(bundle.intent_ancestry, " -> ")}.
+        Acceptance: #{bundle.acceptance.deliverable}; evidence: #{bundle.acceptance.evidence}.
+        Platform: #{bundle.environment.platform}; constraints: #{Enum.join(bundle.environment.constraints, ", ")}.
+        Secret context references are names only: #{Enum.join(bundle.context_secret_refs, ", ")}.
+        Follow this assignment contract and report against its acceptance criteria.
+        """
+    end
   end
 
   defp managed_checkout_guidance(opts) do

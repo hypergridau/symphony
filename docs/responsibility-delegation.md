@@ -115,3 +115,17 @@ This manifest path does not claim distributed atomicity or erase unresolved cras
 Pause before an operator changes authorization configuration, update its pinned digest and
 restart the pool. Do not repair missing authority by editing live graph JSON or changing to
 manual enforcement. Completed graph responsibility alone is not cleanup acceptance.
+
+## Managed assignment bundle
+
+Managed worker spawn binds the objective ID, identity and content, repository, explicit base ref,
+prepared branch, responsible seat, current execution lease, delegation ancestry, acceptance
+contract, secret environment variable names, and target platform constraints into a canonical
+SHA-256 assignment bundle. Secret values are never included. The worker validates the bundle
+before workspace creation.
+
+The current runtime configuration does not yet populate the required objective content/identity,
+base ref, platform or environment constraints. Until a trusted source supplies those fields through
+`work_package_runtime.assignment_context`, managed spawn fails closed before recording `spawn_started`.
+This is an incomplete source slice; it does not qualify managed runtime admission or workload
+execution.

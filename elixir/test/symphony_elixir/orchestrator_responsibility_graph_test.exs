@@ -89,6 +89,47 @@ defmodule SymphonyElixir.OrchestratorResponsibilityGraphTest do
              )
   end
 
+  test "managed spawn is held before the provider spawn journal when assignment context is incomplete" do
+    {:ok, graph, :activated} = ResponsibilityGraph.activate(ResponsibilityGraph.new(), 0)
+
+    {:ok, graph, _owner} =
+      ResponsibilityGraph.delegate(
+        graph,
+        delegation("owner", :accountable, scope: Map.put(scope(), :repository, "openai/symphony")),
+        1
+      )
+
+    {:ok, graph, _worker} =
+      ResponsibilityGraph.delegate(
+        graph,
+        delegation(
+          "worker",
+          :responsible,
+          parent_delegation_id: "owner",
+          scope: Map.put(scope(), :repository, "openai/symphony")
+        ),
+        2
+      )
+
+    issue = %Issue{id: "HGS-300", identifier: "HGS-300", title: "Managed assignment", state: "Todo", branch_name: "codex/hgs-300"}
+
+    state = %Orchestrator.State{
+      execution_fence: ExecutionFence.new(),
+      responsibility_graph: graph,
+      running: %{},
+      blocked: %{}
+    }
+
+    assert {:ok, admitted, token, session_id, "worker", lease} =
+             Orchestrator.admit_execution_for_test(state, issue, nil)
+
+    managed = %{admitted | work_package_runtime: %{managed_delegations: %{repository_ref: "openai/symphony"}}}
+    held = Orchestrator.spawn_fenced_issue_for_test(managed, issue, token, session_id, "worker", lease)
+
+    assert held.running == %{}
+    assert Map.has_key?(held.blocked, issue.id)
+  end
+
   defp delegation(id, role, overrides \\ []) do
     Map.merge(
       %{
