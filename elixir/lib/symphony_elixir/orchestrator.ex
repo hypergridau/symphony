@@ -1025,16 +1025,10 @@ defmodule SymphonyElixir.Orchestrator do
     no_progress_tokens = no_progress_token_count(running_entry)
     no_durable_progress_tokens = no_durable_progress_token_count(running_entry)
     issue_total_tokens = issue_token_total(state, issue_id)
-    time_stall? = timeout_ms > 0 and is_integer(elapsed_ms) and elapsed_ms > timeout_ms
-
-    total_token_budget_exhausted? =
-      is_integer(max_total_tokens) and max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
-
-    command_token_stall? =
-      max_no_progress_tokens > 0 and no_progress_tokens >= max_no_progress_tokens
-
-    durable_token_stall? =
-      max_no_progress_tokens > 0 and no_durable_progress_tokens >= max_no_progress_tokens
+    time_stall? = stalled_for_time?(timeout_ms, elapsed_ms)
+    total_token_budget_exhausted? = token_budget_exhausted?(max_total_tokens, issue_total_tokens)
+    command_token_stall? = no_progress_token_stall?(max_no_progress_tokens, no_progress_tokens)
+    durable_token_stall? = no_progress_token_stall?(max_no_progress_tokens, no_durable_progress_tokens)
 
     token_stall? = command_token_stall? or durable_token_stall?
 
@@ -1075,6 +1069,15 @@ defmodule SymphonyElixir.Orchestrator do
       state
     end
   end
+
+  defp stalled_for_time?(timeout_ms, elapsed_ms),
+    do: timeout_ms > 0 and is_integer(elapsed_ms) and elapsed_ms > timeout_ms
+
+  defp token_budget_exhausted?(max_total_tokens, issue_total_tokens),
+    do: is_integer(max_total_tokens) and max_total_tokens > 0 and issue_total_tokens >= max_total_tokens
+
+  defp no_progress_token_stall?(max_no_progress_tokens, observed_tokens),
+    do: max_no_progress_tokens > 0 and observed_tokens >= max_no_progress_tokens
 
   defp handle_stalled_issue(state, issue_id, running_entry, context) do
     cond do

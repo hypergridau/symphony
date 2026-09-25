@@ -68,7 +68,12 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
       managed_delegations: %{repository_ref: repository}
     }
 
-    :sys.replace_state(pid, &%{&1 | execution_fence: fence, running: %{issue_id => entry}, work_package_runtime: runtime})
+    :sys.replace_state(pid, &%{
+      &1
+      | execution_fence: fence,
+        running: %{issue_id => entry},
+        work_package_runtime: runtime
+    })
 
     update = %{
       event: :turn_failed,
@@ -110,7 +115,8 @@ defmodule SymphonyElixir.OrchestratorExecutionFenceTest do
 
     {:ok, released_fence, :released} = ExecutionFence.release(fence, token, session.session_id)
     :sys.replace_state(pid, &%{&1 | execution_fence: released_fence})
-    assert {:error, :managed_failed_turn_identity_mismatch} = GenServer.call(pid, {:managed_failed_turn, issue_id, update})
+    assert {:error, :managed_failed_turn_identity_mismatch} =
+             GenServer.call(pid, {:managed_failed_turn, issue_id, update})
     assert File.read!(journal_path) == bytes
   end
 
