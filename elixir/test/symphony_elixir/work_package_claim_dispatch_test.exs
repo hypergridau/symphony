@@ -102,4 +102,13 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
     assert :ok = Journal.save(path, pending)
     assert {:ok, ^pending} = Journal.load(path)
   end
+
+  test "a lost provider acknowledgement can be fenced without a second claim", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, pending} = Dispatch.begin_recovery(submitted, key)
+    assert pending.reservations[key].dispatch.phase == "recovery_pending"
+    assert {:error, :claim_reconciliation_required} = Dispatch.submit(pending, key, @input, @now)
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_spawn(pending, key, @input)
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_recovery(pending, key)
+  end
 end
