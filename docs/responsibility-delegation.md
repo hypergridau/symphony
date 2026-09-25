@@ -215,8 +215,12 @@ and carries the validated non-secret assignment as structured JSON to a fixed wo
 entrypoint. The Job has only bounded ephemeral `emptyDir` workspace/temp volumes,
 fixed CPU/memory limits and deadline, a non-root read-only-root filesystem container,
 default seccomp, dropped capabilities, and no service-account token. Its create/get/delete
-port is fakeable and does no cluster I/O by itself. Existing Jobs are accepted only when
+port is fakeable. `SymphonyElixir.RKE2Job.HTTPClient` is a separate HTTPS adapter: each
+request requires a host-supplied HTTPS API origin, exact namespace, bearer token, and readable
+regular CA certificate file; redirects and retries are disabled, and connection/response
+timeouts are bounded. It is not wired into runtime configuration or Orchestrator. Provider
+create ambiguity is reconciled by an exact GET before success is reported. Existing Jobs are accepted only when
 their exact assignment identity and spec match; mismatches and unknown deletion targets
-are held, and delete uses the fetched Kubernetes UID as a precondition. It has no
-Orchestrator, spawn, live-client, credential, or Pod integration and qualifies no RKE2
-cluster or worker execution.
+are held, and delete uses the fetched Kubernetes UID as a precondition. No credential source,
+Orchestrator, spawn, or Pod integration is included, and no RKE2 cluster or worker execution
+is qualified.
