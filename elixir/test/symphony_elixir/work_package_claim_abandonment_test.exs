@@ -191,6 +191,26 @@ defmodule SymphonyElixir.WorkPackageClaimAbandonmentTest do
     assert {:error, :claim_abandonment_local_state_changed} = Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
   end
 
+  test "new journal scope IDs must match the signed provider claim", c do
+    [key] = Map.keys(c.journal.reservations)
+
+    scoped =
+      c.journal
+      |> put_in([:reservations, key, :workspace_id], "ws-test")
+      |> put_in([:reservations, key, :company_id], "company-test")
+
+    :ok = Journal.save(c.runtime.journal_path, scoped)
+    sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
+    assert :authorized = Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
+
+    changed = put_in(scoped, [:reservations, key, :company_id], "other-company")
+    :ok = Journal.save(c.runtime.journal_path, changed)
+    sign_envelope(c, Map.put(c.envelope, "journalSHA256", hash(File.read!(c.runtime.journal_path))))
+
+    assert {:error, :claim_abandonment_local_state_changed} =
+             Abandonment.check(c.runtime, c.state.execution_fence, c.issue.id)
+  end
+
   test "recovery cannot replace the current native owner", c do
     changed = %{c.issue | assignee_id: "changed-owner"}
     assert {:error, _} = prepare_recovery(c.runtime, c.state, changed)
