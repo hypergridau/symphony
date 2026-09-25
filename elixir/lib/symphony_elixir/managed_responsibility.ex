@@ -45,8 +45,15 @@ defmodule SymphonyElixir.ManagedResponsibility do
   @spec admit(map(), map() | nil, map(), non_neg_integer(), map() | nil) :: {:ok, map()} | {:error, term()}
   def admit(graph, nil, _issue, _now_ms, _recovery), do: {:ok, graph}
 
-  def admit(graph, %{schema_version: version, entries: entries, repository_ref: repository}, issue, now_ms, recovery)
-      when version in [1, 2] and is_map(graph) and is_list(entries) and is_map(issue) and is_integer(now_ms) and now_ms >= 0 do
+  def admit(
+        graph,
+        %{schema_version: version, entries: entries, repository_ref: repository},
+        issue,
+        now_ms,
+        recovery
+      )
+      when version in [1, 2] and is_map(graph) and is_list(entries) and is_map(issue) and
+             is_integer(now_ms) and now_ms >= 0 do
     with :ok <- ResponsibilityGraph.validate(graph),
          entry when is_map(entry) <- Enum.find(entries, &(&1.issue_id == issue.id and &1.identifier == issue.identifier)),
          :ok <- validate_assignment_context(version, entry, issue, repository),
@@ -63,18 +70,32 @@ defmodule SymphonyElixir.ManagedResponsibility do
   def admit(_graph, _manifest, _issue, _now_ms, _recovery), do: {:error, :invalid_managed_delegation_input}
 
   @doc false
-  @spec assignment_context(map(), map(), String.t()) :: {:ok, map()} | {:error, term()}
-  def assignment_context(%{schema_version: 2, entries: entries, repository_ref: repository}, issue, delegation_id)
-      when is_list(entries) and is_map(issue) and is_binary(delegation_id) do
+  @spec assignment_context(map(), map(), String.t(), non_neg_integer()) :: {:ok, map()} | {:error, term()}
+  def assignment_context(
+        %{schema_version: 2, entries: entries, repository_ref: repository},
+        issue,
+        delegation_id,
+        now_ms
+      )
+      when is_list(entries) and is_map(issue) and is_binary(delegation_id) and is_integer(now_ms) and now_ms >= 0 do
     issue_id = Map.get(issue, :id)
 
     case Enum.find(entries, fn
-           %{issue_id: ^issue_id, responsible: %{id: ^delegation_id}} -> true
-           _ -> false
+           %{issue_id: ^issue_id, identifier: identifier, responsible: %{id: ^delegation_id}} ->
+             identifier == Map.get(issue, :identifier)
+
+           _ ->
+             false
          end) do
-      %{assignment_context: context} = entry when is_map(context) ->
-        case validate_assignment_context(2, entry, issue, repository) do
-          :ok -> {:ok, context}
+      %{
+        assignment_context: context,
+        owner_id: owner_id,
+        accountable: %{expires_at_ms: accountable_expires},
+        responsible: %{expires_at_ms: responsible_expires}
+      } = entry
+      when is_map(context) ->
+        case validate_assignment_authority(owner_id, issue, accountable_expires, responsible_expires, now_ms) do
+          :ok -> validate_and_return_assignment_context(entry, context, issue, repository)
           {:error, _reason} = error -> error
         end
 
@@ -83,7 +104,23 @@ defmodule SymphonyElixir.ManagedResponsibility do
     end
   end
 
-  def assignment_context(_manifest, _issue, _delegation_id), do: {:error, :managed_assignment_context_missing}
+  def assignment_context(_manifest, _issue, _delegation_id, _now_ms),
+    do: {:error, :managed_assignment_context_missing}
+
+  defp validate_assignment_authority(owner_id, issue, accountable_expires, responsible_expires, now_ms) do
+    cond do
+      owner_id != Map.get(issue, :assignee_id) -> {:error, :managed_assignment_owner_drift}
+      accountable_expires <= now_ms or responsible_expires <= now_ms -> {:error, :managed_delegation_expired}
+      true -> :ok
+    end
+  end
+
+  defp validate_and_return_assignment_context(entry, context, issue, repository) do
+    case validate_assignment_context(2, entry, issue, repository) do
+      :ok -> {:ok, context}
+      {:error, _reason} = error -> error
+    end
+  end
 
   defp decode_entries(entries, context, now_ms, version) do
     Enum.reduce_while(entries, {:ok, []}, fn raw, {:ok, acc} ->
@@ -178,7 +215,10 @@ defmodule SymphonyElixir.ManagedResponsibility do
 
   defp validate_assignment_context(
          2,
-         %{assignment_context: context, responsible: %{scope: %{objective_id: scope_objective_id, repository: scope_repository}}},
+         %{
+           assignment_context: context,
+           responsible: %{scope: %{objective_id: scope_objective_id, repository: scope_repository}}
+         },
          issue,
          repository
        )

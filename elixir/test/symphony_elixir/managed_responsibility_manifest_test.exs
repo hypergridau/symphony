@@ -33,9 +33,14 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
 
     assert {:ok, digest(public_key)} == Manifest.verify_signature(bytes, signature, hex(public_key))
 
-    v2_signature = :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v2\0" <> bytes, [private_key, :ed25519]) |> hex()
+    v2_signature =
+      :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v2\0" <> bytes, [private_key, :ed25519])
+      |> hex()
+
     assert {:ok, digest(public_key)} == Manifest.verify_signature(bytes, v2_signature, hex(public_key), 2)
-    assert {:error, :invalid_managed_delegation_signature} = Manifest.verify_signature(bytes, v2_signature, hex(public_key), 1)
+
+    assert {:error, :invalid_managed_delegation_signature} =
+             Manifest.verify_signature(bytes, v2_signature, hex(public_key), 1)
 
     assert {:error, :invalid_managed_delegation_signature} ==
              Manifest.verify_signature(bytes <> " ", signature, hex(public_key))

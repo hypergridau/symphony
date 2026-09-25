@@ -84,7 +84,15 @@ defmodule SymphonyElixir.AgentRunnerManagedCheckoutTest do
     ]
 
     write_workflow_file!(Workflow.workflow_file_path(), workflow)
-    %{issue: issue, identity: identity, assignment_bundle: assignment_bundle, workflow: workflow, trace: trace, started: started}
+
+    %{
+      issue: issue,
+      identity: identity,
+      assignment_bundle: assignment_bundle,
+      workflow: workflow,
+      trace: trace,
+      started: started
+    }
   end
 
   test "real clone reaches app-server on its prepared branch and reports observed identity", ctx do

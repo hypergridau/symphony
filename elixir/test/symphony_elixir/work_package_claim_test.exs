@@ -624,6 +624,78 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert Task.Supervisor.children(task_supervisor) == children_before
   end
 
+  test "post-claim objective drift journals recovery and releases the fenced worker lease" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    original_issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+    changed_issue = %{original_issue | title: "Changed after claim"}
+
+    {after_preflight, runtime} = post_claim_revalidation_failure(path, original_issue, changed_issue)
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].release_reason == :spawn_failed
+    assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
+
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    assert {:ok, [retained]} = Recovery.unstarted_claims(runtime, after_preflight.execution_fence)
+    assert retained.dispatch.phase == "recovery_pending"
+  end
+
+  test "post-claim grant expiry journals recovery and does not start a worker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, manifest_expiry_ms: System.system_time(:millisecond) - 1)
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
+  test "post-claim owner drift journals recovery instead of dispatching to a stale assignee" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+    reassigned_issue = %{issue | assignee_id: "new-owner"}
+
+    {after_preflight, _runtime} = post_claim_revalidation_failure(path, issue, reassigned_issue)
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
+  test "managed bundle rebuild failure after claim also closes replay before blocking" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue,
+        manifest_expiry_ms: System.system_time(:millisecond) - 1,
+        spawn_directly: true
+      )
+
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.running == %{}
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
   test "claims a reservation and replays the same journaled tuple after restart" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1065,7 +1137,13 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         %{
           issue_id: issue.id,
           identifier: issue.identifier,
-          responsible: %{id: "delegation-349", scope: %{objective_id: "objective", repository: @repository}},
+          owner_id: issue.assignee_id,
+          accountable: %{expires_at_ms: 2_000_000_000_000},
+          responsible: %{
+            id: "delegation-349",
+            expires_at_ms: 2_000_000_000_000,
+            scope: %{objective_id: "objective", repository: @repository}
+          },
           assignment_context: %{
             objective_id: "objective",
             objective_content: issue.title,
@@ -1088,6 +1166,86 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     input
     |> Map.put(:managed_delegations, assignment_manifest(issue))
     |> Map.put(:responsibility_graph, graph)
+  end
+
+  defp post_claim_revalidation_failure(path, issue, refreshed_issue, opts \\ []) do
+    %{input: input, token: token, lease: lease} = authority_fixture(path)
+    input = with_assignment_manifest(input, issue)
+
+    input =
+      case Keyword.get(opts, :manifest_expiry_ms) do
+        expiry when is_integer(expiry) ->
+          [entry] = input.managed_delegations.entries
+
+          manifest = %{
+            input.managed_delegations
+            | entries: [
+                %{
+                  entry
+                  | accountable: %{entry.accountable | expires_at_ms: expiry},
+                    responsible: %{entry.responsible | expires_at_ms: expiry}
+                }
+              ]
+          }
+
+          %{input | managed_delegations: manifest}
+
+        _ ->
+          input
+      end
+
+    runtime =
+      input
+      |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
+
+    fence_path = path <> ".fence"
+    graph_path = path <> ".graph"
+    :ok = ExecutionFence.Persistence.save(fence_path, input.fence_state)
+    :ok = ResponsibilityGraph.Persistence.save(graph_path, input.responsibility_graph)
+
+    state = %Orchestrator.State{
+      execution_fence: input.fence_state,
+      responsibility_graph: input.responsibility_graph,
+      work_package_runtime: runtime,
+      execution_fence_path: fence_path,
+      responsibility_graph_path: graph_path
+    }
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue"),
+        do: {:ok, response(%{"data" => reservation_payload()})},
+        else: {:ok, response(%{"data" => claim_result_payload()})}
+    end
+
+    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+
+    dispatch = %{
+      attempt: nil,
+      recipient: self(),
+      worker_host: nil,
+      token: token,
+      session_id: lease.session_id,
+      delegation_id: "delegation-349",
+      runtime_lease: lease
+    }
+
+    after_preflight =
+      if Keyword.get(opts, :spawn_directly, false) do
+        Orchestrator.spawn_fenced_issue_for_test(
+          state,
+          issue,
+          token,
+          lease.session_id,
+          "delegation-349",
+          lease
+        )
+      else
+        Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
+          {:ok, [refreshed_issue]}
+        end)
+      end
+
+    {after_preflight, runtime}
   end
 
   defp response(body, status \\ 200), do: %Req.Response{status: status, body: body}

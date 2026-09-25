@@ -82,7 +82,15 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   defp bundle_attributes(_bundle), do: {:error, :assignment_bundle_environment_invalid}
 
   defp validate(attrs) do
-    with :ok <- required_text(attrs, [:repository_ref, :base_ref, :branch, :seat, :platform, :environment_classification]),
+    with :ok <-
+           required_text(attrs, [
+             :repository_ref,
+             :base_ref,
+             :branch,
+             :seat,
+             :platform,
+             :environment_classification
+           ]),
          :ok <- valid_platform(attrs.platform),
          :ok <- valid_environment_classification(attrs.environment_classification),
          :ok <- valid_objective(Map.get(attrs, :objective)),
@@ -90,9 +98,8 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
          :ok <- valid_nonempty_text_list(Map.get(attrs, :intent_ancestry)),
          :ok <- valid_acceptance(Map.get(attrs, :acceptance)),
          :ok <- valid_text_list(Map.get(attrs, :context_secret_refs)),
-         :ok <- valid_nonempty_text_list(Map.get(attrs, :environment_constraints)),
-         :ok <- no_secret_values(attrs) do
-      :ok
+         :ok <- valid_nonempty_text_list(Map.get(attrs, :environment_constraints)) do
+      no_secret_values(attrs)
     end
   end
 

@@ -3,8 +3,8 @@ Code.require_file("../support/managed_responsibility_fixture.exs", __DIR__)
 defmodule SymphonyElixir.WorkPackageRuntimeTest do
   use ExUnit.Case, async: false
 
-  alias SymphonyElixir.WorkPackageRuntime
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
+  alias SymphonyElixir.WorkPackageRuntime
 
   @required %{
     "DAHLIA_WORK_PACKAGE_PROVIDER_URL" => "https://provider.example",
