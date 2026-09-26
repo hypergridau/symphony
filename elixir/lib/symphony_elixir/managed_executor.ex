@@ -603,7 +603,13 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp ensure_abort_cleanup(record, assignment, ports) do
-    if record.abort_reason in [:checkout_preparation_failed, :checkout_intent_mismatch] do
+    if record.abort_reason in [
+         :checkout_preparation_failed,
+         :checkout_intent_mismatch,
+         :credential_lease_denied,
+         :credential_lease_expired,
+         :credential_lease_invalid
+       ] do
       request_abort_cleanup(record, assignment, ports)
     else
       {:held, :abort_cleanup_contract_unsupported, record}

@@ -25,6 +25,9 @@ The source-only disposable RKE2 adapter now registers the server-assigned Job UI
 before reporting an allocation ready. The trusted host supplies the validated provider claim,
 provider origin and runner token; a denied or uncertain registration leaves the Job suspended.
 This handoff is not a deployed disposable worker or credential route.
+The source-only managed executor can release a pre-checkout allocation after a confirmed
+credential denial, expiry, or invalid response, but only through Dahlia's signed abort
+proof and exact provider release acknowledgement. Uncertain credential outcomes stay held.
 
 An enforced managed pool consumes an Ed25519-signed, digest-pinned,
 operator-issued delegation manifest; an empty manifest is signed too.
