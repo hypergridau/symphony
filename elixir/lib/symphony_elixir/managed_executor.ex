@@ -63,6 +63,9 @@ defmodule SymphonyElixir.ManagedExecutor do
   defp advance(%{phase: :abort_cleanup_pending} = record, assignment, ports),
     do: ensure_abort_cleanup(record, assignment, ports)
 
+  defp advance(%{phase: :abort_cleanup_verified} = record, _assignment, _ports),
+    do: {:blocked, record.abort_reason, record}
+
   defp advance(%{phase: :credential_request_revocation_pending} = record, assignment, ports),
     do: revoke_candidate_request(record, assignment, ports)
 
@@ -594,6 +597,14 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp ensure_abort_cleanup(record, assignment, ports) do
+    if record.abort_reason in [:checkout_preparation_failed, :checkout_intent_mismatch] do
+      request_abort_cleanup(record, assignment, ports)
+    else
+      {:held, :abort_cleanup_contract_unsupported, record}
+    end
+  end
+
+  defp request_abort_cleanup(record, assignment, ports) do
     revoked =
       if is_map(record.credential_lease), do: revoke_credential_lease(record, assignment, ports), else: :ok
 
@@ -602,7 +613,9 @@ defmodule SymphonyElixir.ManagedExecutor do
         ports.adapter.ensure_abort_cleanup(
           record.allocation,
           assignment,
+          record.claim_binding,
           record.abort_reason,
+          record.abort_result_ref,
           key(assignment, "abort-cleanup"),
           ports.adapter_context
         )
@@ -611,9 +624,31 @@ defmodule SymphonyElixir.ManagedExecutor do
       end
 
     case response do
-      :ok -> {:blocked, record.abort_reason, record}
+      {:ok, %{replayed: replayed} = ack} when is_boolean(replayed) ->
+        save_abort_release_ack(record, assignment, Map.delete(ack, :replayed), ports)
+
+      {:error, _reason} ->
+        {:held, :abort_cleanup_unverified, record}
+
+      _ ->
+        {:held, :abort_cleanup_unverified, record}
+    end
+  end
+
+  defp save_abort_release_ack(record, assignment, ack, ports) do
+    with :ok <-
+           Record.validate_abort_release_ack(
+             ack,
+             record.claim_binding,
+             record.allocation,
+             assignment,
+             record.abort_result_ref
+           ),
+         {:ok, verified} <-
+           checkpoint(record, :abort_cleanup_verified, ports, %{abort_release_ack: ack, credential_lease: nil}) do
+      {:blocked, verified.abort_reason, verified}
+    else
       {:error, _reason} -> {:held, :abort_cleanup_unverified, record}
-      _ -> {:held, :abort_cleanup_unverified, record}
     end
   end
 
@@ -640,7 +675,7 @@ defmodule SymphonyElixir.ManagedExecutor do
         {:publish_or_reconcile_result, 5},
         {:ensure_terminal_cleanup, 5},
         {:verify_terminal_cleanup, 5},
-        {:ensure_abort_cleanup, 5},
+        {:ensure_abort_cleanup, 7},
         {:publish_or_reconcile_abort_result, 5}
       ]
 
