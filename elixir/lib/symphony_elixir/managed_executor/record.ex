@@ -35,9 +35,9 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     result_reported: [:allocation, :checkout, :execution_result, :result_ref],
     cleanup_pending: [:allocation, :checkout, :execution_result, :result_ref],
     terminal: [:allocation, :checkout, :execution_result, :result_ref, :cleanup_evidence],
-    abort_pending: [:allocation, :abort_reason],
-    abort_result_pending: [:allocation, :abort_reason, :pre_execution_result],
-    abort_cleanup_pending: [:allocation, :abort_reason, :pre_execution_result, :abort_result_ref]
+    abort_pending: [:allocation, :abort_reason, :checkout],
+    abort_result_pending: [:allocation, :abort_reason, :checkout, :pre_execution_result],
+    abort_cleanup_pending: [:allocation, :abort_reason, :checkout, :pre_execution_result, :abort_result_ref]
   }
   @checkout_phases [
     :checkout_ready,
@@ -260,7 +260,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp create_or_load(journal, key, assignment, context) do
     initial = %{
-      schema_version: 4,
+      schema_version: 5,
       key: key,
       assignment_digest: assignment.sha256,
       phase: :planned,
@@ -284,7 +284,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   end
 
   defp verify(
-         %{schema_version: 4, key: key, assignment_digest: digest, phase: phase, version: version} = record,
+         %{schema_version: 5, key: key, assignment_digest: digest, phase: phase, version: version} = record,
          key,
          assignment
        )
@@ -345,8 +345,17 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp valid_abort_phase?(record, assignment) do
     abort_reason = Map.get(record, :abort_reason)
+    checkout = Map.get(record, :checkout)
+
+    checkout_matches_phase? =
+      if abort_reason in [:checkout_preparation_failed, :checkout_intent_mismatch] do
+        is_nil(checkout)
+      else
+        validate_checkout(checkout, assignment, checkout_intent(assignment)) == :ok
+      end
 
     abort_reason in @abort_reasons and validate_allocation(Map.get(record, :allocation)) == :ok and
+      checkout_matches_phase? and
       (record.phase == :abort_pending or
          (validate_pre_execution_result(Map.get(record, :pre_execution_result), assignment, abort_reason) == :ok and
             (record.phase == :abort_result_pending or nonempty_text?(Map.get(record, :abort_result_ref)))))
