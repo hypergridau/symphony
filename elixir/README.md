@@ -764,6 +764,12 @@ callbacks; it does not implement a broker or issue credentials. Admission stays 
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
 
+The source-only executor journal v5 retains the validated checkout receipt when a credential
+lease is denied, expires, or is invalid before execution. Checkout preparation and intent
+failures retain an explicit absent checkout instead. Replay rejects a changed checkout binding.
+The abort result remains pending cleanup; this journal fact is not a provider release receipt
+or proof that a repository checkout was absent on the host.
+
 The HGS-729 RKE2 provider is a separate source-only port. Callers must pass an assignment
 bundle built from an upstream signature-verified manifest entry. The provider validates
 the canonical bundle and `internal_beta`/`rke2` placement; it does not verify the manifest

@@ -447,7 +447,7 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp abort_before_execution(record, assignment, reason, ports) do
-    attrs = %{abort_reason: reason}
+    attrs = %{abort_reason: reason, checkout: Map.get(record, :checkout)}
 
     case checkpoint(record, :abort_pending, ports, attrs) do
       {:ok, pending} -> advance(pending, assignment, ports)

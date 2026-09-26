@@ -69,14 +69,30 @@ defmodule SymphonyElixir.ManagedExecutorTest do
   end
 
   test "credential lease denial blocks before execution" do
-    {adapter, _journal, opts} = ports(credential_denied: true)
+    {adapter, journal, opts} = ports(credential_denied: true)
     assignment = assignment()
 
-    assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+    assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending} = blocked} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert blocked.checkout == %{
+             assignment_digest: assignment.sha256,
+             repository_ref: assignment.repository_ref,
+             base_ref: assignment.base_ref,
+             branch: assignment.branch,
+             head: "0123456789abcdef0123456789abcdef01234567"
+           }
+
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+    assert {:ok, ^blocked} = FakeJournal.load(key, journal)
     events = FakeAdapter.events(adapter)
     assert Enum.count(events, &(elem(&1, 0) == :acquire_credential_lease)) == 1
     refute Enum.any?(events, &(elem(&1, 0) in [:renew_credential_lease, :execute, :revoke_credential_lease]))
     assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+
+    changed = %{blocked | version: blocked.version + 1, checkout: %{blocked.checkout | head: "wrong-head"}}
+    assert :ok = FakeJournal.compare_and_swap(key, blocked.version, changed, journal)
+    assert {:error, :invalid_lifecycle_journal} = ManagedExecutor.run(assignment, opts)
   end
 
   test "a lease with a different assignment binding never reaches execution" do
@@ -91,7 +107,11 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
     assert {:ok, ^pending} = FakeJournal.load(key, journal)
-    assert {:blocked, :credential_lease_invalid, %{phase: :abort_cleanup_pending}} = ManagedExecutor.run(assignment, opts)
+
+    assert {:blocked, :credential_lease_invalid, %{phase: :abort_cleanup_pending} = blocked} =
+             ManagedExecutor.run(assignment, opts)
+
+    assert blocked.checkout.head == "0123456789abcdef0123456789abcdef01234567"
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
     assert FakeAdapter.active_credential_refs(adapter) == []
 
@@ -176,8 +196,10 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assignment = assignment()
 
-    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending}} =
+    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending} = blocked} =
              ManagedExecutor.run(assignment, opts)
+
+    assert blocked.checkout.head == "0123456789abcdef0123456789abcdef01234567"
 
     events = FakeAdapter.events(adapter)
     assert Enum.any?(events, &(elem(&1, 0) == :revoke_credential_lease))
@@ -403,6 +425,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assert {:blocked, :checkout_intent_mismatch, record} = ManagedExecutor.run(assignment, opts)
     assert record.phase == :abort_cleanup_pending
+    assert record.checkout == nil
     assert %{pre_execution_result: result, abort_result_ref: result_ref} = record
 
     assert result.outcome == :blocked
