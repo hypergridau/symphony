@@ -158,9 +158,21 @@ or workload execution is qualified by this change.
 `SymphonyElixir.ManagedExecutor` defines a source-only lifecycle over explicit
 adapter and durable-journal behaviors. Its allocation, checkout, execution,
 result-publication and cleanup calls all carry stable keys derived from the
-validated assignment digest. Checkout intent is projected only from the signed
-assignment's repository, base ref and branch; an adapter receipt that differs is
-reported as a blocked pre-execution result and enters journaled cleanup debt. The
+validated assignment digest. The executor now requires the result of
+`WorkPackageClaim.claim/2` before any
+allocation, checks its reservation, attestation and provider response against
+the assignment, and records the stable non-secret claim identity in journal v6.
+Resume requires that same identity; a fresh attestation timestamp and signature
+for the same retained reservation do not change it. Unbound v5 journals cannot start or resume
+allocation; valid v5 terminal evidence remains readable. This is a guarded
+source API, not a production Orchestrator connection or an independent proof.
+The provider and root witness remain responsible for validating company,
+workspace, profile and reservation scope; a caller-created map is not claim
+authority. A separate fresh journal is not a one-time-use fence, so production
+must retain the provider claim and managed journal across crashes.
+Checkout intent is projected only from the signed assignment's repository,
+base ref and branch; an adapter receipt that differs is reported as a blocked
+pre-execution result and enters journaled cleanup debt. The
 result has a stable idempotency key and no accepted head. Uncertain result
 publication retries with that key before cleanup starts. Cleanup retry remains
 bound to the exact allocation and assignment; it never repeats checkout or
@@ -173,7 +185,7 @@ receipt and independent verifier proof require a trusted signer and host cleanup
 observations before release. `WorkPackageClaim.HostWitness.record_abort/3` can
 submit their proof, receipt, assignment, allocation and blocked-result references
 with the exact retained claim tuple. The root witness records provenance only;
-the managed executor is not wired to that claim context or verifier yet. An abort
+the managed executor does not submit that tuple to the witness or verifier. An abort
 therefore remains held. Checkout heads must be canonical 40- or 64-character hexadecimal Git
 object identifiers. The adapter return shapes are deliberately narrow so
 workspace paths, command strings, credential values and raw process output are

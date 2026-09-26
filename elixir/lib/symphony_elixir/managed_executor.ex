@@ -8,6 +8,7 @@ defmodule SymphonyElixir.ManagedExecutor do
 
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.ManagedExecutor.Adapter
+  alias SymphonyElixir.ManagedExecutor.ClaimBinding
   alias SymphonyElixir.ManagedExecutor.Record
 
   @type result :: {:ok, map()} | {:blocked, term(), map()} | {:held, term(), map()} | {:error, term()}
@@ -16,9 +17,10 @@ defmodule SymphonyElixir.ManagedExecutor do
   @spec run(map(), keyword()) :: result()
   def run(assignment, opts) when is_map(assignment) and is_list(opts) do
     with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         {:ok, claim_binding} <- ClaimBinding.from_claim(Keyword.get(opts, :provider_claim), assignment),
          {:ok, ports} <- ports(opts),
          key = assignment_key(assignment),
-         {:ok, record} <- Record.load_or_create(ports.journal, key, assignment, ports.journal_context) do
+         {:ok, record} <- Record.load_or_create(ports.journal, key, assignment, claim_binding, ports.journal_context) do
       advance(record, assignment, ports)
     end
   end
