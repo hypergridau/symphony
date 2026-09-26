@@ -72,7 +72,8 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
       body = %{
         "apiVersion" => "v1",
         "kind" => "DeleteOptions",
-        "preconditions" => %{"uid" => uid}
+        "preconditions" => %{"uid" => uid},
+        "propagationPolicy" => "Foreground"
       }
 
       request(:delete, jobs_path(namespace) <> "/" <> name, body, settings, :delete)

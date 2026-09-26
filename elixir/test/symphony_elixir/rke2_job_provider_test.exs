@@ -210,6 +210,27 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert {:held, :job_not_found_for_delete} = Provider.delete(assignment, opts(client))
   end
 
+  test "an accepted delete stays pending until the exact Job is absent", %{client: client} do
+    assignment = assignment()
+    assert {:ok, job} = Provider.ensure(assignment, opts(client))
+    uid = get_in(job, ["metadata", "uid"])
+    Agent.update(client, &Map.put(&1, :delete_pending?, true))
+
+    assert {:held, :job_delete_pending} = Provider.delete_owned(assignment, uid, opts(client))
+    assert Agent.get(client, & &1.deletes) == [uid]
+    assert Agent.get(client, &(&1.jobs != %{}))
+    {:ok, expected} = JobSpec.compile(assignment, config())
+    key = {config().namespace, job["metadata"]["name"]}
+    terminating = Agent.get(client, &Map.fetch!(&1.jobs, key))
+    refute JobSpec.owned_job?(terminating, expected)
+    assert JobSpec.owned_job_for_cleanup?(terminating, expected)
+    refute JobSpec.owned_job_for_cleanup?(put_in(terminating, ["metadata", "finalizers"], ["foreign"]), expected)
+
+    Agent.update(client, &Map.put(&1, :delete_pending?, false))
+    assert :ok = Provider.delete_owned(assignment, uid, opts(client))
+    assert Agent.get(client, & &1.jobs) == %{}
+  end
+
   test "delete holds an existing Job whose recorded spec no longer matches", %{client: client} do
     assignment = assignment()
     assert {:ok, job} = Provider.ensure(assignment, opts(client))

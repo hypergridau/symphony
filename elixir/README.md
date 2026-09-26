@@ -798,8 +798,12 @@ image and trusted namespace supplied by the caller. The Job has fixed execution 
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
 The fakeable client contract supports create/get/activate/delete reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
-server UID. Activation is a separate source-only call with exact allocation UID and an
-atomic UID/resource-version/suspended-state JSON Patch followed by readback. The caller
+server UID. Deletion requests foreground cascading cleanup and returns success only after
+the exact Job is absent on readback; an accepted but still visible Job stays pending. A
+separate verifier must still prove that no dependent Pod or workspace remains before a
+provider abort receipt claims runner cleanup. Activation is a separate source-only call
+with exact allocation UID and an atomic UID/resource-version/suspended-state JSON Patch
+followed by readback. The caller
 must supply a host-owned guard that rechecks admission and credential readiness;
 no production guard is installed. `SymphonyElixir.RKE2Job.HTTPClient` implements
 the same port over HTTPS when
