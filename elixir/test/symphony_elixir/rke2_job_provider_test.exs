@@ -252,6 +252,56 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert Agent.get(client, & &1.jobs) == %{}
   end
 
+  test "Job absence holds cleanup until the owned Pod is gone", %{client: client} do
+    assignment = assignment()
+    assert {:ok, job} = Provider.ensure(assignment, opts(client))
+    uid = get_in(job, ["metadata", "uid"])
+    name = get_in(job, ["metadata", "name"])
+
+    pod = %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "name" => name <> "-abcde",
+        "namespace" => config().namespace,
+        "uid" => "pod-uid-1",
+        "ownerReferences" => [%{"apiVersion" => "batch/v1", "kind" => "Job", "name" => name, "uid" => uid}]
+      }
+    }
+
+    Agent.update(client, &Map.put(&1, :pods, %{pod["metadata"]["uid"] => pod}))
+
+    assert {:held, :job_pod_cleanup_pending} = Provider.delete_owned(assignment, uid, opts(client))
+    assert Agent.get(client, &(&1.jobs == %{}))
+    assert {:held, :job_pod_cleanup_pending} = Provider.delete_owned(assignment, uid, opts(client))
+
+    orphaned =
+      pod
+      |> put_in(["metadata", "name"], "renamed-pod")
+      |> put_in(["metadata", "ownerReferences"], [])
+      |> put_in(["metadata", "labels"], %{"symphony.hypergrid.au/assignment-sha256" => assignment.sha256})
+
+    Agent.update(client, &Map.put(&1, :pods, %{"pod-uid-1" => orphaned}))
+    assert {:held, :job_pod_cleanup_pending} = Provider.delete_owned(assignment, uid, opts(client))
+
+    Agent.update(client, &Map.put(&1, :list_pods_error, :forbidden))
+    assert {:held, {:job_pod_readback_failed, :forbidden}} = Provider.delete_owned(assignment, uid, opts(client))
+
+    unrelated = put_in(orphaned, ["metadata", "labels"], %{})
+    Agent.update(client, &(&1 |> Map.put(:list_pods_error, nil) |> Map.put(:pods, %{"pod-uid-1" => unrelated})))
+    assert :ok = Provider.delete_owned(assignment, uid, opts(client))
+  end
+
+  test "a malformed Pod readback cannot prove cleanup", %{client: client} do
+    assignment = assignment()
+    assert {:ok, job} = Provider.ensure(assignment, opts(client))
+    uid = get_in(job, ["metadata", "uid"])
+    Agent.update(client, &Map.put(&1, :pods, %{"bad" => %{"metadata" => %{"namespace" => config().namespace}}}))
+
+    assert {:held, :invalid_job_pod_readback} = Provider.delete_owned(assignment, uid, opts(client))
+    assert Agent.get(client, &(&1.jobs == %{}))
+  end
+
   test "delete holds an existing Job whose recorded spec no longer matches", %{client: client} do
     assignment = assignment()
     assert {:ok, job} = Provider.ensure(assignment, opts(client))

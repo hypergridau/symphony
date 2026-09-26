@@ -12,6 +12,7 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
   @behaviour SymphonyElixir.RKE2Job.Client
 
   @api_path "/apis/batch/v1/namespaces/"
+  @pod_api_path "/api/v1/namespaces/"
   @default_timeout_ms 10_000
   @max_timeout_ms 30_000
   @max_ca_file_bytes 1_048_576
@@ -41,6 +42,14 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     else
       false -> {:error, :invalid_kubernetes_job_identity}
       {:error, _reason} = error -> error
+    end
+  end
+
+  @impl true
+  @spec list_pods(String.t(), term()) :: {:ok, [map()]} | {:error, term()}
+  def list_pods(namespace, context) do
+    with {:ok, settings} <- settings(context, namespace) do
+      request(:get, @pod_api_path <> namespace <> "/pods", nil, settings, :pods)
     end
   end
 
@@ -104,6 +113,16 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
        do: {:ok, body}
 
   defp decode_success(:job, _status, _body), do: {:error, :invalid_kubernetes_job_response}
+
+  defp decode_success(:pods, _status, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => metadata, "items" => items})
+       when is_map(metadata) and is_list(items) do
+    if is_binary(metadata["resourceVersion"]) and metadata["resourceVersion"] != "" and
+         Map.get(metadata, "continue") in [nil, ""] and Enum.all?(items, &is_map/1),
+       do: {:ok, items},
+       else: {:error, :invalid_kubernetes_pod_list_response}
+  end
+
+  defp decode_success(:pods, _status, _body), do: {:error, :invalid_kubernetes_pod_list_response}
   defp decode_success(:delete, 204, _body), do: :ok
   defp decode_success(:delete, _status, %{"kind" => "Status", "status" => "Success"}), do: :ok
   defp decode_success(:delete, _status, _body), do: {:error, :invalid_kubernetes_delete_response}

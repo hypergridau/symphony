@@ -12,6 +12,16 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
   end
 
   @impl true
+  def list_pods(namespace, agent) do
+    Agent.get(agent, fn state ->
+      case Map.get(state, :list_pods_error) do
+        nil -> {:ok, state |> Map.get(:pods, %{}) |> Map.values() |> Enum.filter(&(get_in(&1, ["metadata", "namespace"]) == namespace))}
+        reason -> {:error, reason}
+      end
+    end)
+  end
+
+  @impl true
   def activate_job(namespace, name, uid, resource_version, agent) do
     Agent.get_and_update(agent, &activate_job_state(&1, {namespace, name}, uid, resource_version))
   end
