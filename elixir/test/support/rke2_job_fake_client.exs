@@ -148,7 +148,7 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
     |> put_in(["spec", "template", "spec", "terminationGracePeriodSeconds"], 30)
     |> put_in(["spec", "template", "spec", "enableServiceLinks"], true)
     |> put_in(["spec", "template", "spec", "preemptionPolicy"], "PreemptLowerPriority")
-    |> put_in(["spec", "template", "spec", "serviceAccountName"], "default")
+    |> update_in(["spec", "template", "spec"], &Map.put_new(&1, "serviceAccountName", "default"))
     |> put_in(["spec", "template", "spec", "containers", Access.at(0), "terminationMessagePath"], "/dev/termination-log")
     |> put_in(["spec", "template", "spec", "containers", Access.at(0), "terminationMessagePolicy"], "File")
   end

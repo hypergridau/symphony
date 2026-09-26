@@ -796,6 +796,10 @@ the canonical bundle and `internal_beta`/`rke2` placement; it does not verify th
 signature itself. It compiles the bundle into a deterministic Job using a digest-pinned
 image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
+The Job selects a fixed `disposable-worker` service account with automatic API-token mounting
+disabled and explicitly projects a rotating 600-second token for the `hypergrid-runner-broker`
+audience at `/var/run/secrets/frigga-broker/token`. That token is intended only for the future
+broker identity handshake; no worker API permissions or broker route are supplied here.
 The fakeable client contract supports create/get/activate/delete reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
 server UID. Deletion requests foreground cascading cleanup and returns success only after

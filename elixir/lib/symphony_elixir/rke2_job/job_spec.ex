@@ -12,6 +12,9 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   @api_version "batch/v1"
   @kind "Job"
   @worker_command ["/usr/local/bin/symphony-worker"]
+  @worker_service_account "disposable-worker"
+  @broker_audience "hypergrid-runner-broker"
+  @broker_token_mount "/var/run/secrets/frigga-broker"
   @active_deadline_seconds 3_600
   @backoff_limit 0
   @ttl_seconds_after_finished 86_400
@@ -54,6 +57,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
              "spec" => %{
                "restartPolicy" => "Never",
                "automountServiceAccountToken" => false,
+               "serviceAccountName" => @worker_service_account,
                "securityContext" => %{
                  "runAsNonRoot" => true,
                  "runAsUser" => 10_001,
@@ -84,13 +88,28 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                    },
                    "volumeMounts" => [
                      %{"name" => "workspace", "mountPath" => "/workspace", "readOnly" => false},
-                     %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false}
+                     %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false},
+                     %{"name" => "broker-identity", "mountPath" => @broker_token_mount, "readOnly" => true}
                    ]
                  }
                ],
                "volumes" => [
                  %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}},
-                 %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}}
+                 %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}},
+                 %{
+                   "name" => "broker-identity",
+                   "projected" => %{
+                     "sources" => [
+                       %{
+                         "serviceAccountToken" => %{
+                           "audience" => @broker_audience,
+                           "expirationSeconds" => 600,
+                           "path" => "token"
+                         }
+                       }
+                     ]
+                   }
+                 }
                ]
              }
            }

@@ -228,9 +228,13 @@ schema-v2 `internal_beta`/`rke2` placement. The compiler itself does not verify 
 signature; callers preserve that provenance. It derives the Kubernetes Job name from issue ID,
 generation, and assignment digest; uses a trusted namespace and a digest-pinned image;
 and carries the validated non-secret assignment as structured JSON to a fixed worker
-entrypoint. The Job has only bounded ephemeral `emptyDir` workspace/temp volumes,
+entrypoint. The Job has bounded ephemeral `emptyDir` workspace/temp volumes and one explicit,
+600-second broker-audience projected service-account token for the fixed `disposable-worker`
+service account. Automatic Kubernetes API token mounting remains disabled; the token file is
+mounted read-only at `/var/run/secrets/frigga-broker/token` and is never placed in the Job
+arguments or environment. The Job also has
 fixed CPU/memory limits and deadline, a non-root read-only-root filesystem container,
-default seccomp, dropped capabilities, and no service-account token. Its create/get/delete
+default seccomp, and dropped capabilities. Its create/get/delete
 port is fakeable. A separate activation call requires the recorded allocation UID, reads
 the exact suspended Job, and sends an atomic JSON Patch that tests UID, resource version,
 and suspended state before resuming it. It reads the active Job back; an active exact-UID
@@ -244,5 +248,5 @@ timeouts are bounded. It is not wired into runtime configuration or Orchestrator
 create ambiguity is reconciled by an exact GET before success is reported. Existing Jobs are accepted only when
 their exact assignment identity and spec match; mismatches and unknown deletion targets
 are held, and delete uses the fetched Kubernetes UID as a precondition. No credential source,
-activation caller in Orchestrator, spawn, or Pod integration is included, and no RKE2 cluster or worker execution
-is qualified.
+activation caller in Orchestrator, broker endpoint, ServiceAccount deployment or Pod integration is included,
+and no RKE2 cluster or worker execution is qualified.

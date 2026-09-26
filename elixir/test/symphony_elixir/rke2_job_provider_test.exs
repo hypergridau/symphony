@@ -44,15 +44,34 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert container["securityContext"]["readOnlyRootFilesystem"] == true
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert pod["automountServiceAccountToken"] == false
+    assert pod["serviceAccountName"] == "disposable-worker"
+
+    assert Enum.find(container["volumeMounts"], &(&1["name"] == "broker-identity")) ==
+             %{"name" => "broker-identity", "mountPath" => "/var/run/secrets/frigga-broker", "readOnly" => true}
+
+    assert Enum.find(pod["volumes"], &(&1["name"] == "broker-identity")) == %{
+             "name" => "broker-identity",
+             "projected" => %{
+               "sources" => [
+                 %{
+                   "serviceAccountToken" => %{
+                     "audience" => "hypergrid-runner-broker",
+                     "expirationSeconds" => 600,
+                     "path" => "token"
+                   }
+                 }
+               ]
+             }
+           }
 
     assert pod["volumes"]
-           |> Enum.map(&(Map.keys(&1) |> MapSet.new()))
-           |> Enum.all?(&(&1 == MapSet.new(["name", "emptyDir"])))
+           |> Enum.filter(&Map.has_key?(&1, "emptyDir"))
+           |> length() == 2
 
     refute inspect(job) =~ "DAHLIA_WORK_PACKAGE_RUNNER_TOKEN_VALUE"
     refute inspect(job) =~ "hostPath"
     refute inspect(job) =~ "persistentVolumeClaim"
-    refute inspect(job) =~ "serviceAccountName"
+    refute inspect(job) =~ "GITHUB_TOKEN"
   end
 
   test "rejects wrong placement, changed assignment, and unpinned or invalid trusted config" do
@@ -189,6 +208,8 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
 
     tampered = [
       put_in(created, ["spec", "template", "spec", "automountServiceAccountToken"], true),
+      put_in(created, ["spec", "template", "spec", "serviceAccountName"], "default"),
+      put_in(created, ["spec", "template", "spec", "volumes", Access.at(2), "projected", "sources", Access.at(0), "serviceAccountToken", "audience"], "kubernetes"),
       put_in(created, ["spec", "template", "spec", "hostNetwork"], true),
       put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "securityContext", "allowPrivilegeEscalation"], true),
       put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "image"], "other@sha256:" <> String.duplicate("b", 64))
