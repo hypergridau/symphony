@@ -119,8 +119,14 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp allocate_pending(record, assignment, ports) do
-    case ports.adapter.allocate_or_reconcile(assignment, key(assignment, "allocation"), ports.adapter_context) do
+    context =
+      if is_map(ports.adapter_context),
+        do: Map.put(ports.adapter_context, :claim_binding, record.claim_binding),
+        else: ports.adapter_context
+
+    case ports.adapter.allocate_or_reconcile(assignment, key(assignment, "allocation"), context) do
       {:ok, allocation} -> save_allocation(record, allocation, assignment, ports)
+      {:held, reason} -> {:held, reason, record}
       {:error, _reason} -> {:held, :allocation_reconciliation_failed, record}
       _ -> {:held, :invalid_allocation, record}
     end

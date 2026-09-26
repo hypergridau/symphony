@@ -7,12 +7,14 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   signed cleanup remain separate lifecycle ports. The caller supplies trusted
   provider configuration, a fakeable Kubernetes client, and a client-context
   provider; this module does not load credentials or contact a cluster by itself.
+  The trusted host also supplies its Dahlia registration context. Allocation is
+  not ready until Dahlia acknowledges the exact server-assigned Job UID.
   Allocation leaves Jobs suspended. Activation requires a host-owned guard to
   revalidate admission and credential readiness before any Kubernetes call.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{HTTPClient, JobSpec, Provider}
+  alias SymphonyElixir.RKE2Job.{HTTPClient, JobAllocationRegistration, JobSpec, Provider}
 
   @allocation_version 1
 
@@ -26,9 +28,12 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          :ok <- validate_key(idempotency_key, assignment, :allocation),
          {:ok, ports} <- ports(context),
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         :ok <- registration_prerequisites(context, assignment),
          {:ok, client_context} <- client_context(ports, assignment, :allocate, idempotency_key),
          {:ok, job} <- Provider.ensure(assignment, provider_opts(ports, client_context)),
-         {:ok, id} <- allocation_id(expected, job) do
+         {:ok, id} <- allocation_id(expected, job),
+         {:ok, uid} <- allocation_uid(%{id: id, status: :ready}, expected),
+         :ok <- register_allocation(context, assignment, id, uid) do
       {:ok, %{id: id, status: :ready}}
     else
       {:held, reason} -> {:held, reason}
@@ -98,6 +103,55 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   end
 
   defp validate_key(_key, _assignment, _operation), do: {:error, :invalid_rke2_job_idempotency_key}
+
+  defp register_allocation(context, assignment, id, uid) when is_map(context) do
+    registry = Map.get(context, :allocation_registry, JobAllocationRegistration)
+    binding = Map.get(context, :claim_binding)
+
+    if valid_registry?(registry) and valid_registration_binding?(binding, assignment) do
+      case registry.register(id, uid, binding.reservation_id, Map.get(context, :allocation_registry_context)) do
+        :ok -> :ok
+        {:held, reason} -> {:held, reason}
+        _ -> {:held, :job_allocation_registration_unverified}
+      end
+    else
+      {:held, :job_allocation_registration_unavailable}
+    end
+  rescue
+    _error -> {:held, :job_allocation_registration_unavailable}
+  end
+
+  defp register_allocation(_context, _assignment, _id, _uid), do: {:held, :job_allocation_registration_unavailable}
+
+  defp registration_prerequisites(context, assignment) when is_map(context) do
+    registry = Map.get(context, :allocation_registry, JobAllocationRegistration)
+    binding = Map.get(context, :claim_binding)
+
+    if valid_registry?(registry) and function_exported?(registry, :ready?, 1) and
+         valid_registration_binding?(binding, assignment) and
+         registry.ready?(Map.get(context, :allocation_registry_context)) do
+      :ok
+    else
+      {:held, :job_allocation_registration_unavailable}
+    end
+  rescue
+    _error -> {:held, :job_allocation_registration_unavailable}
+  end
+
+  defp registration_prerequisites(_context, _assignment), do: {:held, :job_allocation_registration_unavailable}
+
+  defp valid_registry?(registry),
+    do: is_atom(registry) and Code.ensure_loaded?(registry) and function_exported?(registry, :register, 4)
+
+  defp valid_registration_binding?(binding, assignment) when is_map(binding) do
+    Map.get(binding, :issue_id) == assignment.lease.issue_id and
+      Map.get(binding, :generation) == assignment.lease.generation and
+      Map.get(binding, :repository_ref) == assignment.repository_ref and
+      Map.get(binding, :runner_id) == assignment.seat and
+      is_binary(Map.get(binding, :reservation_id))
+  end
+
+  defp valid_registration_binding?(_binding, _assignment), do: false
 
   defp ports(context) when is_map(context) do
     client = Map.get(context, :client, HTTPClient)

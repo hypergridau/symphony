@@ -49,6 +49,9 @@ Managed Linux runners additionally require the complete work-package tuple docum
 `DAHLIA_WORK_PACKAGE_ATTESTATION_KEY`, `DAHLIA_RUNNER_ID`, and
 `DAHLIA_MANAGED_PROJECT_PROFILE_ID`. Keep these values out of this workflow file; the runtime
 scrubs the provider token and attestation key before launching Codex.
+The source-only RKE2 adapter's Job UID handoff uses the host's provider origin and runner token
+plus the validated provider claim. It cannot be configured by assignment or workflow prose,
+and an unacknowledged Job remains suspended.
 
 The `DAHLIA_MANAGED_DELEGATION_PATH`, `DAHLIA_MANAGED_DELEGATION_SHA256`,
 `DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519`, and

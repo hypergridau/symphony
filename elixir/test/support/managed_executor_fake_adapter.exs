@@ -50,6 +50,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         events: [],
         faults: Keyword.get(opts, :faults, %{}),
         invalid_allocation_response: Keyword.get(opts, :invalid_allocation_response, false),
+        allocation_held: Keyword.get(opts, :allocation_held, false),
         invalid_result_ack: Keyword.get(opts, :invalid_result_ack, false),
         invalid_abort_result_ack: Keyword.get(opts, :invalid_abort_result_ack, false),
         invalid_abort_cleanup_response: Keyword.get(opts, :invalid_abort_cleanup_response, false),
@@ -413,6 +414,9 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
 
   defp allocation_response(%{invalid_allocation_response: true} = state),
     do: {:unexpected_allocation_response, %{state | invalid_allocation_response: false}}
+
+  defp allocation_response(%{allocation_held: true} = state),
+    do: {{:held, :job_allocation_registration_unverified}, state}
 
   defp allocation_response(state),
     do: fail_once(state, :allocate, {:ok, %{id: "allocation-fixture-1", status: :ready}})
