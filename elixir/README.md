@@ -300,6 +300,11 @@ without a spawn marker cannot prove that no worker started. Old provider claims 
 generation has advanced require a supported forward-only recovery; never restore an old fence,
 reset provider state, or fabricate a terminal head/cleanup receipt.
 
+The managed spawn path retains the exact claim returned after provider and root-witness
+acknowledgement. It rebuilds the current assignment bundle and rejects a missing or mismatched
+claim before child launch, entering the existing paused claim-recovery path. This binding check
+does not yet route the worker through the source-only `ManagedExecutor` or qualify a disposable runner.
+
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
 has already been confirmed. This records a local `Failed attempt` outcome with

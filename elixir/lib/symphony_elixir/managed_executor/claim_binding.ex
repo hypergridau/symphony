@@ -42,12 +42,18 @@ defmodule SymphonyElixir.ManagedExecutor.ClaimBinding do
   ]
 
   @spec from_claim(term(), map()) :: {:ok, map()} | {:error, :provider_claim_invalid}
-  def from_claim(%{reservation: reservation, attestation: attestation, response: response} = claim, assignment)
+  def from_claim(claim, assignment) when is_map(assignment),
+    do: from_claim(claim, assignment, Map.get(assignment, :seat))
+
+  def from_claim(_claim, _assignment), do: {:error, :provider_claim_invalid}
+
+  @spec from_claim(term(), map(), String.t()) :: {:ok, map()} | {:error, :provider_claim_invalid}
+  def from_claim(%{reservation: reservation, attestation: attestation, response: response} = claim, assignment, runner_id)
       when is_map(reservation) and is_map(attestation) and is_map(response) and is_map(assignment) do
     with true <- Enum.sort(Map.keys(claim)) == Enum.sort([:reservation, :attestation, :response]),
          true <- valid_reservation?(reservation),
          true <- valid_attestation?(attestation, reservation),
-         true <- matches_assignment?(reservation, assignment),
+         true <- matches_assignment?(reservation, assignment, runner_id),
          true <- matches_response?(response, reservation) do
       {:ok,
        reservation
@@ -59,7 +65,7 @@ defmodule SymphonyElixir.ManagedExecutor.ClaimBinding do
     end
   end
 
-  def from_claim(_claim, _assignment), do: {:error, :provider_claim_invalid}
+  def from_claim(_claim, _assignment, _runner_id), do: {:error, :provider_claim_invalid}
 
   defp valid_reservation?(reservation) do
     generation = Map.get(reservation, :generation)
@@ -79,13 +85,13 @@ defmodule SymphonyElixir.ManagedExecutor.ClaimBinding do
       Enum.all?(@attestation_fields, fn field -> Map.get(attestation, field) == Map.get(reservation, field) end)
   end
 
-  defp matches_assignment?(reservation, assignment) do
+  defp matches_assignment?(reservation, assignment, runner_id) do
     lease = Map.get(assignment, :lease, %{})
 
     pairs = [
       {:issue_id, Map.get(lease, :issue_id)},
       {:repository_ref, Map.get(assignment, :repository_ref)},
-      {:runner_id, Map.get(assignment, :seat)},
+      {:runner_id, runner_id},
       {:responsible_delegation_id, List.last(Map.get(assignment, :intent_ancestry, []))},
       {:generation, Map.get(lease, :generation)},
       {:session_id, Map.get(lease, :session_id)},
