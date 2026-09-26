@@ -123,7 +123,8 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
 
   defp client_loaded?(client) do
     Code.ensure_loaded?(client) and function_exported?(client, :create_job, 3) and
-      function_exported?(client, :get_job, 3) and function_exported?(client, :activate_job, 5) and
+      function_exported?(client, :get_job, 3) and function_exported?(client, :list_pods, 2) and
+      function_exported?(client, :activate_job, 5) and
       function_exported?(client, :delete_job, 4)
   end
 

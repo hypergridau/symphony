@@ -35,7 +35,7 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   def delete(_assignment, _opts), do: {:error, :invalid_rke2_job_request}
 
-  @doc "Deletes only the exact owned Job allocation recorded by its server UID."
+  @doc "Deletes the exact owned Job and confirms its Pods are absent before reporting cleanup."
   @spec delete_owned(map(), String.t(), keyword()) :: :ok | {:held, term()} | {:error, term()}
   def delete_owned(assignment, uid, opts)
       when is_map(assignment) and is_binary(uid) and byte_size(uid) > 0 and is_list(opts) do
@@ -166,7 +166,7 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     case client.get_job(namespace, name, context) do
       {:error, :not_found} ->
         case missing_job do
-          :already_absent_is_clean -> :ok
+          :already_absent_is_clean -> confirm_pods_absent(client, namespace, name, expected_uid, expected, context)
           :missing_job_is_held -> {:held, :job_not_found_for_delete}
         end
 
@@ -210,7 +210,7 @@ defmodule SymphonyElixir.RKE2Job.Provider do
   defp confirm_deleted(client, namespace, name, uid, expected, context) do
     case client.get_job(namespace, name, context) do
       {:error, :not_found} ->
-        :ok
+        confirm_pods_absent(client, namespace, name, uid, expected, context)
 
       {:ok, job} ->
         cond do
@@ -230,7 +230,7 @@ defmodule SymphonyElixir.RKE2Job.Provider do
   defp reconcile_delete(client, namespace, name, uid, expected, context, reason) do
     case client.get_job(namespace, name, context) do
       {:error, :not_found} ->
-        :ok
+        confirm_pods_absent(client, namespace, name, uid, expected, context)
 
       {:ok, job} ->
         cond do
@@ -252,11 +252,59 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     end
   end
 
+  defp confirm_pods_absent(client, namespace, name, uid, expected, context) do
+    digest = get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-sha256"])
+
+    case client.list_pods(namespace, context) do
+      {:ok, pods} when is_list(pods) ->
+        cond do
+          not Enum.all?(pods, &valid_pod_readback?(&1, namespace)) -> {:held, :invalid_job_pod_readback}
+          Enum.any?(pods, &job_pod?(&1, name, uid, digest)) -> {:held, :job_pod_cleanup_pending}
+          true -> :ok
+        end
+
+      {:error, reason} ->
+        {:held, {:job_pod_readback_failed, reason}}
+
+      _ ->
+        {:held, :invalid_job_pod_readback}
+    end
+  end
+
+  defp valid_pod_readback?(%{"apiVersion" => "v1", "kind" => "Pod", "metadata" => metadata}, namespace)
+       when is_map(metadata) do
+    labels = Map.get(metadata, "labels", %{})
+    owners = Map.get(metadata, "ownerReferences", [])
+
+    metadata["namespace"] == namespace and is_binary(metadata["name"]) and metadata["name"] != "" and
+      is_binary(metadata["uid"]) and metadata["uid"] != "" and is_map(labels) and
+      is_list(owners) and Enum.all?(owners, &is_map/1)
+  end
+
+  defp valid_pod_readback?(_pod, _namespace), do: false
+
+  defp job_pod?(pod, name, uid, digest) do
+    metadata = pod["metadata"]
+    labels = Map.get(metadata, "labels", %{})
+    owners = Map.get(metadata, "ownerReferences", [])
+
+    Enum.any?(owners, fn owner -> owner["uid"] == uid or (owner["kind"] == "Job" and owner["name"] == name) end) or
+      labels["batch.kubernetes.io/controller-uid"] == uid or labels["controller-uid"] == uid or
+      labels["batch.kubernetes.io/job-name"] == name or labels["job-name"] == name or
+      assignment_digest_match?(labels, digest) or
+      String.starts_with?(metadata["name"], name <> "-")
+  end
+
+  defp assignment_digest_match?(labels, digest) do
+    is_binary(digest) and digest != "" and labels["symphony.hypergrid.au/assignment-sha256"] == digest
+  end
+
   defp ports(opts) do
     with client when is_atom(client) <- Keyword.get(opts, :client),
          true <- Code.ensure_loaded?(client),
          true <- function_exported?(client, :create_job, 3),
          true <- function_exported?(client, :get_job, 3),
+         true <- function_exported?(client, :list_pods, 2),
          true <- function_exported?(client, :delete_job, 4) do
       {:ok, client, Keyword.get(opts, :client_context)}
     else

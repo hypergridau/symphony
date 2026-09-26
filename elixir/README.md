@@ -800,12 +800,14 @@ The Job selects a fixed `disposable-worker` service account with automatic API-t
 disabled and explicitly projects a rotating 600-second token for the `hypergrid-runner-broker`
 audience at `/var/run/secrets/frigga-broker/token`. That token is intended only for the future
 broker identity handshake; no worker API permissions or broker route are supplied here.
-The fakeable client contract supports create/get/activate/delete reconciliation; a same-name Job
+The fakeable client contract supports create/get/activate/delete and namespace Pod-list reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
 server UID. Deletion requests foreground cascading cleanup and returns success only after
-the exact Job is absent on readback; an accepted but still visible Job stays pending. A
-separate verifier must still prove that no dependent Pod or workspace remains before a
-provider abort receipt claims runner cleanup. Activation is a separate source-only call
+the exact Job and its Pods are absent on fresh readback; an accepted but still visible Job,
+an owned Pod, or an incomplete/denied Pod list stays pending. The Kubernetes client needs
+namespace-scoped `list pods` permission for this readback. A separate verifier must still
+prove workspace removal and other signed cleanup facts before a provider abort receipt
+claims runner cleanup. Activation is a separate source-only call
 with exact allocation UID and an atomic UID/resource-version/suspended-state JSON Patch
 followed by readback. The caller
 must supply a host-owned guard that rechecks admission and credential readiness;

@@ -45,6 +45,34 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert {:error, {:kubernetes_http_status, 401}} = HTTPClient.get_job(@namespace, @name, context())
   end
 
+  test "Pod list reads the exact namespace and rejects denied or incomplete readback" do
+    pod = %{"apiVersion" => "v1", "kind" => "Pod", "metadata" => %{"name" => "worker-abc", "namespace" => @namespace, "uid" => "pod-uid"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.method == "GET"
+      assert conn.request_path == "/api/v1/namespaces/#{@namespace}/pods"
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer synthetic.test-token"]
+      json_response(conn, 200, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => %{"resourceVersion" => "17"}, "items" => [pod]})
+    end)
+
+    assert {:ok, [^pod]} = HTTPClient.list_pods(@namespace, context())
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => %{"resourceVersion" => "18", "continue" => "next-page"}, "items" => []})
+    end)
+
+    assert {:error, :invalid_kubernetes_pod_list_response} = HTTPClient.list_pods(@namespace, context())
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => %{}, "items" => []})
+    end)
+
+    assert {:error, :invalid_kubernetes_pod_list_response} = HTTPClient.list_pods(@namespace, context())
+
+    Req.Test.expect(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 403, "denied") end)
+    assert {:error, {:kubernetes_http_status, 403}} = HTTPClient.list_pods(@namespace, context())
+  end
+
   test "delete uses the server UID and foreground cascading cleanup" do
     Req.Test.expect(__MODULE__, fn conn ->
       assert conn.method == "DELETE"
