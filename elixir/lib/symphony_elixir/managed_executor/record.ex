@@ -70,11 +70,11 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :credential_lease_invalid
   ]
 
-  @spec load_or_create(module(), String.t(), map(), term()) :: {:ok, map()} | {:error, term()}
-  def load_or_create(journal, key, assignment, context) do
+  @spec load_or_create(module(), String.t(), map(), map(), term()) :: {:ok, map()} | {:error, term()}
+  def load_or_create(journal, key, assignment, claim_binding, context) do
     case journal.load(key, context) do
-      {:ok, nil} -> create_or_load(journal, key, assignment, context)
-      {:ok, record} -> verify(record, key, assignment)
+      {:ok, nil} -> create_or_load(journal, key, assignment, claim_binding, context)
+      {:ok, record} -> verify(record, key, assignment, claim_binding)
       {:error, _reason} -> {:error, :lifecycle_journal_read_failed}
       _ -> {:error, :invalid_journal_response}
     end
@@ -82,7 +82,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   @spec checkpoint(map(), atom(), module(), term(), map()) :: {:ok, map()} | {:error, term()}
   def checkpoint(record, phase, journal, context, attrs) do
-    base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
+    base_keys = [:schema_version, :key, :assignment_digest, :claim_binding, :phase, :version, :credential_lease]
 
     keys = base_keys ++ Map.fetch!(@phase_fields, phase)
 
@@ -258,11 +258,12 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   defp valid_head?(head),
     do: is_binary(head) and Regex.match?(~r/\A(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\z/, head)
 
-  defp create_or_load(journal, key, assignment, context) do
+  defp create_or_load(journal, key, assignment, claim_binding, context) do
     initial = %{
-      schema_version: 5,
+      schema_version: 6,
       key: key,
       assignment_digest: assignment.sha256,
+      claim_binding: claim_binding,
       phase: :planned,
       version: 0,
       credential_lease: nil
@@ -270,40 +271,62 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
     case journal.compare_and_swap(key, 0, initial, context) do
       :ok -> {:ok, initial}
-      {:error, :conflict} -> load_existing(journal, key, assignment, context)
+      {:error, :conflict} -> load_existing(journal, key, assignment, claim_binding, context)
       {:error, _reason} -> {:error, :lifecycle_journal_write_failed}
       _ -> {:error, :invalid_journal_write_response}
     end
   end
 
-  defp load_existing(journal, key, assignment, context) do
+  defp load_existing(journal, key, assignment, claim_binding, context) do
     case journal.load(key, context) do
-      {:ok, record} when is_map(record) -> verify(record, key, assignment)
+      {:ok, record} when is_map(record) -> verify(record, key, assignment, claim_binding)
       _ -> {:error, :journal_create_race_unresolved}
     end
   end
 
   defp verify(
-         %{schema_version: 5, key: key, assignment_digest: digest, phase: phase, version: version} = record,
+         %{
+           schema_version: 6,
+           key: key,
+           assignment_digest: digest,
+           claim_binding: binding,
+           phase: phase,
+           version: version
+         } = record,
          key,
-         assignment
+         assignment,
+         claim_binding
        )
        when is_binary(digest) and phase in @phases and is_integer(version) and version >= 0 do
     cond do
       digest != assignment.sha256 -> {:error, :assignment_replay_mismatch}
+      binding != claim_binding -> {:error, :provider_claim_replay_mismatch}
       not valid_payload?(record, assignment) -> {:error, :invalid_lifecycle_journal}
       true -> {:ok, record}
     end
   end
 
-  defp verify(_record, _key, _assignment), do: {:error, :invalid_lifecycle_journal}
+  defp verify(%{schema_version: 5, key: key, assignment_digest: digest} = record, key, assignment, _claim_binding) do
+    if digest == assignment.sha256 and Map.get(record, :phase) == :terminal and
+         is_integer(Map.get(record, :version)) and Map.get(record, :version) >= 0 and
+         valid_payload?(record, assignment),
+       do: {:ok, record},
+       else: {:error, :legacy_claim_requires_reconciliation}
+  end
+
+  defp verify(_record, _key, _assignment, _claim_binding), do: {:error, :invalid_lifecycle_journal}
 
   defp valid_payload?(record, assignment) do
     base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
+    base_keys = if record.schema_version == 6, do: [:claim_binding | base_keys], else: base_keys
 
     valid_phase_keys?(record, base_keys) and valid_allocation_phase?(record) and
       valid_checkout_phase?(record, assignment) and valid_result_phase?(record, assignment) and
-      valid_reported_phase?(record) and valid_cleanup_phase?(record, assignment) and
+      valid_remaining_phases?(record, assignment)
+  end
+
+  defp valid_remaining_phases?(record, assignment) do
+    valid_reported_phase?(record) and valid_cleanup_phase?(record, assignment) and
       valid_abort_phase?(record, assignment) and valid_credential_lease_phase?(record, assignment) and
       valid_lease_quarantine_phase?(record)
   end
