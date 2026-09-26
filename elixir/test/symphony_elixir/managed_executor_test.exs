@@ -22,9 +22,9 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assert Enum.map(events, &elem(&1, 0)) == [
              :allocate_or_reconcile,
-             :prepare_checkout,
              :acquire_credential_lease,
              :renew_credential_lease,
+             :prepare_checkout,
              :execute,
              :publish_or_reconcile_result,
              :revoke_credential_lease,
@@ -32,8 +32,9 @@ defmodule SymphonyElixir.ManagedExecutorTest do
              :verify_terminal_cleanup
            ]
 
-    {:prepare_checkout, _allocation_id, intent, checkout_key} = Enum.at(events, 1)
+    {:prepare_checkout, _allocation_id, intent, lease_ref, checkout_key} = Enum.at(events, 3)
     assert intent == %{repository_ref: "hypergridau/symphony", base_ref: "refs/remotes/origin/main", branch: "codex/hgs729-fixture"}
+    assert lease_ref == "#{assignment.sha256}:credential-acquire"
     assert checkout_key == "#{assignment.sha256}:checkout"
     assert assignment.context_secret_refs == ["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"]
     refute Map.has_key?(assignment, :runner_token)
@@ -75,22 +76,17 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending} = blocked} =
              run_claimed(assignment, opts)
 
-    assert blocked.checkout == %{
-             assignment_digest: assignment.sha256,
-             repository_ref: assignment.repository_ref,
-             base_ref: assignment.base_ref,
-             branch: assignment.branch,
-             head: "0123456789abcdef0123456789abcdef01234567"
-           }
+    assert blocked.checkout == nil
 
     key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
     assert {:ok, ^blocked} = FakeJournal.load(key, journal)
     events = FakeAdapter.events(adapter)
     assert Enum.count(events, &(elem(&1, 0) == :acquire_credential_lease)) == 1
+    refute Enum.any?(events, &(elem(&1, 0) == :prepare_checkout))
     refute Enum.any?(events, &(elem(&1, 0) in [:renew_credential_lease, :execute, :revoke_credential_lease]))
     assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = run_claimed(assignment, opts)
 
-    changed = %{blocked | version: blocked.version + 1, checkout: %{blocked.checkout | head: "wrong-head"}}
+    changed = %{blocked | version: blocked.version + 1, checkout: %{head: "wrong-head"}}
     assert :ok = FakeJournal.compare_and_swap(key, blocked.version, changed, journal)
     assert {:error, :invalid_lifecycle_journal} = run_claimed(assignment, opts)
   end
@@ -111,7 +107,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert {:blocked, :credential_lease_invalid, %{phase: :abort_cleanup_pending} = blocked} =
              run_claimed(assignment, opts)
 
-    assert blocked.checkout.head == "0123456789abcdef0123456789abcdef01234567"
+    assert blocked.checkout == nil
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
     assert FakeAdapter.active_credential_refs(adapter) == []
 
@@ -129,7 +125,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     events = FakeAdapter.events(adapter)
     refute Enum.any?(events, &(elem(&1, 0) == :execute))
     assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease_request)) == 1
-    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 1
+    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 2
     assert FakeAdapter.active_credential_refs(adapter) == []
     assert {:blocked, :credential_lease_invalid, %{phase: :abort_cleanup_pending}} = run_claimed(assignment, opts)
   end
@@ -196,7 +192,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assignment = assignment()
 
-    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending} = blocked} =
+    assert {:held, :post_checkout_cleanup_required, %{phase: :execution_started} = blocked} =
              run_claimed(assignment, opts)
 
     assert blocked.checkout.head == "0123456789abcdef0123456789abcdef01234567"
@@ -204,8 +200,9 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     events = FakeAdapter.events(adapter)
     assert Enum.any?(events, &(elem(&1, 0) == :revoke_credential_lease))
     refute Enum.any?(events, &(elem(&1, 0) == :execute))
+    refute Enum.any?(events, &(elem(&1, 0) in [:publish_or_reconcile_abort_result, :ensure_abort_cleanup]))
     assert FakeAdapter.active_credential_refs(adapter) == []
-    assert {:blocked, :credential_lease_expired, %{phase: :abort_cleanup_pending}} = run_claimed(assignment, opts)
+    assert {:held, :execution_outcome_unknown, %{phase: :execution_started}} = run_claimed(assignment, opts)
   end
 
   test "renewal denial revokes the lease and blocks before execution" do
@@ -214,7 +211,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assert {:blocked, :credential_lease_denied, %{phase: :abort_cleanup_pending}} = run_claimed(assignment, opts)
     events = FakeAdapter.events(adapter)
-    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 2
+    assert Enum.count(events, &(elem(&1, 0) == :revoke_credential_lease)) == 3
     refute Enum.any?(events, &(elem(&1, 0) == :execute))
   end
 
@@ -365,7 +362,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
 
     assert {:held, :invalid_allocation, %{phase: :allocation_pending}} = run_claimed(assignment, opts)
     assert {:ok, record} = FakeJournal.load(key, journal)
-    assert record.schema_version == 6
+    assert record.schema_version == 7
     assert record.claim_binding.reservation_id == claim.reservation.reservation_id
     assert record.claim_binding.projection_id == claim.reservation.projection_id
     assert record.claim_binding.generation == assignment.lease.generation
@@ -411,6 +408,21 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert FakeAdapter.events(adapter) == []
   end
 
+  test "holds a v6 in-flight journal instead of interpreting its checkout-first phases as v7" do
+    {adapter, journal, opts} = ports(invalid_allocation_response: true)
+    assignment = assignment()
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+
+    assert {:held, :invalid_allocation, %{phase: :allocation_pending}} = run_claimed(assignment, opts)
+    assert {:ok, record} = FakeJournal.load(key, journal)
+    legacy = %{record | schema_version: 6, version: record.version + 1}
+    assert :ok = FakeJournal.compare_and_swap(key, record.version, legacy, journal)
+
+    event_count = length(FakeAdapter.events(adapter))
+    assert {:error, :legacy_claim_requires_reconciliation} = run_claimed(assignment, opts)
+    assert length(FakeAdapter.events(adapter)) == event_count
+  end
+
   test "reverifies valid v5 terminal evidence without rewriting its unbound journal" do
     {adapter, journal, opts} = ports()
     assignment = assignment()
@@ -425,6 +437,29 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert {:ok, %{schema_version: 5, phase: :terminal}} = run_claimed(assignment, opts)
     assert length(FakeAdapter.events(adapter)) == prior_count + 1
     assert {:ok, ^legacy} = FakeJournal.load(key, journal)
+  end
+
+  test "reverifies v6 terminal evidence with its original provider claim binding" do
+    {adapter, journal, opts} = ports()
+    assignment = assignment()
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+
+    assert {:ok, %{phase: :terminal}} = run_claimed(assignment, opts)
+    assert {:ok, record} = FakeJournal.load(key, journal)
+    legacy = %{record | schema_version: 6, version: record.version + 1}
+    assert :ok = FakeJournal.compare_and_swap(key, record.version, legacy, journal)
+
+    prior_count = length(FakeAdapter.events(adapter))
+    assert {:ok, %{schema_version: 6, phase: :terminal}} = run_claimed(assignment, opts)
+    assert length(FakeAdapter.events(adapter)) == prior_count + 1
+
+    changed =
+      provider_claim(assignment)
+      |> put_in([:reservation, :reservation_id], "reservation-other")
+      |> put_in([:attestation, :reservation_id], "reservation-other")
+
+    assert {:error, :provider_claim_replay_mismatch} =
+             ManagedExecutor.run(assignment, Keyword.put(opts, :provider_claim, changed))
   end
 
   test "a schema v1 lifecycle record is rejected rather than replayed without a credential lease" do
@@ -521,22 +556,62 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert Enum.count(events, &(elem(&1, 0) == :reconcile_execution)) == 1
   end
 
-  test "cleans up a checkout intent mismatch without executing" do
+  test "holds a mismatched checkout receipt without asserting no checkout" do
     {adapter, _journal, opts} = ports(checkout_mismatch: true)
     assignment = assignment()
 
-    assert {:blocked, :checkout_intent_mismatch, record} = run_claimed(assignment, opts)
-    assert record.phase == :abort_cleanup_pending
-    assert record.checkout == nil
-    assert %{pre_execution_result: result, abort_result_ref: result_ref} = record
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} = run_claimed(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    refute Enum.any?(events, &(elem(&1, 0) in [:execute, :ensure_abort_cleanup, :publish_or_reconcile_abort_result]))
+    assert FakeAdapter.active_credential_refs(adapter) == []
+  end
 
-    assert result.outcome == :blocked
-    assert result.abort_reason == :checkout_intent_mismatch
-    refute Map.has_key?(result, :accepted_head)
-    assert result_ref == "abort-result-fixture-1"
-    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
-    assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :ensure_abort_cleanup))
-    assert Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :publish_or_reconcile_abort_result))
+  test "an uncertain checkout result retains the claim for reconciliation" do
+    {adapter, _journal, opts} = ports(checkout_uncertain: true)
+    assignment = assignment()
+
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} = run_claimed(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    refute Enum.any?(events, &(elem(&1, 0) in [:execute, :ensure_abort_cleanup, :publish_or_reconcile_abort_result]))
+    assert FakeAdapter.active_credential_refs(adapter) == []
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} = run_claimed(assignment, opts)
+    assert Enum.count(FakeAdapter.events(adapter), &(elem(&1, 0) == :prepare_checkout)) == 1
+  end
+
+  test "retries failed revocation of an uncertain checkout without preparing it again" do
+    {adapter, _journal, opts} = ports(checkout_uncertain: true, faults: %{credential_revoke: 1})
+    assignment = assignment()
+
+    assert {:held, :credential_lease_revocation_failed, %{phase: :checkout_outcome_unknown}} =
+             run_claimed(assignment, opts)
+
+    assert FakeAdapter.active_credential_refs(adapter) == ["#{assignment.sha256}:credential-acquire"]
+
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} =
+             run_claimed(assignment, opts)
+
+    assert FakeAdapter.active_credential_refs(adapter) == []
+    events = FakeAdapter.events(adapter)
+    assert Enum.count(events, &(elem(&1, 0) == :prepare_checkout)) == 1
+    refute Enum.any?(events, &(elem(&1, 0) in [:execute, :publish_or_reconcile_abort_result]))
+  end
+
+  test "an expired lease after an uncertain checkout never claims no checkout" do
+    {adapter, journal, opts} = ports(checkout_uncertain: true)
+    assignment = assignment()
+
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown} = pending} =
+             run_claimed(assignment, opts)
+
+    key = "#{assignment.lease.issue_id}:#{assignment.lease.generation}"
+    expired_lease = %{pending.credential_lease | expires_at_ms: System.system_time(:millisecond) - 1}
+    expired = %{pending | version: pending.version + 1, credential_lease: expired_lease}
+    assert :ok = FakeJournal.compare_and_swap(key, pending.version, expired, journal)
+
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} = run_claimed(assignment, opts)
+    events = FakeAdapter.events(adapter)
+    assert Enum.any?(events, &(elem(&1, 0) == :revoke_credential_lease))
+    refute Enum.any?(events, &(elem(&1, 0) in [:ensure_abort_cleanup, :publish_or_reconcile_abort_result]))
   end
 
   test "records pre-execution cleanup debt and retries uncertain cleanup without re-preparing checkout" do
@@ -567,14 +642,14 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert Enum.count(replay_events, &(elem(&1, 0) == :publish_or_reconcile_abort_result)) == 1
   end
 
-  test "rejects a noncanonical checkout head and cleans up before execution" do
+  test "rejects a noncanonical checkout head without asserting no checkout" do
     {adapter, _journal, opts} = ports(checkout_head: String.duplicate("a", 41))
     assignment = assignment()
 
-    assert {:blocked, :checkout_intent_mismatch, %{phase: :abort_cleanup_pending}} =
+    assert {:held, :checkout_outcome_unknown, %{phase: :checkout_outcome_unknown}} =
              run_claimed(assignment, opts)
 
-    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) in [:execute, :ensure_abort_cleanup, :publish_or_reconcile_abort_result]))
   end
 
   test "reconciles a lost blocked-result acknowledgement before attempting cleanup" do
@@ -584,6 +659,7 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert {:held, :abort_result_reconciliation_failed, %{phase: :abort_result_pending}} =
              run_claimed(assignment, opts)
 
+    assert FakeAdapter.active_credential_refs(adapter) == []
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :ensure_abort_cleanup))
 
     assert {:blocked, :checkout_preparation_failed, %{phase: :abort_cleanup_pending}} =
@@ -594,6 +670,23 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert result_keys == ["#{assignment.sha256}:abort-result", "#{assignment.sha256}:abort-result"]
     assert Enum.count(events, &(elem(&1, 0) == :ensure_abort_cleanup)) == 1
     refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :execute))
+  end
+
+  test "holds abort publication until an issued checkout lease is revoked" do
+    {adapter, _journal, opts} = ports(checkout_failure: true, faults: %{credential_revoke: 1})
+    assignment = assignment()
+
+    assert {:held, :credential_lease_revocation_failed, %{phase: :abort_pending}} =
+             run_claimed(assignment, opts)
+
+    assert FakeAdapter.active_credential_refs(adapter) == ["#{assignment.sha256}:credential-acquire"]
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :publish_or_reconcile_abort_result))
+
+    assert {:blocked, :checkout_preparation_failed, %{phase: :abort_cleanup_pending}} =
+             run_claimed(assignment, opts)
+
+    assert FakeAdapter.active_credential_refs(adapter) == []
+    assert Enum.count(FakeAdapter.events(adapter), &(elem(&1, 0) == :prepare_checkout)) == 1
   end
 
   test "retries a malformed blocked-result acknowledgement before cleanup" do

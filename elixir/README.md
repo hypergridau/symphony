@@ -769,11 +769,20 @@ callbacks; it does not implement a broker or issue credentials. Admission stays 
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
 
-The source-only executor journal v5 retains the validated checkout receipt when a credential
-lease is denied, expires, or is invalid before execution. Checkout preparation and intent
-failures retain an explicit absent checkout instead. Replay rejects a changed checkout binding.
-The abort result remains pending cleanup; this journal fact is not a provider release receipt
-or proof that a repository checkout was absent on the host.
+The source-only executor journal v7 acquires and renews the assignment credential before
+checkout and passes its opaque lease handle to the checkout adapter. A denied or invalid lease
+therefore has no accepted checkout in the journal. The adapter must reconcile repeated checkout
+calls by their stable idempotency key after a lost acknowledgement. It may report `:no_checkout`
+only after proving that no checkout was accepted and no workspace remains. Ambiguous or invalid
+checkout responses retain the provider claim for reconciliation and cannot take the no-checkout
+abort path. Their unknown outcome is journaled before revocation so replay cannot prepare a
+second checkout. A failed revocation is retried on replay. A pre-execution abort revokes any
+issued lease before publishing its blocked result; a failed revocation keeps the abort pending.
+An expired lease after checkout is revoked
+but held for a separate cleanup receipt; it cannot be called a pre-execution no-checkout abort.
+Nonterminal v5/v6 journals require
+reconciliation before v7 execution; valid legacy terminal evidence remains replayable.
+These source rules do not themselves prove a provider release or a disposable runner.
 
 The HGS-729 RKE2 provider is a separate source-only port. Callers must pass an assignment
 bundle built from an upstream signature-verified manifest entry. The provider validates
