@@ -121,11 +121,44 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   @doc "Accepts exact owned Jobs in suspended or active state for cleanup only."
   @spec owned_job_for_cleanup?(map(), map()) :: boolean()
   def owned_job_for_cleanup?(job, expected) when is_map(job) and is_map(expected) do
-    owned_job?(job, expected) or
-      owned_job?(job, put_in(expected, ["spec", "suspend"], false))
+    case cleanup_job_metadata(job) do
+      {:ok, cleanup_job} ->
+        owned_job?(cleanup_job, expected) or
+          owned_job?(cleanup_job, put_in(expected, ["spec", "suspend"], false))
+
+      _ ->
+        false
+    end
   end
 
   def owned_job_for_cleanup?(_job, _expected), do: false
+
+  defp cleanup_job_metadata(%{"metadata" => metadata} = job) when is_map(metadata) do
+    case Map.fetch(metadata, "deletionTimestamp") do
+      :error ->
+        {:ok, job}
+
+      {:ok, timestamp} ->
+        grace = Map.get(metadata, "deletionGracePeriodSeconds")
+        finalizers = Map.get(metadata, "finalizers")
+
+        if valid_deletion_timestamp?(timestamp) and
+             (is_nil(grace) or (is_integer(grace) and grace >= 0)) and
+             finalizers in [nil, [], ["foregroundDeletion"]] do
+          {:ok, put_in(job, ["metadata"], Map.drop(metadata, ["deletionTimestamp", "deletionGracePeriodSeconds", "finalizers"]))}
+        else
+          :error
+        end
+    end
+  end
+
+  defp cleanup_job_metadata(_job), do: :error
+
+  defp valid_deletion_timestamp?(value) when is_binary(value) do
+    match?({:ok, _, _}, DateTime.from_iso8601(value))
+  end
+
+  defp valid_deletion_timestamp?(_value), do: false
 
   @spec labels(map()) :: map()
   def labels(assignment) do

@@ -56,8 +56,16 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
 
   defp pending_delete(state, namespace, name, uid) do
     case Map.get(state.jobs, {namespace, name}) do
-      %{"metadata" => %{"uid" => ^uid}} -> {:ok, %{state | deletes: [uid | state.deletes]}}
-      _ -> {{:error, :uid_precondition_failed}, state}
+      %{"metadata" => %{"uid" => ^uid}} = job ->
+        terminating =
+          job
+          |> put_in(["metadata", "deletionTimestamp"], "2026-09-27T00:00:00Z")
+          |> put_in(["metadata", "finalizers"], ["foregroundDeletion"])
+
+        {:ok, %{state | jobs: Map.put(state.jobs, {namespace, name}, terminating), deletes: [uid | state.deletes]}}
+
+      _ ->
+        {{:error, :uid_precondition_failed}, state}
     end
   end
 
