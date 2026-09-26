@@ -1,14 +1,14 @@
 defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   @moduledoc """
-  Allocation-only bridge from an assignment bundle to the RKE2 Job provider.
+  Source-only bridge from an assignment bundle to the RKE2 Job provider.
 
   This module deliberately does not implement the full ManagedExecutor adapter
   behavior. Credential leasing, checkout, execution, result publication, and
   signed cleanup remain separate lifecycle ports. The caller supplies trusted
   provider configuration, a fakeable Kubernetes client, and a client-context
   provider; this module does not load credentials or contact a cluster by itself.
-  Jobs stay suspended until a later lifecycle slice defines and authorizes an
-  explicit activation boundary.
+  Allocation leaves Jobs suspended. Activation requires a host-owned guard to
+  revalidate admission and credential readiness before any Kubernetes call.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
@@ -34,6 +34,40 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  @doc "Activates only the exact allocated UID after caller-owned admission and credential checks."
+  @spec activate_owned(allocation(), map(), String.t(), term()) :: {:ok, map()} | {:held, term()} | {:error, term()}
+  def activate_owned(allocation, assignment, idempotency_key, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :activate),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, uid} <- allocation_uid(allocation, expected),
+         :ok <- authorize_activation(context, assignment, allocation, idempotency_key),
+         {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key) do
+      Provider.activate_owned(assignment, uid, provider_opts(ports, client_context))
+    else
+      {:held, reason} -> {:held, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp authorize_activation(context, assignment, allocation, idempotency_key) when is_map(context) do
+    guard = Map.get(context, :activation_guard)
+
+    if is_atom(guard) and Code.ensure_loaded?(guard) and function_exported?(guard, :authorize, 4) do
+      case guard.authorize(assignment, allocation, idempotency_key, Map.get(context, :activation_guard_context)) do
+        :ok -> :ok
+        {:held, reason} -> {:held, reason}
+        {:error, reason} -> {:held, {:activation_authorization_failed, reason}}
+        _ -> {:held, :invalid_activation_authorization_response}
+      end
+    else
+      {:held, :activation_guard_missing}
+    end
+  rescue
+    _error -> {:held, :activation_authorization_failed}
   end
 
   @doc "Deletes only the exact Job UID recorded in a prior allocation."
@@ -89,7 +123,8 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
 
   defp client_loaded?(client) do
     Code.ensure_loaded?(client) and function_exported?(client, :create_job, 3) and
-      function_exported?(client, :get_job, 3) and function_exported?(client, :delete_job, 4)
+      function_exported?(client, :get_job, 3) and function_exported?(client, :activate_job, 5) and
+      function_exported?(client, :delete_job, 4)
   end
 
   defp context_provider_loaded?(provider) do

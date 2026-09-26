@@ -25,6 +25,19 @@ defmodule SymphonyElixir.RKE2JobFakeClientContext do
   end
 end
 
+defmodule SymphonyElixir.RKE2JobFakeActivationGuard do
+  @behaviour SymphonyElixir.RKE2Job.ActivationGuard
+
+  @impl true
+  def authorize(assignment, allocation, idempotency_key, agent) do
+    Agent.get_and_update(agent, fn state ->
+      event = {:authorize, assignment.sha256, allocation.id, idempotency_key}
+      result = if Map.get(state, :activation_denied), do: {:held, :synthetic_activation_denial}, else: :ok
+      {result, %{state | events: [event | state.events]}}
+    end)
+  end
+end
+
 defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
   use ExUnit.Case, async: true
 
@@ -118,6 +131,107 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
 
     assert :ok = ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+  end
+
+  test "activation changes only the allocated suspended Job and replays without another patch", context do
+    assignment = assignment()
+    opts = adapter_context(context)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, active} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert get_in(active, ["spec", "suspend"]) == false
+    assert Agent.get(context.client, &Map.get(&1, :activations)) == 1
+
+    assert {:ok, ^active} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert Agent.get(context.client, &Map.get(&1, :activations)) == 1
+    assert :ok = ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+  end
+
+  test "activation holds a replacement UID, spec drift, or failed patch without starting it", context do
+    assignment = assignment()
+    opts = adapter_context(context)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    [1, namespace, name, _uid, _digest] = allocation_payload(allocation)
+    job_key = {namespace, name}
+    original = Agent.get(context.client, &Map.fetch!(&1.jobs, job_key))
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key, "metadata", "uid"], "uid-replacement"))
+
+    assert {:held, :job_identity_or_spec_mismatch} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key], put_in(original, ["spec", "backoffLimit"], 7)))
+
+    assert {:held, :job_identity_or_spec_mismatch} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    Agent.update(context.client, fn state ->
+      state |> put_in([:jobs, job_key], original) |> Map.put(:activate_error, :timeout)
+    end)
+
+    assert {:held, {:job_activation_outcome_uncertain, :timeout}} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert get_in(Agent.get(context.client, &Map.fetch!(&1.jobs, job_key)), ["spec", "suspend"]) == true
+    assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+  end
+
+  test "activation rejects forged stage and denied client context", context do
+    assignment = assignment()
+    opts = adapter_context(context)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:error, :invalid_rke2_job_idempotency_key} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.credentials, &%{&1 | denied: true})
+
+    assert {:error, :rke2_job_client_context_unavailable} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+  end
+
+  test "activation requires an explicit authorization port and holds its denial before client context", context do
+    assignment = assignment()
+    opts = adapter_context(context)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:held, :activation_guard_missing} =
+             ManagedExecutorAdapter.activate_owned(
+               allocation,
+               assignment,
+               key(assignment, :activate),
+               Map.delete(opts, :activation_guard)
+             )
+
+    Agent.update(context.credentials, &Map.put(&1, :activation_denied, true))
+
+    assert {:held, :synthetic_activation_denial} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+
+    assert Agent.get(
+             context.credentials,
+             &Enum.count(&1.events, fn
+               {stage, _, _} -> stage == :activate
+               _ -> false
+             end)
+           ) == 0
   end
 
   test "reconciles a DELETE timeout after readback proves the allocated Job is absent", context do
@@ -220,6 +334,8 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
       client: RKE2JobFakeClient,
       client_context_provider: SymphonyElixir.RKE2JobFakeClientContext,
       client_context_provider_context: context.credentials,
+      activation_guard: SymphonyElixir.RKE2JobFakeActivationGuard,
+      activation_guard_context: context.credentials,
       config: config()
     }
   end

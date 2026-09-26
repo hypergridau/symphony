@@ -12,6 +12,29 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
   end
 
   @impl true
+  def activate_job(namespace, name, uid, resource_version, agent) do
+    Agent.get_and_update(agent, &activate_job_state(&1, {namespace, name}, uid, resource_version))
+  end
+
+  defp activate_job_state(state, key, uid, resource_version) do
+    case Map.get(state.jobs, key) do
+      %{"metadata" => %{"uid" => ^uid, "resourceVersion" => ^resource_version}, "spec" => %{"suspend" => true}} = job ->
+        activate_matching_job(state, key, job)
+
+      _ ->
+        {{:error, :activation_precondition_failed}, state}
+    end
+  end
+
+  defp activate_matching_job(%{activate_error: reason} = state, _key, _job) when not is_nil(reason),
+    do: {{:error, reason}, state}
+
+  defp activate_matching_job(state, key, job) do
+    active = job |> put_in(["spec", "suspend"], false) |> put_in(["metadata", "resourceVersion"], "18")
+    {{:ok, active}, state |> put_in([:jobs, key], active) |> Map.update(:activations, 1, &(&1 + 1))}
+  end
+
+  @impl true
   def delete_job(namespace, name, uid, agent) do
     Agent.get_and_update(agent, fn state ->
       case {state.delete_error, Map.get(state, :delete_commit?, false)} do
