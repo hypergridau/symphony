@@ -38,6 +38,19 @@ defmodule SymphonyElixir.RKE2JobFakeActivationGuard do
   end
 end
 
+defmodule SymphonyElixir.RKE2JobFakeAllocationRegistry do
+  @spec ready?(term()) :: boolean()
+  def ready?(agent), do: is_pid(agent) and Process.alive?(agent)
+
+  @spec register(String.t(), String.t(), String.t(), pid()) :: :ok | {:held, atom()}
+  def register(allocation_id, uid, reservation_id, agent) do
+    Agent.get_and_update(agent, fn state ->
+      event = {allocation_id, uid, reservation_id}
+      {state.result, %{state | events: [event | state.events]}}
+    end)
+  end
+end
+
 defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
   use ExUnit.Case, async: true
 
@@ -63,7 +76,9 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     {:ok, credentials} =
       Agent.start_link(fn -> %{client_context: client, events: [], denied: false} end)
 
-    %{client: client, credentials: credentials}
+    {:ok, registration} = Agent.start_link(fn -> %{events: [], result: :ok} end)
+
+    %{client: client, credentials: credentials, registration: registration}
   end
 
   test "allocates through the provider and records exact namespace, name, digest, and UID", context do
@@ -83,6 +98,55 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert [{:allocate, digest, idempotency_key}] = Agent.get(context.credentials, &Enum.reverse(&1.events))
     assert digest == assignment.sha256
     assert idempotency_key == key(assignment, :allocation)
+    assert [{allocation_id, ^uid, "reservation-1"}] = Agent.get(context.registration, &Enum.reverse(&1.events))
+    assert allocation_id == allocation.id
+  end
+
+  test "holds a suspended Job until Dahlia confirms its exact UID", context do
+    Agent.update(context.registration, &%{&1 | result: {:held, :job_allocation_registration_unverified}})
+    assignment = assignment()
+
+    assert {:held, :job_allocation_registration_unverified} =
+             ManagedExecutorAdapter.allocate_or_reconcile(
+               assignment,
+               key(assignment, :allocation),
+               adapter_context(context)
+             )
+
+    assert Agent.get(context.client, & &1.creates) == 1
+    Agent.update(context.registration, &%{&1 | result: :ok})
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(
+               assignment,
+               key(assignment, :allocation),
+               adapter_context(context)
+             )
+
+    assert allocation.status == :ready
+    assert Agent.get(context.client, & &1.creates) == 1
+    assert length(Agent.get(context.registration, & &1.events)) == 2
+  end
+
+  test "holds when the validated provider claim is absent", context do
+    assignment = assignment()
+    opts = Map.delete(adapter_context(context), :claim_binding)
+
+    assert {:held, :job_allocation_registration_unavailable} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.registration, & &1.events) == []
+    assert Agent.get(context.client, & &1.creates) == 0
+  end
+
+  test "does not create a Job without registration transport", context do
+    assignment = assignment()
+    opts = Map.delete(adapter_context(context), :allocation_registry_context)
+
+    assert {:held, :job_allocation_registration_unavailable} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.client, & &1.creates) == 0
   end
 
   test "reconciles an ambiguous create by exact provider readback", context do
@@ -336,6 +400,15 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
       client_context_provider_context: context.credentials,
       activation_guard: SymphonyElixir.RKE2JobFakeActivationGuard,
       activation_guard_context: context.credentials,
+      allocation_registry: SymphonyElixir.RKE2JobFakeAllocationRegistry,
+      allocation_registry_context: context.registration,
+      claim_binding: %{
+        reservation_id: "reservation-1",
+        issue_id: "issue-1",
+        generation: 4,
+        repository_ref: "hypergridau/symphony",
+        runner_id: "runner-17"
+      },
       config: config()
     }
   end

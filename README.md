@@ -21,6 +21,11 @@ Before managed source execution, the local runtime prepares the authorized task 
 the actual checkout against the execution generation. Conflicting retained work is preserved for
 recovery. Worker prompts receive the prepared identity; branch preparation belongs to the runtime.
 
+The source-only disposable RKE2 adapter now registers the server-assigned Job UID with Dahlia
+before reporting an allocation ready. The trusted host supplies the validated provider claim,
+provider origin and runner token; a denied or uncertain registration leaves the Job suspended.
+This handoff is not a deployed disposable worker or credential route.
+
 An enforced managed pool consumes an Ed25519-signed, digest-pinned,
 operator-issued delegation manifest; an empty manifest is signed too.
 It creates responsibility only for the exact freshly eligible issue, through the existing graph

@@ -796,6 +796,13 @@ the canonical bundle and `internal_beta`/`rke2` placement; it does not verify th
 signature itself. It compiles the bundle into a deterministic Job using a digest-pinned
 image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
+After the suspended Job is created or reconciled, the adapter requires Dahlia to acknowledge
+its exact allocation ID and server UID against the validated provider claim's reservation.
+The trusted host passes `claim_binding`, `allocation_registry_context.base_url`, and
+`allocation_registry_context.runner_token` in adapter context; these never enter the assignment
+or worker Pod. Missing registration prerequisites prevent Job creation. Denial, timeout, or
+mismatched response holds the allocation pending, and retry
+reconciles the same Job UID before another registration attempt.
 The Job selects a fixed `disposable-worker` service account with automatic API-token mounting
 disabled and explicitly projects a rotating 600-second token for the `hypergrid-runner-broker`
 audience at `/var/run/secrets/frigga-broker/token`. That token is intended only for the future

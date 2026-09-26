@@ -324,6 +324,17 @@ defmodule SymphonyElixir.ManagedExecutorTest do
     assert keys == ["#{assignment.sha256}:allocation", "#{assignment.sha256}:allocation"]
   end
 
+  test "retains the pending claim when Job UID registration is unverified" do
+    {adapter, _journal, opts} = ports(allocation_held: true)
+    assignment = assignment()
+
+    assert {:held, :job_allocation_registration_unverified, %{phase: :allocation_pending}} =
+             run_claimed(assignment, opts)
+
+    assert Enum.count(FakeAdapter.events(adapter), &(elem(&1, 0) == :allocate_or_reconcile)) == 1
+    refute Enum.any?(FakeAdapter.events(adapter), &(elem(&1, 0) == :acquire_credential_lease))
+  end
+
   test "fails closed on a persisted lifecycle record with missing phase fields" do
     {adapter, journal, opts} = ports()
     assignment = assignment()

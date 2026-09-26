@@ -88,7 +88,8 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
           replayed: boolean()
         }
 
-  @callback allocate_or_reconcile(assignment(), String.t(), term()) :: {:ok, allocation()} | {:error, term()}
+  @callback allocate_or_reconcile(assignment(), String.t(), term()) ::
+              {:ok, allocation()} | {:held, term()} | {:error, term()}
   # Calls with the same idempotency key must reconcile the same checkout rather
   # than create another workspace, including replay after a lost acknowledgement.
   # :no_checkout is permitted only after the adapter has proved that no checkout
