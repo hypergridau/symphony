@@ -781,13 +781,14 @@ issued lease before publishing its blocked result; a failed revocation keeps the
 An expired lease after checkout is revoked
 but held for a separate cleanup receipt; it cannot be called a pre-execution no-checkout abort.
 Nonterminal v5/v6/v7 journals require reconciliation before v8 execution; valid legacy
-terminal evidence remains replayable. For a proven checkout preparation/intent failure, the
+terminal evidence remains replayable. For a proven checkout preparation/intent failure or
+confirmed credential denial, expiry, or invalid response before checkout, the
 adapter must reconcile the exact provider release by a stable key and return the Dahlia release
 acknowledgement bound to the retained claim, allocation, assignment and blocked result. The
 executor persists that acknowledgement before treating cleanup as verified; a lost journal
 acknowledgement replays the same provider operation. Bare `:ok` and mismatched release results
-leave cleanup pending. Credential-denial/expiry/invalid reasons remain held until the signed
-provider abort contract can express their exact credential disposition without false evidence.
+leave cleanup pending. A credential failure may use this path only after any issued or
+uncertain material is revoked and the signed proof confirms no checkout or execution.
 These source rules do not themselves prove a provider release or a disposable runner.
 
 The HGS-729 RKE2 provider is a separate source-only port. Callers must pass an assignment

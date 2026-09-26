@@ -64,7 +64,12 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
           signer_id: String.t(),
           signature: String.t()
         }
-  @type abort_reason :: :checkout_preparation_failed | :checkout_intent_mismatch
+  @type abort_reason ::
+          :checkout_preparation_failed
+          | :checkout_intent_mismatch
+          | :credential_lease_denied
+          | :credential_lease_expired
+          | :credential_lease_invalid
   @type pre_execution_result :: %{
           assignment_digest: String.t(),
           abort_reason: abort_reason(),

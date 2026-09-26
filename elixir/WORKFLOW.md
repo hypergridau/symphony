@@ -52,6 +52,9 @@ scrubs the provider token and attestation key before launching Codex.
 The source-only RKE2 adapter's Job UID handoff uses the host's provider origin and runner token
 plus the validated provider claim. It cannot be configured by assignment or workflow prose,
 and an unacknowledged Job remains suspended.
+Confirmed pre-checkout credential denial, expiry, and invalid responses use the same signed
+provider abort release as checkout failures. The host must prove revocation and absence of
+checkout, execution, workspace, and Job Pods; an uncertain credential outcome stays held.
 
 The `DAHLIA_MANAGED_DELEGATION_PATH`, `DAHLIA_MANAGED_DELEGATION_SHA256`,
 `DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519`, and
