@@ -9,6 +9,7 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
   @socket_path "/run/dahlia-claim-witness.sock"
   @timeout_ms 5_000
   @operations ~w(claim_intent claim_bound spawn_intent)
+  @abort_fields ~w(proofId proofSHA256 receiptId receiptSHA256 assignmentDigest allocationId abortResultRef)
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
 
   @spec record(map(), String.t(), map()) :: :ok | {:error, term()}
@@ -20,6 +21,20 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
   end
 
   def record(_input, _operation, _reservation), do: {:error, :invalid_host_witness_operation}
+
+  @doc "Records exact pre-execution abort proof references as root-witness provenance only."
+  @spec record_abort(map(), map(), map()) :: :ok | {:error, term()}
+  def record_abort(input, reservation, abort_proof)
+      when is_map(input) and is_map(reservation) and is_map(abort_proof) do
+    with :ok <- validate_abort_proof(abort_proof),
+         {:ok, base} <- request(input, "abort_cleanup_intent", reservation),
+         request = base |> Map.put("version", 2) |> Map.put("abortProof", abort_proof),
+         {:ok, response} <- invoke(input, request) do
+      validate_response(response)
+    end
+  end
+
+  def record_abort(_input, _reservation, _abort_proof), do: {:error, :invalid_abort_proof_reference}
 
   @doc false
   @spec request(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -78,6 +93,24 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
   defp valid_fence?(claim) do
     claim["executionFenceToken"] == "#{claim["issueId"]}:#{claim["generation"]}" and
       claim["runtimeLeaseId"] == claim["sessionId"]
+  end
+
+  defp validate_abort_proof(proof) do
+    ids = [{"proofId", 256}, {"receiptId", 256}, {"allocationId", 256}, {"abortResultRef", 512}]
+    hashes = ~w(proofSHA256 receiptSHA256 assignmentDigest)
+
+    valid? =
+      MapSet.equal?(MapSet.new(Map.keys(proof)), MapSet.new(@abort_fields)) and
+        Enum.all?(ids, fn {key, limit} ->
+          value = Map.get(proof, key)
+          is_binary(value) and byte_size(value) in 1..limit and String.valid?(value)
+        end) and
+        Enum.all?(hashes, fn key ->
+          value = Map.get(proof, key)
+          is_binary(value) and String.match?(value, ~r/\A[a-f0-9]{64}\z/)
+        end)
+
+    if valid?, do: :ok, else: {:error, :invalid_abort_proof_reference}
   end
 
   defp invoke(%{host_witness_fun: witness}, request) when is_function(witness, 1), do: witness.(request)
