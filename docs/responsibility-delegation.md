@@ -168,9 +168,13 @@ execution. A successful adapter cleanup call returns a blocked outcome while
 the journal stays nonterminal in `abort_cleanup_pending`. HGS-350's
 `work-package-cleanup-receipt.v1` requires an accepted head from a terminal
 execution and cannot attest cleanup before checkout. No second signed receipt
-contract is defined here; an abort remains source-incomplete and held until the
-native HGS-350 authority defines how cleanup without an accepted head is
-recorded. Checkout heads must be canonical 40- or 64-character hexadecimal Git
+contract is implemented in Symphony; Dahlia's distinct pre-execution abort
+receipt and independent verifier proof require a trusted signer and host cleanup
+observations before release. `WorkPackageClaim.HostWitness.record_abort/3` can
+submit their proof, receipt, assignment, allocation and blocked-result references
+with the exact retained claim tuple. The root witness records provenance only;
+the managed executor is not wired to that claim context or verifier yet. An abort
+therefore remains held. Checkout heads must be canonical 40- or 64-character hexadecimal Git
 object identifiers. The adapter return shapes are deliberately narrow so
 workspace paths, command strings, credential values and raw process output are
 not lifecycle fields.
