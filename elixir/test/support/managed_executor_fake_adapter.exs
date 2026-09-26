@@ -3,7 +3,11 @@ defmodule SymphonyElixir.ManagedExecutor.FakeJournal do
 
   def start_link(opts \\ []) do
     Agent.start_link(fn ->
-      %{records: %{}, execution_started_delay_ms: Keyword.get(opts, :execution_started_delay_ms, 0)}
+      %{
+        records: %{},
+        execution_started_delay_ms: Keyword.get(opts, :execution_started_delay_ms, 0),
+        abort_verified_write_failure: Keyword.get(opts, :abort_verified_write_failure, false)
+      }
     end)
   end
 
@@ -20,10 +24,18 @@ defmodule SymphonyElixir.ManagedExecutor.FakeJournal do
     if delay > 0, do: Process.sleep(delay)
 
     Agent.get_and_update(pid, fn state ->
-      case Map.get(state.records, key) do
-        nil when expected_version == 0 -> {:ok, %{state | records: Map.put(state.records, key, record)}}
-        %{version: ^expected_version} -> {:ok, %{state | records: Map.put(state.records, key, record)}}
-        _ -> {{:error, :conflict}, state}
+      cond do
+        state.abort_verified_write_failure and Map.get(record, :phase) == :abort_cleanup_verified ->
+          {{:error, :synthetic_abort_verified_write_failure}, %{state | abort_verified_write_failure: false}}
+
+        is_nil(Map.get(state.records, key)) and expected_version == 0 ->
+          {:ok, %{state | records: Map.put(state.records, key, record)}}
+
+        match?(%{version: ^expected_version}, Map.get(state.records, key)) ->
+          {:ok, %{state | records: Map.put(state.records, key, record)}}
+
+        true ->
+          {{:error, :conflict}, state}
       end
     end)
   end
@@ -41,6 +53,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         invalid_result_ack: Keyword.get(opts, :invalid_result_ack, false),
         invalid_abort_result_ack: Keyword.get(opts, :invalid_abort_result_ack, false),
         invalid_abort_cleanup_response: Keyword.get(opts, :invalid_abort_cleanup_response, false),
+        abort_cleanup_wrong_ref: Keyword.get(opts, :abort_cleanup_wrong_ref, false),
         result: Keyword.get(opts, :result),
         checkout_mismatch: Keyword.get(opts, :checkout_mismatch, false),
         checkout_failure: Keyword.get(opts, :checkout_failure, false),
@@ -62,7 +75,9 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         credential_material: "synthetic-secret-value",
         credential_renewal_materializations: 0,
         credential_revoked_keys: MapSet.new(),
-        credential_revocation_effects: 0
+        credential_revocation_effects: 0,
+        abort_release_results: %{},
+        abort_release_effects: 0
       }
     end)
   end
@@ -71,6 +86,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   def active_credential_refs(pid), do: Agent.get(pid, & &1.active_credential_refs)
   def credential_renewal_materializations(pid), do: Agent.get(pid, & &1.credential_renewal_materializations)
   def credential_revocation_effects(pid), do: Agent.get(pid, & &1.credential_revocation_effects)
+  def abort_release_effects(pid), do: Agent.get(pid, & &1.abort_release_effects)
 
   @impl true
   def allocate_or_reconcile(assignment, idempotency_key, pid) do
@@ -288,10 +304,60 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   end
 
   @impl true
-  def ensure_abort_cleanup(allocation, assignment, abort_reason, idempotency_key, pid) do
-    with_event(pid, {:ensure_abort_cleanup, allocation.id, assignment.sha256, abort_reason, idempotency_key}, fn state ->
-      abort_cleanup_response(state)
+  def ensure_abort_cleanup(
+        allocation,
+        assignment,
+        claim_binding,
+        abort_reason,
+        abort_result_ref,
+        idempotency_key,
+        pid
+      ) do
+    event = {:ensure_abort_cleanup, allocation.id, assignment.sha256, abort_reason, abort_result_ref, idempotency_key}
+
+    with_event(pid, event, fn state ->
+      case Map.fetch(state.abort_release_results, idempotency_key) do
+        {:ok, ack} ->
+          {{:ok, Map.put(ack, :replayed, true)}, state}
+
+        :error ->
+          create_abort_release_result(state, allocation, assignment, claim_binding, abort_result_ref, idempotency_key)
+      end
     end)
+  end
+
+  defp create_abort_release_result(state, allocation, assignment, claim_binding, abort_result_ref, idempotency_key) do
+    case abort_cleanup_response(state) do
+      {:ok, next} ->
+        ack = %{
+          projection_id: claim_binding.projection_id,
+          reservation_id: claim_binding.reservation_id,
+          receipt_id: "abort-receipt-fixture-1",
+          receipt_kind: "pre_execution_abort_cleanup_verified",
+          assignment_digest: assignment.sha256,
+          allocation_id: allocation.id,
+          abort_result_ref: abort_result_ref,
+          generation: assignment.lease.generation,
+          execution_capacity_state: "released",
+          scope_state: "released",
+          reservation_state: "released",
+          evidence_ref: "abort-evidence-fixture-1"
+        }
+
+        response_ack = if next.abort_cleanup_wrong_ref, do: %{ack | abort_result_ref: "wrong-result"}, else: ack
+
+        updated = %{
+          next
+          | abort_release_results: Map.put(next.abort_release_results, idempotency_key, ack),
+            abort_release_effects: next.abort_release_effects + 1,
+            abort_cleanup_wrong_ref: false
+        }
+
+        {{:ok, Map.put(response_ack, :replayed, false)}, updated}
+
+      other ->
+        other
+    end
   end
 
   @impl true

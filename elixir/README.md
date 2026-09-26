@@ -769,7 +769,7 @@ callbacks; it does not implement a broker or issue credentials. Admission stays 
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
 
-The source-only executor journal v7 acquires and renews the assignment credential before
+The source-only executor journal v8 acquires and renews the assignment credential before
 checkout and passes its opaque lease handle to the checkout adapter. A denied or invalid lease
 therefore has no accepted checkout in the journal. The adapter must reconcile repeated checkout
 calls by their stable idempotency key after a lost acknowledgement. It may report `:no_checkout`
@@ -780,8 +780,14 @@ second checkout. A failed revocation is retried on replay. A pre-execution abort
 issued lease before publishing its blocked result; a failed revocation keeps the abort pending.
 An expired lease after checkout is revoked
 but held for a separate cleanup receipt; it cannot be called a pre-execution no-checkout abort.
-Nonterminal v5/v6 journals require
-reconciliation before v7 execution; valid legacy terminal evidence remains replayable.
+Nonterminal v5/v6/v7 journals require reconciliation before v8 execution; valid legacy
+terminal evidence remains replayable. For a proven checkout preparation/intent failure, the
+adapter must reconcile the exact provider release by a stable key and return the Dahlia release
+acknowledgement bound to the retained claim, allocation, assignment and blocked result. The
+executor persists that acknowledgement before treating cleanup as verified; a lost journal
+acknowledgement replays the same provider operation. Bare `:ok` and mismatched release results
+leave cleanup pending. Credential-denial/expiry/invalid reasons remain held until the signed
+provider abort contract can express their exact credential disposition without false evidence.
 These source rules do not themselves prove a provider release or a disposable runner.
 
 The HGS-729 RKE2 provider is a separate source-only port. Callers must pass an assignment

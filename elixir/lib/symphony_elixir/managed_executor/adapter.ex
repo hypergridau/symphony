@@ -72,6 +72,21 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
           summary: String.t(),
           evidence_ref: String.t()
         }
+  @type abort_release_ack :: %{
+          projection_id: String.t(),
+          reservation_id: String.t(),
+          receipt_id: String.t(),
+          receipt_kind: String.t(),
+          assignment_digest: String.t(),
+          allocation_id: String.t(),
+          abort_result_ref: String.t(),
+          generation: pos_integer(),
+          execution_capacity_state: String.t(),
+          scope_state: String.t(),
+          reservation_state: String.t(),
+          evidence_ref: String.t(),
+          replayed: boolean()
+        }
 
   @callback allocate_or_reconcile(assignment(), String.t(), term()) :: {:ok, allocation()} | {:error, term()}
   # Calls with the same idempotency key must reconcile the same checkout rather
@@ -104,8 +119,10 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
               {:ok, String.t()} | {:error, term()}
   @callback ensure_terminal_cleanup(allocation(), assignment(), execution_result(), String.t(), term()) ::
               {:ok, cleanup_evidence()} | {:error, term()}
-  @callback ensure_abort_cleanup(allocation(), assignment(), abort_reason(), String.t(), term()) ::
-              :ok | {:error, term()}
+  # The implementation must reconcile the exact provider release by the stable
+  # key after a lost acknowledgement, and return only a verified release result.
+  @callback ensure_abort_cleanup(allocation(), assignment(), map(), abort_reason(), String.t(), String.t(), term()) ::
+              {:ok, abort_release_ack()} | {:error, term()}
   @callback publish_or_reconcile_abort_result(allocation(), assignment(), pre_execution_result(), String.t(), term()) ::
               {:ok, String.t()} | {:error, term()}
   @callback verify_terminal_cleanup(cleanup_evidence(), allocation(), assignment(), execution_result(), term()) ::

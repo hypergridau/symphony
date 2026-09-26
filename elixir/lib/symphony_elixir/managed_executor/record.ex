@@ -19,7 +19,8 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :terminal,
     :abort_pending,
     :abort_result_pending,
-    :abort_cleanup_pending
+    :abort_cleanup_pending,
+    :abort_cleanup_verified
   ]
   @phase_fields %{
     planned: [],
@@ -39,7 +40,15 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     terminal: [:allocation, :checkout, :execution_result, :result_ref, :cleanup_evidence],
     abort_pending: [:allocation, :abort_reason, :checkout],
     abort_result_pending: [:allocation, :abort_reason, :checkout, :pre_execution_result],
-    abort_cleanup_pending: [:allocation, :abort_reason, :checkout, :pre_execution_result, :abort_result_ref]
+    abort_cleanup_pending: [:allocation, :abort_reason, :checkout, :pre_execution_result, :abort_result_ref],
+    abort_cleanup_verified: [
+      :allocation,
+      :abort_reason,
+      :checkout,
+      :pre_execution_result,
+      :abort_result_ref,
+      :abort_release_ack
+    ]
   }
   @checkout_phases [
     :checkout_ready,
@@ -246,6 +255,34 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   def validate_pre_execution_result(_result, _assignment, _abort_reason),
     do: {:error, :pre_execution_result_invalid}
 
+  @spec validate_abort_release_ack(term(), map(), map(), map(), String.t()) ::
+          :ok | {:error, :abort_release_ack_invalid}
+  def validate_abort_release_ack(ack, claim_binding, allocation, assignment, result_ref) when is_map(ack) do
+    expected = %{
+      projection_id: claim_binding.projection_id,
+      reservation_id: claim_binding.reservation_id,
+      receipt_kind: "pre_execution_abort_cleanup_verified",
+      assignment_digest: assignment.sha256,
+      allocation_id: allocation.id,
+      abort_result_ref: result_ref,
+      generation: assignment.lease.generation,
+      execution_capacity_state: "released",
+      scope_state: "released",
+      reservation_state: "released"
+    }
+
+    exact_keys = MapSet.new(Map.keys(ack)) == MapSet.new(Map.keys(expected) ++ [:receipt_id, :evidence_ref])
+    matches = Enum.all?(expected, fn {key, value} -> Map.get(ack, key) == value end)
+
+    if exact_keys and matches and nonempty_text?(Map.get(ack, :receipt_id)) and
+         nonempty_text?(Map.get(ack, :evidence_ref)),
+       do: :ok,
+       else: {:error, :abort_release_ack_invalid}
+  end
+
+  def validate_abort_release_ack(_ack, _claim_binding, _allocation, _assignment, _result_ref),
+    do: {:error, :abort_release_ack_invalid}
+
   @spec pre_execution_summary(atom()) :: String.t()
   def pre_execution_summary(:checkout_preparation_failed), do: "Checkout preparation failed before execution."
   def pre_execution_summary(:checkout_intent_mismatch), do: "Checkout intent or commit did not match the assignment."
@@ -262,7 +299,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp create_or_load(journal, key, assignment, claim_binding, context) do
     initial = %{
-      schema_version: 7,
+      schema_version: 8,
       key: key,
       assignment_digest: assignment.sha256,
       claim_binding: claim_binding,
@@ -288,7 +325,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp verify(
          %{
-           schema_version: 7,
+           schema_version: 8,
            key: key,
            assignment_digest: digest,
            claim_binding: binding,
@@ -319,6 +356,17 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     end
   end
 
+  defp verify(%{schema_version: 7, key: key, assignment_digest: digest, claim_binding: binding} = record, key, assignment, claim_binding) do
+    cond do
+      digest != assignment.sha256 -> {:error, :assignment_replay_mismatch}
+      binding != claim_binding -> {:error, :provider_claim_replay_mismatch}
+      Map.get(record, :phase) != :terminal -> {:error, :legacy_claim_requires_reconciliation}
+      not is_integer(Map.get(record, :version)) or Map.get(record, :version) < 0 -> {:error, :invalid_lifecycle_journal}
+      not valid_payload?(record, assignment) -> {:error, :invalid_lifecycle_journal}
+      true -> {:ok, record}
+    end
+  end
+
   defp verify(%{schema_version: 5, key: key, assignment_digest: digest} = record, key, assignment, _claim_binding) do
     if digest == assignment.sha256 and Map.get(record, :phase) == :terminal and
          is_integer(Map.get(record, :version)) and Map.get(record, :version) >= 0 and
@@ -331,7 +379,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp valid_payload?(record, assignment) do
     base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
-    base_keys = if record.schema_version in [6, 7], do: [:claim_binding | base_keys], else: base_keys
+    base_keys = if record.schema_version in [6, 7, 8], do: [:claim_binding | base_keys], else: base_keys
 
     valid_phase_keys?(record, base_keys) and valid_allocation_phase?(record) and
       valid_checkout_phase?(record, assignment) and valid_result_phase?(record, assignment) and
@@ -376,7 +424,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
       ) == :ok
 
   defp valid_abort_phase?(%{phase: phase}, _assignment)
-       when phase not in [:abort_pending, :abort_result_pending, :abort_cleanup_pending],
+       when phase not in [:abort_pending, :abort_result_pending, :abort_cleanup_pending, :abort_cleanup_verified],
        do: true
 
   defp valid_abort_phase?(record, assignment) do
@@ -389,7 +437,16 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
       checkout_matches_phase? and
       (record.phase == :abort_pending or
          (validate_pre_execution_result(Map.get(record, :pre_execution_result), assignment, abort_reason) == :ok and
-            (record.phase == :abort_result_pending or nonempty_text?(Map.get(record, :abort_result_ref)))))
+            (record.phase == :abort_result_pending or
+               (nonempty_text?(Map.get(record, :abort_result_ref)) and
+                  (record.phase == :abort_cleanup_pending or
+                     validate_abort_release_ack(
+                       Map.get(record, :abort_release_ack),
+                       record.claim_binding,
+                       record.allocation,
+                       assignment,
+                       record.abort_result_ref
+                     ) == :ok)))))
   end
 
   defp valid_credential_lease_phase?(%{phase: phase, credential_lease: lease}, _assignment)
@@ -398,7 +455,8 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
               :allocation_pending,
               :allocated,
               :credential_lease_pending,
-              :terminal
+              :terminal,
+              :abort_cleanup_verified
             ] do
     is_nil(lease)
   end
