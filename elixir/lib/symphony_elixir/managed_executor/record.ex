@@ -6,6 +6,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :allocation_pending,
     :allocated,
     :checkout_pending,
+    :checkout_outcome_unknown,
     :checkout_ready,
     :credential_lease_pending,
     :credential_lease_ready,
@@ -25,10 +26,11 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     allocation_pending: [],
     allocated: [:allocation],
     checkout_pending: [:allocation],
+    checkout_outcome_unknown: [:allocation],
     checkout_ready: [:allocation, :checkout],
-    credential_lease_pending: [:allocation, :checkout],
-    credential_lease_ready: [:allocation, :checkout],
-    credential_request_revocation_pending: [:allocation, :checkout, :candidate_lease_operation],
+    credential_lease_pending: [:allocation],
+    credential_lease_ready: [:allocation],
+    credential_request_revocation_pending: [:allocation, :candidate_lease_operation],
     execution_started: [:allocation, :checkout],
     result_recorded: [:allocation, :checkout, :execution_result],
     result_pending: [:allocation, :checkout, :execution_result],
@@ -41,9 +43,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   }
   @checkout_phases [
     :checkout_ready,
-    :credential_lease_pending,
-    :credential_lease_ready,
-    :credential_request_revocation_pending,
     :execution_started,
     :result_recorded,
     :result_pending,
@@ -56,6 +55,9 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
   @outcomes [:completed, :failed, :blocked]
   @lease_phases [
     :credential_lease_ready,
+    :checkout_pending,
+    :checkout_outcome_unknown,
+    :checkout_ready,
     :execution_started,
     :result_recorded,
     :result_pending,
@@ -260,7 +262,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp create_or_load(journal, key, assignment, claim_binding, context) do
     initial = %{
-      schema_version: 6,
+      schema_version: 7,
       key: key,
       assignment_digest: assignment.sha256,
       claim_binding: claim_binding,
@@ -286,7 +288,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp verify(
          %{
-           schema_version: 6,
+           schema_version: 7,
            key: key,
            assignment_digest: digest,
            claim_binding: binding,
@@ -306,6 +308,17 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     end
   end
 
+  defp verify(%{schema_version: 6, key: key, assignment_digest: digest, claim_binding: binding} = record, key, assignment, claim_binding) do
+    cond do
+      digest != assignment.sha256 -> {:error, :assignment_replay_mismatch}
+      binding != claim_binding -> {:error, :provider_claim_replay_mismatch}
+      Map.get(record, :phase) != :terminal -> {:error, :legacy_claim_requires_reconciliation}
+      not is_integer(Map.get(record, :version)) or Map.get(record, :version) < 0 -> {:error, :invalid_lifecycle_journal}
+      not valid_payload?(record, assignment) -> {:error, :invalid_lifecycle_journal}
+      true -> {:ok, record}
+    end
+  end
+
   defp verify(%{schema_version: 5, key: key, assignment_digest: digest} = record, key, assignment, _claim_binding) do
     if digest == assignment.sha256 and Map.get(record, :phase) == :terminal and
          is_integer(Map.get(record, :version)) and Map.get(record, :version) >= 0 and
@@ -318,7 +331,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
 
   defp valid_payload?(record, assignment) do
     base_keys = [:schema_version, :key, :assignment_digest, :phase, :version, :credential_lease]
-    base_keys = if record.schema_version == 6, do: [:claim_binding | base_keys], else: base_keys
+    base_keys = if record.schema_version in [6, 7], do: [:claim_binding | base_keys], else: base_keys
 
     valid_phase_keys?(record, base_keys) and valid_allocation_phase?(record) and
       valid_checkout_phase?(record, assignment) and valid_result_phase?(record, assignment) and
@@ -370,12 +383,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     abort_reason = Map.get(record, :abort_reason)
     checkout = Map.get(record, :checkout)
 
-    checkout_matches_phase? =
-      if abort_reason in [:checkout_preparation_failed, :checkout_intent_mismatch] do
-        is_nil(checkout)
-      else
-        validate_checkout(checkout, assignment, checkout_intent(assignment)) == :ok
-      end
+    checkout_matches_phase? = is_nil(checkout)
 
     abort_reason in @abort_reasons and validate_allocation(Map.get(record, :allocation)) == :ok and
       checkout_matches_phase? and
@@ -389,8 +397,6 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
               :planned,
               :allocation_pending,
               :allocated,
-              :checkout_pending,
-              :checkout_ready,
               :credential_lease_pending,
               :terminal
             ] do

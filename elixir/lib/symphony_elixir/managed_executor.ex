@@ -68,9 +68,9 @@ defmodule SymphonyElixir.ManagedExecutor do
 
   defp advance(%{phase: :execution_started} = record, assignment, ports) do
     case reconcile_execution(record, assignment, ports) do
-      {:ok, nil} -> {:held, :execution_outcome_unknown, record}
+      {:ok, nil} -> hold_unknown_execution(record, assignment, ports)
       {:ok, result} -> record_result(record, assignment, result, ports)
-      {:error, _reason} -> {:held, :execution_reconciliation_unavailable, record}
+      {:error, _reason} -> hold_unknown_execution(record, assignment, ports)
       _ -> {:held, :invalid_execution_reconciliation, record}
     end
   end
@@ -78,11 +78,17 @@ defmodule SymphonyElixir.ManagedExecutor do
   defp advance(%{phase: phase} = record, assignment, ports) when phase in [:planned, :allocation_pending],
     do: allocate(record, assignment, ports)
 
-  defp advance(%{phase: phase} = record, assignment, ports) when phase in [:allocated, :checkout_pending],
-    do: checkout(record, assignment, ports)
+  defp advance(%{phase: :allocated} = record, assignment, ports),
+    do: acquire_credential_lease(record, assignment, ports)
+
+  defp advance(%{phase: :checkout_pending} = record, assignment, ports),
+    do: checkout_pending(record, assignment, ports)
+
+  defp advance(%{phase: :checkout_outcome_unknown} = record, assignment, ports),
+    do: hold_checkout_outcome(record, assignment, ports)
 
   defp advance(%{phase: :checkout_ready} = record, assignment, ports),
-    do: acquire_credential_lease(record, assignment, ports)
+    do: start_execution(record, assignment, ports)
 
   defp advance(%{phase: phase} = record, assignment, ports)
        when phase in [:credential_lease_pending, :credential_lease_ready],
@@ -127,28 +133,55 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp checkout(record, assignment, ports) do
-    case checkpoint(record, :checkout_pending, ports) do
-      {:ok, pending} ->
-        checkout_pending(pending, assignment, ports)
-
-      {:error, reason} ->
-        {:held, reason, record}
+    if record.credential_lease.expires_at_ms <= now_ms() do
+      revoke_before_abort(record, assignment, :credential_lease_expired, ports)
+    else
+      case checkpoint(record, :checkout_pending, ports) do
+        {:ok, pending} -> checkout_pending(pending, assignment, ports)
+        {:error, reason} -> {:held, reason, record}
+      end
     end
   end
 
   defp checkout_pending(record, assignment, ports) do
     intent = checkout_intent(assignment)
 
-    case ports.adapter.prepare_checkout(
-           record.allocation,
-           assignment,
-           intent,
-           key(assignment, "checkout"),
-           ports.adapter_context
-         ) do
-      {:ok, receipt} -> save_checkout(record, receipt, assignment, intent, ports)
-      {:error, _reason} -> abort_before_execution(record, assignment, :checkout_preparation_failed, ports)
-      _ -> abort_before_execution(record, assignment, :checkout_intent_mismatch, ports)
+    if record.credential_lease.expires_at_ms <= now_ms() do
+      hold_checkout_outcome(record, assignment, ports)
+    else
+      case ports.adapter.prepare_checkout(
+             record.allocation,
+             assignment,
+             intent,
+             record.credential_lease,
+             key(assignment, "checkout"),
+             ports.adapter_context
+           ) do
+        {:ok, receipt} -> save_checkout(record, receipt, assignment, intent, ports)
+        {:error, :no_checkout} -> abort_before_execution(record, assignment, :checkout_preparation_failed, ports)
+        {:error, _reason} -> hold_checkout_outcome(record, assignment, ports)
+        _ -> hold_checkout_outcome(record, assignment, ports)
+      end
+    end
+  end
+
+  defp hold_checkout_outcome(%{phase: :checkout_outcome_unknown} = record, assignment, ports) do
+    case revoke_credential_lease(record, assignment, ports) do
+      :ok -> {:held, :checkout_outcome_unknown, record}
+      _ -> {:held, :credential_lease_revocation_failed, record}
+    end
+  end
+
+  defp hold_checkout_outcome(record, assignment, ports) do
+    case checkpoint(record, :checkout_outcome_unknown, ports) do
+      {:ok, pending} ->
+        hold_checkout_outcome(pending, assignment, ports)
+
+      {:error, reason} ->
+        case revoke_credential_lease(record, assignment, ports) do
+          :ok -> {:held, reason, record}
+          _ -> {:held, :credential_lease_revocation_failed, record}
+        end
     end
   end
 
@@ -157,7 +190,7 @@ defmodule SymphonyElixir.ManagedExecutor do
          {:ok, ready} <- checkpoint(record, :checkout_ready, ports, %{checkout: receipt}) do
       advance(ready, assignment, ports)
     else
-      {:error, _reason} -> abort_before_execution(record, assignment, :checkout_intent_mismatch, ports)
+      {:error, _reason} -> hold_checkout_outcome(record, assignment, ports)
     end
   end
 
@@ -240,10 +273,39 @@ defmodule SymphonyElixir.ManagedExecutor do
     if renewed.expires_at_ms <= now_ms() do
       revoke_before_abort(record, assignment, :credential_lease_expired, ports)
     else
-      case checkpoint(record, :execution_started, ports, %{credential_lease: renewed}) do
+      case checkpoint(record, :credential_lease_ready, ports, %{credential_lease: renewed}) do
+        {:ok, ready} -> checkout(ready, assignment, ports)
+        {:error, reason} -> {:held, reason, record}
+      end
+    end
+  end
+
+  defp start_execution(record, assignment, ports) do
+    if record.credential_lease.expires_at_ms <= now_ms() do
+      hold_post_checkout_expired(record, assignment, ports)
+    else
+      case checkpoint(record, :execution_started, ports) do
         {:ok, started} -> execute_started(started, assignment, ports)
         {:error, reason} -> {:held, reason, record}
       end
+    end
+  end
+
+  defp hold_post_checkout_expired(record, assignment, ports) do
+    case revoke_credential_lease(record, assignment, ports) do
+      :ok -> {:held, :post_checkout_cleanup_required, record}
+      _ -> {:held, :credential_lease_revocation_failed, record}
+    end
+  end
+
+  defp hold_unknown_execution(record, assignment, ports) do
+    if record.credential_lease.expires_at_ms <= now_ms() do
+      case revoke_credential_lease(record, assignment, ports) do
+        :ok -> {:held, :execution_outcome_unknown, record}
+        _ -> {:held, :credential_lease_revocation_failed, record}
+      end
+    else
+      {:held, :execution_outcome_unknown, record}
     end
   end
 
@@ -304,7 +366,7 @@ defmodule SymphonyElixir.ManagedExecutor do
 
   defp execute_started(record, assignment, ports) do
     if record.credential_lease.expires_at_ms <= now_ms() do
-      revoke_before_abort(record, assignment, :credential_lease_expired, ports)
+      hold_post_checkout_expired(record, assignment, ports)
     else
       case ports.adapter.execute(
              record.allocation,
@@ -449,28 +511,50 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp abort_before_execution(record, assignment, reason, ports) do
-    attrs = %{abort_reason: reason, checkout: Map.get(record, :checkout)}
+    if is_nil(Map.get(record, :checkout)) do
+      attrs = %{abort_reason: reason, checkout: nil}
 
-    case checkpoint(record, :abort_pending, ports, attrs) do
-      {:ok, pending} -> advance(pending, assignment, ports)
-      {:error, checkpoint_reason} -> {:held, checkpoint_reason, record}
+      case checkpoint(record, :abort_pending, ports, attrs) do
+        {:ok, pending} ->
+          advance(pending, assignment, ports)
+
+        {:error, checkpoint_reason} ->
+          hold_abort_checkpoint_failure(record, assignment, checkpoint_reason, ports)
+      end
+    else
+      {:held, :post_checkout_cleanup_required, record}
+    end
+  end
+
+  defp hold_abort_checkpoint_failure(record, assignment, checkpoint_reason, ports) do
+    revoked = if is_map(record.credential_lease), do: revoke_credential_lease(record, assignment, ports), else: :ok
+
+    case revoked do
+      :ok -> {:held, checkpoint_reason, record}
+      _ -> {:held, :credential_lease_revocation_failed, record}
     end
   end
 
   defp record_abort_result(record, assignment, ports) do
-    abort_result = %{
-      assignment_digest: assignment.sha256,
-      abort_reason: record.abort_reason,
-      outcome: :blocked,
-      summary: Record.pre_execution_summary(record.abort_reason),
-      evidence_ref: "managed-executor:#{assignment.sha256}:#{record.abort_reason}"
-    }
+    revoked = if is_map(record.credential_lease), do: revoke_credential_lease(record, assignment, ports), else: :ok
 
-    with :ok <- Record.validate_pre_execution_result(abort_result, assignment, record.abort_reason),
-         {:ok, pending} <- checkpoint(record, :abort_result_pending, ports, %{pre_execution_result: abort_result}) do
-      advance(pending, assignment, ports)
+    if revoked == :ok do
+      abort_result = %{
+        assignment_digest: assignment.sha256,
+        abort_reason: record.abort_reason,
+        outcome: :blocked,
+        summary: Record.pre_execution_summary(record.abort_reason),
+        evidence_ref: "managed-executor:#{assignment.sha256}:#{record.abort_reason}"
+      }
+
+      with :ok <- Record.validate_pre_execution_result(abort_result, assignment, record.abort_reason),
+           {:ok, pending} <- checkpoint(record, :abort_result_pending, ports, %{pre_execution_result: abort_result}) do
+        advance(pending, assignment, ports)
+      else
+        {:error, reason} -> {:held, reason, record}
+      end
     else
-      {:error, reason} -> {:held, reason, record}
+      {:held, :credential_lease_revocation_failed, record}
     end
   end
 
@@ -546,7 +630,7 @@ defmodule SymphonyElixir.ManagedExecutor do
 
       adapter_callbacks = [
         {:allocate_or_reconcile, 3},
-        {:prepare_checkout, 5},
+        {:prepare_checkout, 6},
         {:acquire_credential_lease, 4},
         {:renew_credential_lease, 5},
         {:revoke_credential_lease, 5},

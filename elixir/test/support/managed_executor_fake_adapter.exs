@@ -44,6 +44,7 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
         result: Keyword.get(opts, :result),
         checkout_mismatch: Keyword.get(opts, :checkout_mismatch, false),
         checkout_failure: Keyword.get(opts, :checkout_failure, false),
+        checkout_uncertain: Keyword.get(opts, :checkout_uncertain, false),
         checkout_head: Keyword.get(opts, :checkout_head, "0123456789abcdef0123456789abcdef01234567"),
         execution_reconciliation: Keyword.get(opts, :execution_reconciliation),
         cleanup_invalid: Keyword.get(opts, :cleanup_invalid, false),
@@ -79,8 +80,8 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   end
 
   @impl true
-  def prepare_checkout(allocation, assignment, intent, idempotency_key, pid) do
-    with_event(pid, {:prepare_checkout, allocation.id, intent, idempotency_key}, &checkout_response(&1, assignment, intent))
+  def prepare_checkout(allocation, assignment, intent, credential_lease, idempotency_key, pid) do
+    with_event(pid, {:prepare_checkout, allocation.id, intent, credential_lease.lease_ref, idempotency_key}, &checkout_response(&1, assignment, intent))
   end
 
   @impl true
@@ -328,7 +329,10 @@ defmodule SymphonyElixir.ManagedExecutor.FakeAdapter do
   end
 
   defp checkout_response(%{checkout_failure: true} = state, _assignment, _intent),
-    do: {{:error, :synthetic_checkout_failure}, %{state | checkout_failure: false}}
+    do: {{:error, :no_checkout}, %{state | checkout_failure: false}}
+
+  defp checkout_response(%{checkout_uncertain: true} = state, _assignment, _intent),
+    do: {{:error, :uncertain_checkout}, %{state | checkout_uncertain: false}}
 
   defp checkout_response(state, assignment, intent) do
     receipt =

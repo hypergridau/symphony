@@ -11,8 +11,8 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
   credential material. Acquire and renew reconcile by the supplied request key;
   revocation by the executor-derived handle or by an uncertain request key is
   idempotent, verifies ownership, and reports success only after cleanup.
-  Execution adapters
-  must recheck lease expiry at the side-effect boundary, since journal persistence
+  Checkout and execution adapters must recheck lease expiry at each side-effect boundary,
+  since journal persistence
   can take long enough for a locally checked expiry to pass.
   """
 
@@ -74,8 +74,13 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
         }
 
   @callback allocate_or_reconcile(assignment(), String.t(), term()) :: {:ok, allocation()} | {:error, term()}
-  @callback prepare_checkout(allocation(), assignment(), checkout_intent(), String.t(), term()) ::
-              {:ok, checkout_receipt()} | {:error, term()}
+  # Calls with the same idempotency key must reconcile the same checkout rather
+  # than create another workspace, including replay after a lost acknowledgement.
+  # :no_checkout is permitted only after the adapter has proved that no checkout
+  # was accepted and no workspace remains. Ambiguous effects must return another
+  # error so the executor retains the claim for reconciliation.
+  @callback prepare_checkout(allocation(), assignment(), checkout_intent(), credential_lease(), String.t(), term()) ::
+              {:ok, checkout_receipt()} | {:error, :no_checkout | term()}
   @callback acquire_credential_lease(allocation(), assignment(), String.t(), term()) ::
               {:ok, credential_lease_response()} | {:error, :denied | term()}
   @callback renew_credential_lease(allocation(), assignment(), credential_lease(), String.t(), term()) ::
