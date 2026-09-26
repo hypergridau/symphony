@@ -791,6 +791,58 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
   end
 
+  test "managed spawn rejects a missing provider claim before starting a worker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, provider_claim_override: nil)
+
+    assert after_preflight.running == %{}
+    assert after_preflight.blocked[@issue_id].error =~ "provider_claim_binding_failed"
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
+  test "managed spawn rejects a claim for another issue before starting a worker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
+    wrong_issue_claim = fn claim -> put_in(claim, [:reservation, :issue_id], "another-issue") end
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, provider_claim_override: wrong_issue_claim)
+
+    assert after_preflight.running == %{}
+    assert after_preflight.blocked[@issue_id].error =~ "provider_claim_binding_failed"
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
+  test "managed spawn rejects a claim for another runner before starting a worker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
+
+    wrong_runner_claim = fn claim ->
+      claim
+      |> put_in([:reservation, :runner_id], "another-runner")
+      |> put_in([:attestation, :runner_id], "another-runner")
+    end
+
+    {after_preflight, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, provider_claim_override: wrong_runner_claim)
+
+    assert after_preflight.running == %{}
+    assert after_preflight.blocked[@issue_id].error =~ "provider_claim_binding_failed"
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+  end
+
   test "managed bundle rebuild failure after claim also closes replay before blocking" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -833,13 +885,14 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   test "expiry after spawn_started releases the local lease only after pre-witness fencing" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
-    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner"}
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
 
     {after_preflight, _runtime} =
       post_claim_revalidation_failure(path, issue, issue, spawn_expiry_boundary: true)
 
     assert Map.has_key?(after_preflight.blocked, @issue_id)
     assert after_preflight.running == %{}
+    assert after_preflight.blocked[@issue_id].error =~ "pre_spawn_authority_expired"
     assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
     assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].release_reason == :spawn_failed
     assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
@@ -1350,11 +1403,17 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         else: {:ok, response(%{"data" => claim_result_payload()})}
     end
 
-    assert {:ok, _claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+    assert {:ok, claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
 
     state = expire_runtime_delegations(state, graph_path, Keyword.get(opts, :graph_expiry_ms))
 
     state = maybe_add_spawn_expiry_clock(state, input, opts)
+
+    provider_claim =
+      case Keyword.get(opts, :provider_claim_override, claim) do
+        override when is_function(override, 1) -> override.(claim)
+        override -> override
+      end
 
     dispatch = %{
       attempt: nil,
@@ -1363,7 +1422,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       token: token,
       session_id: lease.session_id,
       delegation_id: "delegation-349",
-      runtime_lease: lease
+      runtime_lease: lease,
+      provider_claim: provider_claim
     }
 
     after_preflight =

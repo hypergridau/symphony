@@ -32,6 +32,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.Codex.Progress
   alias SymphonyElixir.ExecutionFence.Persistence
   alias SymphonyElixir.ManagedCheckout.Checkpoint
+  alias SymphonyElixir.ManagedExecutor.ClaimBinding
   alias SymphonyElixir.ManagedResponsibility.Admission, as: ManagedAdmission
   alias SymphonyElixir.ManagedTokenBudget.Runtime, as: ManagedBudget
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
@@ -1645,7 +1646,7 @@ defmodule SymphonyElixir.Orchestrator do
       case admit_execution(state, issue, worker_host, attempt) do
         {:ok, state, token, session_id, responsibility_delegation_id, runtime_lease} ->
           case claim_work_package(state, issue, token, worker_host) do
-            {:ok, state} ->
+            {:ok, state, provider_claim} ->
               spawn_claimed_issue(
                 state,
                 issue,
@@ -1656,7 +1657,8 @@ defmodule SymphonyElixir.Orchestrator do
                   token: token,
                   session_id: session_id,
                   delegation_id: responsibility_delegation_id,
-                  runtime_lease: runtime_lease
+                  runtime_lease: runtime_lease,
+                  provider_claim: provider_claim
                 },
                 &Tracker.fetch_issues_by_ids/1
               )
@@ -1685,7 +1687,29 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_claimed_issue(state, issue, dispatch, issue_fetcher) do
     case final_managed_issue_preflight(state, issue, dispatch, issue_fetcher) do
       {:ok, refreshed_issue} ->
-        spawn_fenced_issue(state, refreshed_issue, dispatch)
+        with {:ok, bundle} <-
+               managed_assignment_bundle(
+                 state,
+                 refreshed_issue,
+                 dispatch.token,
+                 dispatch.session_id,
+                 dispatch.delegation_id
+               ),
+             {:ok, _binding} <-
+               ClaimBinding.from_claim(
+                 Map.get(dispatch, :provider_claim),
+                 bundle,
+                 Map.get(state.work_package_runtime, :runner_id)
+               ) do
+          spawn_fenced_issue_with_bundle(
+            state,
+            refreshed_issue,
+            Map.put(dispatch, :assignment_bundle, bundle)
+          )
+        else
+          {:error, reason} ->
+            recover_post_claim_spawn_failure(state, issue, dispatch, {:provider_claim_binding_failed, reason})
+        end
 
       {:error, reason} ->
         recover_post_claim_spawn_failure(state, issue, dispatch, {:assignment_revalidation_failed, reason})
@@ -2004,7 +2028,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp execution_supervisor_identity(_state, _issue, _token, _session_id, _worker_host), do: nil
 
   defp claim_work_package(%State{work_package_runtime: nil, execution_supervisor: nil} = state, _issue, _token, _worker_host),
-    do: {:ok, state}
+    do: {:ok, state, nil}
 
   defp claim_work_package(%State{work_package_runtime: nil}, _issue, _token, _worker_host),
     do: {:error, :work_package_runtime_required}
@@ -2019,8 +2043,8 @@ defmodule SymphonyElixir.Orchestrator do
       |> maybe_claim_option(runtime, :now_fun)
 
     with :ok <- ExecutionSupervisor.available?(),
-         {:ok, _claim} <- WorkPackageClaim.claim(input, claim_opts) do
-      {:ok, state}
+         {:ok, claim} <- WorkPackageClaim.claim(input, claim_opts) do
+      {:ok, state, claim}
     else
       {:error, _reason} = error -> error
     end
