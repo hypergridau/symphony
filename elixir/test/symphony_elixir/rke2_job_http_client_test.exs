@@ -45,13 +45,13 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert {:error, {:kubernetes_http_status, 401}} = HTTPClient.get_job(@namespace, @name, context())
   end
 
-  test "delete sends the server UID as a Kubernetes precondition" do
+  test "delete uses the server UID and foreground cascading cleanup" do
     Req.Test.expect(__MODULE__, fn conn ->
       assert conn.method == "DELETE"
       assert conn.request_path == "/apis/batch/v1/namespaces/#{@namespace}/jobs/#{@name}"
       assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer synthetic.test-token"]
 
-      assert {:ok, %{"apiVersion" => "v1", "kind" => "DeleteOptions", "preconditions" => %{"uid" => @uid}}} =
+      assert {:ok, %{"apiVersion" => "v1", "kind" => "DeleteOptions", "preconditions" => %{"uid" => @uid}, "propagationPolicy" => "Foreground"}} =
                Plug.Conn.read_body(conn) |> decode_body()
 
       json_response(conn, 200, %{"kind" => "Status", "status" => "Success"})

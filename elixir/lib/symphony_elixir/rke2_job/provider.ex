@@ -201,9 +201,29 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   defp delete_job_request(client, namespace, name, uid, expected, context) do
     case client.delete_job(namespace, name, uid, context) do
-      :ok -> :ok
+      :ok -> confirm_deleted(client, namespace, name, uid, expected, context)
       {:error, reason} -> reconcile_delete(client, namespace, name, uid, expected, context, reason)
       _ -> {:held, :invalid_job_delete_response}
+    end
+  end
+
+  defp confirm_deleted(client, namespace, name, uid, expected, context) do
+    case client.get_job(namespace, name, context) do
+      {:error, :not_found} ->
+        :ok
+
+      {:ok, job} ->
+        cond do
+          not JobSpec.owned_job_for_cleanup?(job, expected) -> {:held, :job_identity_or_spec_mismatch}
+          get_in(job, ["metadata", "uid"]) != uid -> {:held, :job_allocation_identity_mismatch}
+          true -> {:held, :job_delete_pending}
+        end
+
+      {:error, reason} ->
+        {:held, {:job_delete_readback_failed, reason}}
+
+      _ ->
+        {:held, :invalid_job_delete_readback}
     end
   end
 
