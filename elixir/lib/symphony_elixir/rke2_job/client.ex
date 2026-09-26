@@ -8,5 +8,6 @@ defmodule SymphonyElixir.RKE2Job.Client do
 
   @callback create_job(namespace(), job(), term()) :: {:ok, job()} | {:error, term()}
   @callback get_job(namespace(), name(), term()) :: {:ok, job()} | {:error, :not_found | term()}
+  @callback activate_job(namespace(), name(), uid(), String.t(), term()) :: {:ok, job()} | {:error, term()}
   @callback delete_job(namespace(), name(), uid(), term()) :: :ok | {:error, term()}
 end

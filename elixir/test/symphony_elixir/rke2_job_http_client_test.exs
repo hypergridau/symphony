@@ -60,6 +60,29 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert :ok = HTTPClient.delete_job(@namespace, @name, @uid, context())
   end
 
+  test "activation uses atomic UID, resource-version and suspended-state JSON Patch tests" do
+    active = put_in(@job, ["spec"], %{"suspend" => false})
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.method == "PATCH"
+      assert conn.request_path == "/apis/batch/v1/namespaces/#{@namespace}/jobs/#{@name}"
+      assert Plug.Conn.get_req_header(conn, "content-type") == ["application/json-patch+json"]
+
+      assert {:ok,
+              [
+                %{"op" => "test", "path" => "/metadata/uid", "value" => @uid},
+                %{"op" => "test", "path" => "/metadata/resourceVersion", "value" => "17"},
+                %{"op" => "test", "path" => "/spec/suspend", "value" => true},
+                %{"op" => "replace", "path" => "/spec/suspend", "value" => false}
+              ]} = Plug.Conn.read_body(conn) |> decode_body()
+
+      json_response(conn, 200, active)
+    end)
+
+    assert {:ok, ^active} = HTTPClient.activate_job(@namespace, @name, @uid, "17", context())
+    assert {:error, :invalid_kubernetes_job_identity} = HTTPClient.activate_job(@namespace, @name, @uid, "", context())
+  end
+
   test "transport timeout remains distinguishable for provider reconciliation" do
     Req.Test.expect(__MODULE__, fn conn -> Req.Test.transport_error(conn, :timeout) end)
 

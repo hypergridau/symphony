@@ -45,6 +45,25 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
   end
 
   @impl true
+  @spec activate_job(String.t(), String.t(), String.t(), String.t(), term()) :: {:ok, map()} | {:error, term()}
+  def activate_job(namespace, name, uid, resource_version, context) do
+    with {:ok, settings} <- settings(context, namespace),
+         true <- valid_name?(name) and valid_uid?(uid) and valid_resource_version?(resource_version) do
+      patch = [
+        %{"op" => "test", "path" => "/metadata/uid", "value" => uid},
+        %{"op" => "test", "path" => "/metadata/resourceVersion", "value" => resource_version},
+        %{"op" => "test", "path" => "/spec/suspend", "value" => true},
+        %{"op" => "replace", "path" => "/spec/suspend", "value" => false}
+      ]
+
+      request(:patch, jobs_path(namespace) <> "/" <> name, patch, settings, :job)
+    else
+      false -> {:error, :invalid_kubernetes_job_identity}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  @impl true
   @spec delete_job(String.t(), String.t(), String.t(), term()) :: :ok | {:error, term()}
   def delete_job(namespace, name, uid, context) do
     with {:ok, settings} <- settings(context, namespace),
@@ -89,10 +108,12 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
   defp decode_success(:delete, _status, _body), do: {:error, :invalid_kubernetes_delete_response}
 
   defp request_options(method, path, body, settings) do
+    content_type = if method == :patch, do: [{"content-type", "application/json-patch+json"}], else: []
+
     opts = [
       method: method,
       url: settings.api_server <> path,
-      headers: [{"authorization", "Bearer " <> settings.bearer_token}, {"accept", "application/json"}],
+      headers: [{"authorization", "Bearer " <> settings.bearer_token}, {"accept", "application/json"}] ++ content_type,
       connect_options: [
         timeout: settings.timeout_ms,
         transport_opts: [
@@ -106,7 +127,13 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
       redirect: false
     ]
 
-    opts = if is_nil(body), do: opts, else: Keyword.put(opts, :json, body)
+    opts =
+      cond do
+        is_nil(body) -> opts
+        method == :patch -> Keyword.put(opts, :body, Jason.encode!(body))
+        true -> Keyword.put(opts, :json, body)
+      end
+
     if settings.test_plug, do: Keyword.put(opts, :plug, {Req.Test, settings.test_plug}), else: opts
   end
 
@@ -177,6 +204,11 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     do: byte_size(value) in 1..256 and Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9._:-]*\z/, value)
 
   defp valid_uid?(_value), do: false
+
+  defp valid_resource_version?(value) when is_binary(value),
+    do: byte_size(value) in 1..256 and Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9._:-]*\z/, value)
+
+  defp valid_resource_version?(_value), do: false
 
   defp valid_token?(value) when is_binary(value),
     do: byte_size(value) in 1..8192 and Regex.match?(~r/\A[A-Za-z0-9._~+\/-]+=*\z/, value)

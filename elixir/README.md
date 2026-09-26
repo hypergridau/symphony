@@ -770,9 +770,13 @@ the canonical bundle and `internal_beta`/`rke2` placement; it does not verify th
 signature itself. It compiles the bundle into a deterministic Job using a digest-pinned
 image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
-The fakeable client contract supports create/get/delete reconciliation; a same-name Job
+The fakeable client contract supports create/get/activate/delete reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
-server UID. `SymphonyElixir.RKE2Job.HTTPClient` implements the same port over HTTPS when
+server UID. Activation is a separate source-only call with exact allocation UID and an
+atomic UID/resource-version/suspended-state JSON Patch followed by readback. The caller
+must supply a host-owned guard that rechecks admission and credential readiness;
+no production guard is installed. `SymphonyElixir.RKE2Job.HTTPClient` implements
+the same port over HTTPS when
 explicitly called with host-owned API origin, exact namespace, bearer token, and CA
 certificate file settings. It rejects missing or mismatched authorization and configuration,
 disables redirects and retries, and bounds connection and response timeouts. The client is
