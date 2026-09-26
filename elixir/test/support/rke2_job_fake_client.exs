@@ -39,10 +39,7 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
     Agent.get_and_update(agent, fn state ->
       case {state.delete_error, Map.get(state, :delete_commit?, false), Map.get(state, :delete_pending?, false)} do
         {nil, _commit?, true} ->
-          case Map.get(state.jobs, {namespace, name}) do
-            %{"metadata" => %{"uid" => ^uid}} -> {:ok, %{state | deletes: [uid | state.deletes]}}
-            _ -> {{:error, :uid_precondition_failed}, state}
-          end
+          pending_delete(state, namespace, name, uid)
 
         {nil, _commit?, false} ->
           delete_from_state(state, namespace, name, uid)
@@ -55,6 +52,13 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
           {{:error, reason}, state}
       end
     end)
+  end
+
+  defp pending_delete(state, namespace, name, uid) do
+    case Map.get(state.jobs, {namespace, name}) do
+      %{"metadata" => %{"uid" => ^uid}} -> {:ok, %{state | deletes: [uid | state.deletes]}}
+      _ -> {{:error, :uid_precondition_failed}, state}
+    end
   end
 
   defp delete_from_state(state, namespace, name, uid) do
