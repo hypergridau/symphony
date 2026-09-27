@@ -30,6 +30,11 @@ defmodule SymphonyElixir.RKE2JobFakeActivationGuard do
 
   @impl true
   def authorize(assignment, allocation, idempotency_key, agent) do
+    case Agent.get(agent, &Map.get(&1, :event_sink)) do
+      sink when is_pid(sink) -> send(sink, {:activation_sequence, :host_guard})
+      _ -> :ok
+    end
+
     Agent.get_and_update(agent, fn state ->
       event = {:authorize, assignment.sha256, allocation.id, idempotency_key}
       result = if Map.get(state, :activation_denied), do: {:held, :synthetic_activation_denial}, else: :ok
@@ -57,6 +62,11 @@ defmodule SymphonyElixir.RKE2JobFakeAuthSlotLeaseGuard do
   def release(slot, assignment, allocation, agent), do: record(:release, slot, assignment, allocation, agent)
 
   defp record(action, slot, assignment, allocation, agent) do
+    case Agent.get(agent, &Map.get(&1, :event_sink)) do
+      sink when is_pid(sink) -> send(sink, {:activation_sequence, {:slot_guard, action}})
+      _ -> :ok
+    end
+
     Agent.get_and_update(agent, fn state ->
       event = {action, slot.slot_id, slot.lease_id, assignment.sha256, allocation && allocation.id}
 
@@ -279,6 +289,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
 
     assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+    assert Agent.get(context.credentials, &Enum.count(&1.events, fn event -> match?({:authorize, _, _, _}, event) end)) == 0
     Agent.update(context.slot_lease, &%{&1 | denied: nil})
 
     assert {:ok, _job} = ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
@@ -989,9 +1000,10 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
 
     assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+    assert Agent.get(context.credentials, &Enum.count(&1.events, fn event -> match?({:authorize, _, _, _}, event) end)) == 0
   end
 
-  test "activation requires an explicit authorization port and holds its denial before client context", context do
+  test "activation requires a guard and checks readiness before the final authorization fence", context do
     assignment = assignment()
     opts = adapter_context(context)
 
@@ -1006,6 +1018,14 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
                Map.delete(opts, :activation_guard)
              )
 
+    assert Agent.get(
+             context.credentials,
+             &Enum.count(&1.events, fn
+               {:activate, _, _} -> true
+               _ -> false
+             end)
+           ) == 0
+
     Agent.update(context.credentials, &Map.put(&1, :activation_denied, true))
 
     assert {:held, :synthetic_activation_denial} =
@@ -1013,13 +1033,47 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
 
-    assert Agent.get(
-             context.credentials,
-             &Enum.count(&1.events, fn
-               {stage, _, _} -> stage == :activate
-               _ -> false
-             end)
-           ) == 0
+    assert Agent.get(context.credentials, fn state ->
+             state.events
+             |> Enum.reverse()
+             |> Enum.filter(fn event -> match?({:activate, _, _}, event) or match?({:authorize, _, _, _}, event) end)
+           end) == [
+             {:activate, assignment.sha256, key(assignment, :activate)},
+             {:authorize, assignment.sha256, allocation.id, key(assignment, :activate)}
+           ]
+  end
+
+  test "slotted activation verifies the Job before slot and host authorization, then patches", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    sink = self()
+    Agent.update(context.client, &Map.put(&1, :event_sink, sink))
+    Agent.update(context.slot_lease, &Map.put(&1, :event_sink, sink))
+    Agent.update(context.credentials, &(&1 |> Map.put(:event_sink, sink) |> Map.put(:activation_denied, true)))
+
+    assert {:held, :synthetic_activation_denial} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert_receive {:activation_sequence, :get_job}
+    assert_receive {:activation_sequence, {:slot_guard, :authorize}}
+    assert_receive {:activation_sequence, :host_guard}
+    refute_receive {:activation_sequence, :activate_job}
+    assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+
+    Agent.update(context.credentials, &Map.put(&1, :activation_denied, false))
+
+    assert {:ok, _job} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert_receive {:activation_sequence, :get_job}
+    assert_receive {:activation_sequence, {:slot_guard, :authorize}}
+    assert_receive {:activation_sequence, :host_guard}
+    assert_receive {:activation_sequence, :activate_job}
+    assert_receive {:activation_sequence, :get_job}
   end
 
   test "reconciles a DELETE timeout after readback proves the allocated Job is absent", context do

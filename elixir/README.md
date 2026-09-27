@@ -861,7 +861,10 @@ claims runner cleanup. Activation is a separate source-only call
 with exact allocation UID and an atomic UID/resource-version/suspended-state JSON Patch
 followed by readback. The caller
 must supply a host-owned guard that rechecks admission and credential readiness;
-no production guard is installed. `SymphonyElixir.RKE2Job.HTTPClient` implements
+the adapter first verifies the OAuth slot and obtains a fresh Kubernetes context,
+then invokes that guard as its final authorization fence before the Patch. An
+uncertain Patch still needs exact-UID reconciliation. No production guard is
+installed. `SymphonyElixir.RKE2Job.HTTPClient` implements
 the same port over HTTPS when
 explicitly called with host-owned API origin, exact namespace, bearer token, and CA
 certificate file settings. It rejects missing or mismatched authorization and configuration,
