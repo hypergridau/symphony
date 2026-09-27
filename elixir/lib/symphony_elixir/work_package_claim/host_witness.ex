@@ -22,6 +22,21 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
 
   def record(_input, _operation, _reservation), do: {:error, :invalid_host_witness_operation}
 
+  @doc "Checks an existing exact spawn intent without allowing the root witness to create one."
+  @spec replay_spawn_intent(map(), map()) :: :ok | {:error, term()}
+  def replay_spawn_intent(input, reservation) when is_map(input) and is_map(reservation) do
+    with {:ok, request} <- request(input, "spawn_intent", reservation),
+         {:ok, response} <- invoke(input, Map.put(request, "replayOnly", true)),
+         {:ok, %{"replayed" => true}} <- validate_receipt(response) do
+      :ok
+    else
+      {:ok, _receipt} -> {:error, :spawn_intent_replay_missing}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def replay_spawn_intent(_input, _reservation), do: {:error, :invalid_spawn_intent_replay}
+
   @doc "Records the exact provider abort-prepare intent before cleanup proceeds."
   @spec record_abort_prepare_intent(map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
   def record_abort_prepare_intent(input, reservation, prepare_id, prepare_request_sha256)

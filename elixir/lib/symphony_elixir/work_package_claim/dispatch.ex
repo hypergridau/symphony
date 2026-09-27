@@ -123,6 +123,18 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     end
   end
 
+  @doc "Reads an already started exact dispatch for root-only spawn-intent recovery."
+  @spec replay_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def replay_spawn(journal, key, input) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "spawn_started", authority_digest: digest}} = reservation ->
+        if digest == authority_digest(input), do: {:ok, reservation}, else: {:error, :claim_authority_changed}
+
+      _ ->
+        {:error, :claim_spawn_replay_unavailable}
+    end
+  end
+
   @spec find(map(), String.t(), String.t(), String.t(), pos_integer()) :: {:ok, map()} | {:error, term()}
   def find(journal, issue_id, profile, repository, generation) do
     key = Journal.reservation_key(issue_id, profile, repository, generation)

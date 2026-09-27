@@ -95,6 +95,26 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
+  @doc "Checks a previously accepted root spawn intent after an uncertain response, without creating one."
+  @spec replay_spawn_intent(input(), keyword()) :: :ok | {:error, term()}
+  def replay_spawn_intent(input, opts \\ []) when is_map(input) and is_list(opts) do
+    now_fun = Keyword.get(opts, :now_fun, &DateTime.utc_now/0)
+
+    with %DateTime{} = now <- now_fun.(),
+         {:ok, authority} <- authority(input, DateTime.to_unix(now, :millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         {:ok, reservation} <- Dispatch.replay_spawn(journal, journal_key(authority), input),
+         :ok <- reservation_matches_authority(reservation, authority),
+         %DateTime{} = refreshed <- now_fun.(),
+         {:ok, _authority} <- authority(input, DateTime.to_unix(refreshed, :millisecond)) do
+      HostWitness.replay_spawn_intent(input, reservation)
+    else
+      :missing -> {:error, :claim_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_spawn_replay_time}
+    end
+  end
+
   defp revalidate_spawn_authority(input, now_fun, reservation) do
     case now_fun.() do
       %DateTime{} = now ->
