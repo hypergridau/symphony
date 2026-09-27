@@ -53,6 +53,15 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     end
   end
 
+  @doc "Returns a complete namespace PodList with its Kubernetes resource version for cleanup readback."
+  @spec list_pods_snapshot(String.t(), term()) ::
+          {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
+  def list_pods_snapshot(namespace, context) do
+    with {:ok, settings} <- settings(context, namespace) do
+      request(:get, @pod_api_path <> namespace <> "/pods", nil, settings, :pod_snapshot)
+    end
+  end
+
   @impl true
   @spec activate_job(String.t(), String.t(), String.t(), String.t(), term()) :: {:ok, map()} | {:error, term()}
   def activate_job(namespace, name, uid, resource_version, context) do
@@ -114,15 +123,26 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
 
   defp decode_success(:job, _status, _body), do: {:error, :invalid_kubernetes_job_response}
 
-  defp decode_success(:pods, _status, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => metadata, "items" => items})
+  defp decode_success(:pods, status, body) do
+    case decode_success(:pod_snapshot, status, body) do
+      {:ok, %{items: items}} -> {:ok, items}
+      error -> error
+    end
+  end
+
+  defp decode_success(
+         :pod_snapshot,
+         _status,
+         %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => metadata, "items" => items}
+       )
        when is_map(metadata) and is_list(items) do
     if is_binary(metadata["resourceVersion"]) and metadata["resourceVersion"] != "" and
          Map.get(metadata, "continue") in [nil, ""] and Enum.all?(items, &is_map/1),
-       do: {:ok, items},
+       do: {:ok, %{items: items, resource_version: metadata["resourceVersion"]}},
        else: {:error, :invalid_kubernetes_pod_list_response}
   end
 
-  defp decode_success(:pods, _status, _body), do: {:error, :invalid_kubernetes_pod_list_response}
+  defp decode_success(:pod_snapshot, _status, _body), do: {:error, :invalid_kubernetes_pod_list_response}
   defp decode_success(:delete, 204, _body), do: :ok
   defp decode_success(:delete, _status, %{"kind" => "Status", "status" => "Success"}), do: :ok
   defp decode_success(:delete, _status, _body), do: {:error, :invalid_kubernetes_delete_response}

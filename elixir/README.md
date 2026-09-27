@@ -841,6 +841,9 @@ the same port over HTTPS when
 explicitly called with host-owned API origin, exact namespace, bearer token, and CA
 certificate file settings. It rejects missing or mismatched authorization and configuration,
 disables redirects and retries, and bounds connection and response timeouts. The client is
+also able to return a complete namespace PodList with its resource version for a later
+OAuth slot cleanup receipt; incomplete or paginated lists fail closed. This readback alone
+does not prove PVC detachment or Codex auth-cache health. The client is
 not wired into configuration loading or the orchestrator; no live API call, credential source,
 Pod, or spawn path is exercised or qualified by this source slice. See the
 [managed responsibility contract](../docs/responsibility-delegation.md#managed-assignment-bundle).
