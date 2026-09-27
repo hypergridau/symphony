@@ -48,6 +48,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
     assert pod["automountServiceAccountToken"] == false
     assert pod["serviceAccountName"] == "disposable-worker"
+    assert pod["dnsConfig"] == %{"options" => [%{"name" => "ndots", "value" => "1"}]}
 
     assert %{"name" => "SYMPHONY_WORKER_MODE", "value" => "preflight"} in container["env"]
     refute Enum.any?(container["volumeMounts"], &(&1["name"] == "broker-identity"))
@@ -284,6 +285,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     tampered = [
       put_in(created, ["spec", "template", "spec", "automountServiceAccountToken"], true),
       put_in(created, ["spec", "template", "spec", "serviceAccountName"], "default"),
+      put_in(created, ["spec", "template", "spec", "dnsConfig", "options", Access.at(0), "value"], "5"),
       update_in(created, ["spec", "template", "spec", "volumes"], fn volumes ->
         volumes ++
           [

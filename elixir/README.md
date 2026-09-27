@@ -821,8 +821,10 @@ The trusted host passes `claim_binding`, `allocation_registry_context.base_url`,
 or worker Pod. Missing registration prerequisites prevent Job creation. Denial, timeout, or
 mismatched response holds the allocation pending, and retry
 reconciles the same Job UID before another registration attempt.
-The Job selects a fixed `disposable-worker` service account with automatic API-token mounting
-disabled and explicitly projects a rotating 600-second token for the `hypergrid-runner-broker`
+The Job sets the Pod DNS `ndots` option to `1`, which queries public service names such as
+`auth.openai.com` as absolute names first. It selects a fixed `disposable-worker` service account
+with automatic API-token mounting disabled and explicitly projects a rotating 600-second token
+for the `hypergrid-runner-broker`
 audience at `/var/run/secrets/frigga-broker/token`. That token is intended only for the future
 broker identity handshake; no worker API permissions or broker route are supplied here.
 Trusted RKE2 Job config must also provide the positive decimal GitHub `repository_id` for
