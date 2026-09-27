@@ -8,6 +8,7 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
 
   @impl true
   def get_job(namespace, name, agent) do
+    record_activation_event(agent, :get_job)
     Agent.get_and_update(agent, &get_job_state(&1, {namespace, name}))
   end
 
@@ -39,7 +40,15 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
 
   @impl true
   def activate_job(namespace, name, uid, resource_version, agent) do
+    record_activation_event(agent, :activate_job)
     Agent.get_and_update(agent, &activate_job_state(&1, {namespace, name}, uid, resource_version))
+  end
+
+  defp record_activation_event(agent, event) do
+    case Agent.get(agent, &Map.get(&1, :event_sink)) do
+      sink when is_pid(sink) -> send(sink, {:activation_sequence, event})
+      _ -> :ok
+    end
   end
 
   defp activate_job_state(state, key, uid, resource_version) do

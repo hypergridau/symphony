@@ -54,13 +54,22 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
          :ok <- activation_guard_present(context),
-         :ok <- auth_slot_guard(context, ports.config, :authorize, [ports.config[:auth_slot], assignment, allocation]),
-         {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key),
-         :ok <- authorize_activation(context, assignment, allocation, idempotency_key) do
-      Provider.activate_owned(assignment, uid, provider_opts(ports, client_context))
+         {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key) do
+      authorize = activation_authorizer(context, ports.config, assignment, allocation, idempotency_key)
+      opts = provider_opts(ports, client_context) ++ [authorize_activation: authorize]
+      Provider.activate_owned(assignment, uid, opts)
     else
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp activation_authorizer(context, config, assignment, allocation, idempotency_key) do
+    fn ->
+      case auth_slot_guard(context, config, :authorize, [config[:auth_slot], assignment, allocation]) do
+        :ok -> authorize_activation(context, assignment, allocation, idempotency_key)
+        other -> other
+      end
     end
   end
 

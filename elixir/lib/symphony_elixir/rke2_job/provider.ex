@@ -48,15 +48,16 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   def delete_owned(_assignment, _uid, _opts), do: {:error, :invalid_rke2_job_request}
 
-  @doc "Activates only the exact suspended allocation UID after caller-owned admission checks."
+  @doc "Activates the exact allocation UID with a required authorization immediately before the PATCH."
   @spec activate_owned(map(), String.t(), keyword()) :: result()
   def activate_owned(assignment, uid, opts)
       when is_map(assignment) and is_binary(uid) and byte_size(uid) > 0 and is_list(opts) do
     with {:ok, client, context} <- ports(opts),
          true <- function_exported?(client, :activate_job, 5),
          {:ok, config} <- config(opts),
-         {:ok, expected} <- JobSpec.compile(assignment, config) do
-      activate_read(client, expected, uid, context)
+         {:ok, expected} <- JobSpec.compile(assignment, config),
+         {:ok, authorize} <- activation_authorizer(opts) do
+      activate_read(client, expected, uid, context, authorize)
     else
       false -> {:error, :rke2_job_client_missing}
       {:error, _reason} = error -> error
@@ -65,19 +66,37 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   def activate_owned(_assignment, _uid, _opts), do: {:error, :invalid_rke2_job_request}
 
-  defp activate_read(client, expected, uid, context) do
+  defp activation_authorizer(opts) do
+    case Keyword.get(opts, :authorize_activation) do
+      authorize when is_function(authorize, 0) -> {:ok, authorize}
+      _ -> {:held, :activation_authorizer_missing}
+    end
+  end
+
+  defp run_authorizer(authorize) do
+    case authorize.() do
+      :ok -> :ok
+      {:held, _reason} = held -> held
+      {:error, reason} -> {:held, {:activation_authorization_failed, reason}}
+      _ -> {:held, :invalid_activation_authorization_response}
+    end
+  rescue
+    _error -> {:held, :activation_authorization_failed}
+  end
+
+  defp activate_read(client, expected, uid, context, authorize) do
     namespace = get_in(expected, ["metadata", "namespace"])
     name = get_in(expected, ["metadata", "name"])
 
     case client.get_job(namespace, name, context) do
-      {:ok, job} -> activate_verified(client, job, expected, namespace, name, uid, context)
+      {:ok, job} -> activate_verified(client, job, expected, namespace, name, uid, context, authorize)
       {:error, :not_found} -> {:held, :job_not_found_for_activation}
       {:error, reason} -> {:held, {:job_read_failed, reason}}
       _ -> {:held, :invalid_job_read_response}
     end
   end
 
-  defp activate_verified(client, job, expected, namespace, name, uid, context) do
+  defp activate_verified(client, job, expected, namespace, name, uid, context, authorize) do
     cond do
       not JobSpec.owned_job_for_cleanup?(job, expected) ->
         {:held, :job_identity_or_spec_mismatch}
@@ -86,12 +105,12 @@ defmodule SymphonyElixir.RKE2Job.Provider do
         {:held, :job_allocation_identity_mismatch}
 
       get_in(job, ["spec", "suspend"]) == false ->
-        {:ok, job}
+        with :ok <- run_authorizer(authorize), do: {:ok, job}
 
       true ->
         case get_in(job, ["metadata", "resourceVersion"]) do
           version when is_binary(version) and byte_size(version) > 0 ->
-            activate_request(client, namespace, name, uid, version, expected, context)
+            activate_request(client, namespace, name, uid, version, expected, context, authorize)
 
           _ ->
             {:held, :job_resource_version_missing}
@@ -99,11 +118,13 @@ defmodule SymphonyElixir.RKE2Job.Provider do
     end
   end
 
-  defp activate_request(client, namespace, name, uid, version, expected, context) do
-    case client.activate_job(namespace, name, uid, version, context) do
-      {:ok, _job} -> activation_readback(client, namespace, name, uid, expected, context)
-      {:error, reason} -> {:held, {:job_activation_outcome_uncertain, reason}}
-      _ -> {:held, :invalid_job_activation_response}
+  defp activate_request(client, namespace, name, uid, version, expected, context, authorize) do
+    with :ok <- run_authorizer(authorize) do
+      case client.activate_job(namespace, name, uid, version, context) do
+        {:ok, _job} -> activation_readback(client, namespace, name, uid, expected, context)
+        {:error, reason} -> {:held, {:job_activation_outcome_uncertain, reason}}
+        _ -> {:held, :invalid_job_activation_response}
+      end
     end
   end
 
