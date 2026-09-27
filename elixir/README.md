@@ -869,7 +869,15 @@ disables redirects and retries, and bounds connection and response timeouts. The
 also able to return a complete namespace PodList with its resource version for a later
 OAuth slot cleanup receipt; incomplete or paginated lists fail closed. This readback alone
 does not prove PVC detachment or Codex auth-cache health. The client is
-not wired into configuration loading or the orchestrator; no live API call, credential source,
+not wired into configuration loading or the orchestrator. `RKE2Job.HostClientContext`
+is the source provider for the persistent Frigga host: for each exact assignment
+operation it reads a bearer from `kubernetes-api.token` and a CA file from a
+trusted, root-owned credential directory, verifies ownership and write modes,
+and passes the bearer only in memory to the HTTP client. A root-owned rotator can
+atomically replace the token file without restarting Frigga. An expired token
+or uncertain Kubernetes mutation remains held for reconciliation; the provider
+does not retry a write. The source provider does not provision the Kubernetes
+identity, refresh its token, or authorize admission. No live API call, credential source,
 Pod, or spawn path is exercised or qualified by this source slice. See the
 [managed responsibility contract](../docs/responsibility-delegation.md#managed-assignment-bundle).
 
