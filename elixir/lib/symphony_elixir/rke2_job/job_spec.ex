@@ -27,6 +27,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   @type config :: %{
           required(:namespace) => String.t(),
           required(:image) => String.t(),
+          required(:repository_id) => String.t(),
           optional(:auth_slot) => map(),
           optional(:auth_slot_catalog) => map()
         }
@@ -86,7 +87,8 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                    "env" =>
                      [
                        %{"name" => "SYMPHONY_ASSIGNMENT_SHA256", "value" => assignment.sha256},
-                       %{"name" => "SYMPHONY_ASSIGNMENT_ID", "value" => identity(assignment)}
+                       %{"name" => "SYMPHONY_ASSIGNMENT_ID", "value" => identity(assignment)},
+                       %{"name" => "SYMPHONY_REPOSITORY_ID", "value" => config.repository_id}
                      ] ++ auth_slot.env,
                    "resources" => @resources,
                    "securityContext" => %{
@@ -363,8 +365,10 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   defp valid_target(%{environment: %{placement: :internal_beta, target_environment: :rke2}}), do: :ok
   defp valid_target(_assignment), do: {:error, :rke2_job_target_not_authorized}
 
-  defp valid_config(%{namespace: namespace, image: image}) do
-    if dns_label?(namespace) and digest_image?(image), do: :ok, else: {:error, :rke2_job_trusted_config_invalid}
+  defp valid_config(%{namespace: namespace, image: image, repository_id: repository_id}) do
+    if dns_label?(namespace) and digest_image?(image) and repository_id?(repository_id),
+      do: :ok,
+      else: {:error, :rke2_job_trusted_config_invalid}
   end
 
   defp valid_config(_config), do: {:error, :rke2_job_trusted_config_invalid}
@@ -374,6 +378,11 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   end
 
   defp digest_image?(_image), do: false
+
+  defp repository_id?(value) when is_binary(value),
+    do: byte_size(value) <= 20 and Regex.match?(~r/\A[1-9][0-9]*\z/, value)
+
+  defp repository_id?(_value), do: false
 
   defp dns_label?(value) when is_binary(value),
     do: byte_size(value) <= 63 and Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, value)

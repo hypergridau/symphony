@@ -40,6 +40,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     pod = get_in(job, ["spec", "template", "spec"])
     assert container["image"] == config.image
     assert container["command"] == ["/usr/local/bin/symphony-worker"]
+    assert %{"name" => "SYMPHONY_REPOSITORY_ID", "value" => config.repository_id} in container["env"]
     assert container["securityContext"]["allowPrivilegeEscalation"] == false
     assert container["securityContext"]["readOnlyRootFilesystem"] == true
     assert container["securityContext"]["capabilities"]["drop"] == ["ALL"]
@@ -143,6 +144,10 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
 
     assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | image: "worker:latest"})
     assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | namespace: "Prod"})
+    assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, Map.delete(config(), :repository_id))
+    assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | repository_id: "0"})
+    assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | repository_id: "01"})
+    assert {:error, :rke2_job_trusted_config_invalid} = JobSpec.compile(assignment, %{config() | repository_id: "1x"})
 
     attrs = %{assignment_attrs() | placement: :hosted_production, target_environment: :lke}
     assert {:ok, hosted} = ManagedAssignmentBundle.build(attrs)
@@ -427,6 +432,12 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     }
   end
 
-  defp config, do: %{namespace: "symphony-beta", image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64)}
+  defp config,
+    do: %{
+      namespace: "symphony-beta",
+      image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64),
+      repository_id: "123456789"
+    }
+
   defp opts(client), do: [client: SymphonyElixir.RKE2JobFakeClient, client_context: client, config: config()]
 end

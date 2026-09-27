@@ -187,7 +187,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
 
     with true <- is_atom(client) and client_loaded?(client),
          true <- is_atom(context_provider) and context_provider_loaded?(context_provider),
-         %{namespace: _, image: _} <- config do
+         %{namespace: _, image: _, repository_id: _} <- config do
       {:ok,
        %{
          client: client,

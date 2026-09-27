@@ -138,7 +138,7 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
 
   test "provider reconciles an ambiguous HTTP create by reading back the exact Job" do
     assignment = assignment()
-    {:ok, compiled} = JobSpec.compile(assignment, %{namespace: @namespace, image: image()})
+    {:ok, compiled} = JobSpec.compile(assignment, %{namespace: @namespace, image: image(), repository_id: "123456789"})
     existing = server_defaulted_job(compiled)
 
     Req.Test.expect(__MODULE__, 2, fn conn ->
@@ -155,7 +155,7 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
              Provider.ensure(assignment,
                client: HTTPClient,
                client_context: context(),
-               config: %{namespace: @namespace, image: image()}
+               config: %{namespace: @namespace, image: image(), repository_id: "123456789"}
              )
   end
 

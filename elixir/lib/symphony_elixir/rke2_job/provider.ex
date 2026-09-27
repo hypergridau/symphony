@@ -314,7 +314,7 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   defp config(opts) do
     case Keyword.get(opts, :config) do
-      %{namespace: _, image: _} = config -> {:ok, config}
+      %{namespace: _, image: _, repository_id: _} = config -> {:ok, config}
       _ -> {:error, :rke2_job_trusted_config_missing}
     end
   end

@@ -825,6 +825,10 @@ The Job selects a fixed `disposable-worker` service account with automatic API-t
 disabled and explicitly projects a rotating 600-second token for the `hypergrid-runner-broker`
 audience at `/var/run/secrets/frigga-broker/token`. That token is intended only for the future
 broker identity handshake; no worker API permissions or broker route are supplied here.
+Trusted RKE2 Job config must also provide the positive decimal GitHub `repository_id` for
+the selected pool. The Job passes it as `SYMPHONY_REPOSITORY_ID` to the worker; it is a
+broker subject selector, while Dahlia still checks the request against its verified
+assignment binding. The signed assignment bundle remains unchanged.
 The fakeable client contract supports create/get/activate/delete and namespace Pod-list reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
 server UID. Deletion requests foreground cascading cleanup and returns success only after
