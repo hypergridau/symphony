@@ -11,8 +11,43 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @behaviour SymphonyElixir.RKE2Job.AuthSlotLeaseGuard
 
+  alias SymphonyElixir.RKE2Job.AuthSlotSpec
+
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
+
+  @doc "Reserves one catalogued slot and returns the exact trusted Job configuration."
+  @spec prepare_slot(map(), String.t(), map(), term()) :: {:ok, map()} | {:held, atom()}
+  def prepare_slot(%{sha256: digest, seat: seat} = assignment, slot_id, catalog, context)
+      when is_binary(digest) and is_binary(seat) and is_binary(slot_id) and is_map(catalog) do
+    preflight = %{
+      slot_id: slot_id,
+      claim_name: Map.get(catalog, slot_id),
+      lease_id: "preflight",
+      assignment_sha256: digest,
+      seat: seat
+    }
+
+    with {:ok, _fragments} <- AuthSlotSpec.compile(assignment, preflight, catalog),
+         {:ok, data} <- post(context, "/reserve", %{assignmentDigest: digest, slotId: slot_id}),
+         true <- is_boolean(data["replayed"]),
+         slot = %{
+           slot_id: data["slotId"],
+           claim_name: data["claimName"],
+           lease_id: data["leaseId"],
+           assignment_sha256: digest,
+           seat: seat
+         },
+         true <- slot.slot_id == slot_id and valid_lease_id?(slot.lease_id),
+         {:ok, _fragments} <- AuthSlotSpec.compile(assignment, slot, catalog) do
+      {:ok, slot}
+    else
+      _ -> {:held, :codex_auth_slot_reservation_unverified}
+    end
+  end
+
+  def prepare_slot(_assignment, _slot_id, _catalog, _context),
+    do: {:held, :codex_auth_slot_reservation_unverified}
 
   @impl true
   def reserve(slot, assignment, context) do
@@ -64,8 +99,8 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     do: {:held, :codex_auth_slot_release_verification_unavailable}
 
   defp matching_assignment?(
-         %{assignment_sha256: digest, lease_id: lease_id, slot_id: slot_id, claim_name: claim_name},
-         %{sha256: digest}
+         %{assignment_sha256: digest, seat: seat, lease_id: lease_id, slot_id: slot_id, claim_name: claim_name},
+         %{sha256: digest, seat: seat}
        )
        when is_binary(lease_id) and is_binary(slot_id) and is_binary(claim_name) do
     if Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, lease_id) and
@@ -79,6 +114,11 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   end
 
   defp matching_assignment?(_slot, _assignment), do: :invalid_binding
+
+  defp valid_lease_id?(value) when is_binary(value),
+    do: Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, value)
+
+  defp valid_lease_id?(_value), do: false
 
   defp post(context, suffix, body) do
     with {:ok, base_url, token, reservation_id} <- configuration(context),

@@ -808,8 +808,12 @@ Pod are gone and the refreshed auth cache is durably retained or quarantined.
 When a slot is selected, the managed RKE2 adapter now requires a host-owned slot lease guard to
 reserve before Job creation, bind the actual server UID before allocation is ready, authorize
 before activation, and confirm safe release after Job and Pod deletion. Missing, denied, or
-uncertain guard responses hold the operation. This port has no production implementation yet;
-its presence is not evidence that a durable lease or refresh check exists.
+uncertain guard responses hold the operation. No production host wiring is installed yet;
+the port alone is not evidence of a working refresh or cleanup check.
+`DahliaAuthSlotLeaseGuard.prepare_slot/4` can first reserve the selected catalog entry with
+Dahlia and produce the exact lease/claim configuration for `JobSpec`. The adapter's reserve
+callback then checks the same lease again before Job creation. This client remains host-only;
+it does not select a slot, authenticate Codex, or install the production host lifecycle.
 After the suspended Job is created or reconciled, the adapter requires Dahlia to acknowledge
 its exact allocation ID and server UID against the validated provider claim's reservation.
 The trusted host passes `claim_binding`, `allocation_registry_context.base_url`, and
