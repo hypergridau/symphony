@@ -35,6 +35,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert job["metadata"]["name"] =~ ~r/\Asymphony-[a-f0-9]{24}\z/
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/assignment-sha256"] == assignment.sha256
     assert job["spec"]["suspend"] == true
+    refute Map.has_key?(job["spec"], "ttlSecondsAfterFinished")
 
     container = get_in(job, ["spec", "template", "spec", "containers"]) |> hd()
     pod = get_in(job, ["spec", "template", "spec"])

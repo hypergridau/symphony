@@ -5,6 +5,8 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   Callers must preserve that provenance. This module verifies canonical bundle integrity,
   placement, and trusted image/namespace configuration; it does not verify the manifest
   signature itself. Compiled Jobs start suspended; this module does not activate them.
+  Terminal Jobs remain until the host journals their Job/Pod result and deletes
+  the exact UID; Kubernetes TTL cleanup would erase that evidence during an outage.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
@@ -18,7 +20,6 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   @broker_token_mount "/var/run/secrets/frigga-broker"
   @active_deadline_seconds 3_600
   @backoff_limit 0
-  @ttl_seconds_after_finished 86_400
   @resources %{
     "requests" => %{"cpu" => "500m", "memory" => "1Gi"},
     "limits" => %{"cpu" => "2", "memory" => "4Gi"}
@@ -66,7 +67,6 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
            "suspend" => true,
            "activeDeadlineSeconds" => @active_deadline_seconds,
            "backoffLimit" => @backoff_limit,
-           "ttlSecondsAfterFinished" => @ttl_seconds_after_finished,
            "template" => %{
              "metadata" => %{"labels" => labels(assignment)},
              "spec" => %{
