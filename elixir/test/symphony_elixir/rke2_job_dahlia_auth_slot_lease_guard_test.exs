@@ -5,8 +5,8 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
   @digest String.duplicate("a", 64)
   @lease_id "12345678-1234-4123-8123-123456789abc"
-  @slot %{slot_id: "slot-one", claim_name: "codex-home-one", lease_id: @lease_id, assignment_sha256: @digest}
-  @assignment %{sha256: @digest}
+  @slot %{slot_id: "slot-one", claim_name: "codex-home-one", lease_id: @lease_id, assignment_sha256: @digest, seat: "luna-high"}
+  @assignment %{sha256: @digest, seat: "luna-high"}
   @allocation %{id: "rke2job:v1:exact-allocation"}
 
   test "checks the selected lease and exact host API responses" do
@@ -77,5 +77,41 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
     assert {:held, :codex_auth_slot_release_verification_unavailable} =
              DahliaAuthSlotLeaseGuard.release(@slot, @assignment, @allocation, context)
+  end
+
+  test "prepares only Dahlia's exact lease and the trusted one-to-one slot catalog" do
+    caller = self()
+
+    post = fn url, opts ->
+      send(caller, {:post, url, opts})
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{"data" => %{"leaseId" => @lease_id, "slotId" => "slot-one", "claimName" => "codex-home-one", "replayed" => false}}
+       }}
+    end
+
+    context = %{base_url: "https://dahlia.example", runner_token: "host-only-token", reservation_id: "reservation-one", post_fun: post}
+    catalog = %{"slot-one" => "codex-home-one"}
+
+    assert {:ok, slot} = DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, context)
+    assert slot == @slot
+    assert_receive {:post, url, opts}
+    assert String.ends_with?(url, "/reservation-one/codex-auth-slots/reserve")
+    assert opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one"}
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", %{"slot-one" => "other-claim"}, context)
+
+    assert_receive {:post, _, _}
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", %{"slot-one" => "codex-home-one", "slot-two" => "codex-home-one"}, context)
+
+    refute_receive {:post, _, _}
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, %{})
   end
 end
