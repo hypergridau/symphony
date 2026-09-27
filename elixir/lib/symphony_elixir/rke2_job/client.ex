@@ -11,4 +11,7 @@ defmodule SymphonyElixir.RKE2Job.Client do
   @callback list_pods(namespace(), term()) :: {:ok, [map()]} | {:error, term()}
   @callback activate_job(namespace(), name(), uid(), String.t(), term()) :: {:ok, job()} | {:error, term()}
   @callback delete_job(namespace(), name(), uid(), term()) :: :ok | {:error, term()}
+  @callback delete_suspended_job(namespace(), name(), uid(), String.t(), term()) :: :ok | {:error, term()}
+
+  @optional_callbacks delete_suspended_job: 5
 end

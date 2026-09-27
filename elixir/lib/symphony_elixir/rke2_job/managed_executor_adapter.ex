@@ -14,7 +14,8 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{HTTPClient, JobAllocationRegistration, JobSpec, Provider, ResultJournal, ResultReader}
+  alias SymphonyElixir.RKE2Job.{HTTPClient, JobAllocationRegistration, JobSpec, Provider}
+  alias SymphonyElixir.RKE2Job.{ResultJournal, ResultReader, SuspendedAbort}
 
   @allocation_version 1
 
@@ -101,6 +102,23 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     do: {:held, :terminal_finalization_required}
 
   defp direct_delete_allowed?(_config), do: :ok
+
+  @doc "Conditionally removes a never-activated slotted Job; retains OAuth and provider leases."
+  @spec abort_unstarted_owned(allocation(), map(), String.t(), term()) :: :ok | {:held, term()} | {:error, term()}
+  def abort_unstarted_owned(allocation, assignment, idempotency_key, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :abort_unstarted),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, uid} <- allocation_uid(allocation, expected),
+         :ok <- auth_slot_guard(context, ports.config, :authorize, [ports.config[:auth_slot], assignment, allocation]),
+         {:ok, client_context} <- client_context(ports, assignment, :abort_unstarted, idempotency_key) do
+      SuspendedAbort.abort_owned(assignment, uid, provider_opts(ports, client_context))
+    else
+      {:held, reason} -> {:held, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
 
   @doc "Journals one terminal worker result before deleting its exact Job UID; retains the OAuth slot lease."
   @spec finalize_terminal_owned(allocation(), map(), String.t(), term()) ::

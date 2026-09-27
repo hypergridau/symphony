@@ -107,6 +107,27 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert :ok = HTTPClient.delete_job(@namespace, @name, @uid, context())
   end
 
+  test "suspended abort delete fences both Job UID and resource version" do
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.method == "DELETE"
+      assert conn.request_path == "/apis/batch/v1/namespaces/#{@namespace}/jobs/#{@name}"
+
+      assert {:ok,
+              %{
+                "kind" => "DeleteOptions",
+                "preconditions" => %{"uid" => @uid, "resourceVersion" => "17"},
+                "propagationPolicy" => "Foreground"
+              }} = Plug.Conn.read_body(conn) |> decode_body()
+
+      json_response(conn, 200, %{"kind" => "Status", "status" => "Success"})
+    end)
+
+    assert :ok = HTTPClient.delete_suspended_job(@namespace, @name, @uid, "17", context())
+
+    assert {:error, :invalid_kubernetes_job_identity} =
+             HTTPClient.delete_suspended_job(@namespace, @name, @uid, "", context())
+  end
+
   test "activation uses atomic UID, resource-version and suspended-state JSON Patch tests" do
     active = put_in(@job, ["spec"], %{"suspend" => false})
 
