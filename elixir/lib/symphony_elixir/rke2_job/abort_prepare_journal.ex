@@ -138,6 +138,53 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     _ -> false
   end
 
+  @spec load_confirmed_delete(Path.t(), map(), map(), String.t()) ::
+          {:ok, map()} | :missing | {:held, atom()}
+  def load_confirmed_delete(root, claim, record, uid) do
+    with {:ok, path} <- checkpoint_path(root, claim, "confirmed-delete"),
+         {:ok, bytes} <- read_regular(path),
+         {:ok, decoded} <- Jason.decode(bytes),
+         true <- valid_confirmed_delete?(decoded, claim, record, uid),
+         :ok <- sync_checkpoint_directory(Path.dirname(path)) do
+      {:ok, decoded}
+    else
+      {:error, :enoent} -> :missing
+      {:held, reason} -> {:held, reason}
+      _ -> {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
+    end
+  rescue
+    _ -> {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
+  end
+
+  @spec record_confirmed_delete(Path.t(), map(), map(), String.t(), map()) :: :ok | {:held, atom()}
+  def record_confirmed_delete(root, claim, record, uid, pod_evidence) do
+    checkpoint = %{
+      "schema_version" => @schema_version,
+      "claim" => claim,
+      "assignment_digest" => record.assignment_digest,
+      "allocation_id" => record.allocation_id,
+      "prepare_id" => record.prepare_id,
+      "request_sha256" => record.request_sha256,
+      "job_uid" => uid,
+      "job_resource_version" => record.observation["job"]["resourceVersion"],
+      "post_delete_pod_snapshot" => pod_evidence
+    }
+
+    with true <- valid_confirmed_delete?(checkpoint, claim, record, uid),
+         {:ok, path} <- checkpoint_path(root, claim, "confirmed-delete"),
+         {:ok, bytes} <- Jason.encode(checkpoint) do
+      case exclusive_write(path, bytes) do
+        :ok -> compare_checkpoint(path, bytes, :abort_prepare_confirmed_delete_checkpoint_conflict)
+        {:error, :eexist} -> compare_checkpoint(path, bytes, :abort_prepare_confirmed_delete_checkpoint_conflict)
+        _ -> {:held, :abort_prepare_journal_write_unavailable}
+      end
+    else
+      _ -> {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
+    end
+  rescue
+    _ -> {:held, :abort_prepare_journal_write_unavailable}
+  end
+
   defp encode_record(claim, record) do
     if valid_record?(record, claim) do
       Jason.encode(%{
@@ -264,6 +311,32 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
       "acknowledgement" => acknowledgement
     }
 
+  defp valid_confirmed_delete?(checkpoint, claim, record, uid) when is_map(checkpoint) do
+    fields = ~w(schema_version claim assignment_digest allocation_id prepare_id request_sha256 job_uid job_resource_version post_delete_pod_snapshot)
+    pods = checkpoint["post_delete_pod_snapshot"]
+
+    Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
+      checkpoint["schema_version"] == @schema_version and checkpoint["claim"] == claim and
+      checkpoint["assignment_digest"] == record.assignment_digest and
+      checkpoint["allocation_id"] == record.allocation_id and checkpoint["prepare_id"] == record.prepare_id and
+      checkpoint["request_sha256"] == record.request_sha256 and checkpoint["job_uid"] == uid and
+      checkpoint["job_resource_version"] == record.observation["job"]["resourceVersion"] and
+      valid_pod_evidence?(pods)
+  end
+
+  defp valid_confirmed_delete?(_checkpoint, _claim, _record, _uid), do: false
+
+  defp valid_pod_evidence?(pods) when is_map(pods) do
+    fields = ~w(resourceVersion sha256 itemCount complete ownedPodsAbsent)
+
+    Enum.sort(Map.keys(pods)) == Enum.sort(fields) and is_binary(pods["resourceVersion"]) and
+      pods["resourceVersion"] != "" and is_binary(pods["sha256"]) and
+      Regex.match?(~r/\A[a-f0-9]{64}\z/, pods["sha256"]) and is_integer(pods["itemCount"]) and
+      pods["itemCount"] >= 0 and pods["complete"] == true and pods["ownedPodsAbsent"] == true
+  end
+
+  defp valid_pod_evidence?(_pods), do: false
+
   defp valid_ack?(record, acknowledgement) when is_map(acknowledgement) do
     keys = ~w(prepareId projectionId reservationId preparedAt replayed prepareRequestSHA256)
 
@@ -306,6 +379,12 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
       _ ->
         {:held, :abort_prepare_journal_read_unavailable}
     end
+  end
+
+  defp sync_checkpoint_directory(path) do
+    if sync_directory(path) == :ok,
+      do: :ok,
+      else: {:held, :abort_prepare_journal_sync_unavailable}
   end
 
   defp exclusive_write(path, bytes) do

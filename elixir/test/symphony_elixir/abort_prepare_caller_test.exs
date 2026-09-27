@@ -437,6 +437,25 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
     assert length(Agent.get(context.client, & &1.deletes)) == 1
+
+    {:ok, claim_key} = AbortPrepareJournal.identity_key(prepared.prepare_ack_guard_context.claim)
+    checkpoint_path = Path.join(context.root, claim_key <> ".confirmed-delete.json")
+    {:ok, checkpoint_bytes} = File.read(checkpoint_path)
+    checkpoint = Jason.decode!(checkpoint_bytes)
+    assert checkpoint["prepare_id"] == prepared.prepare_ack["prepareId"]
+    assert checkpoint["request_sha256"] == prepared.prepare_ack["prepareRequestSHA256"]
+    assert checkpoint["job_uid"] == hd(Agent.get(context.client, & &1.deletes))
+    assert checkpoint["post_delete_pod_snapshot"]["complete"]
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+
+    corrupted = Map.put(checkpoint, "job_uid", "different-job-uid")
+    :ok = File.write(checkpoint_path, Jason.encode!(corrupted))
+
+    assert {:held, :abort_prepare_confirmed_delete_checkpoint_invalid} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
   end
 
   test "root-intent rejection keeps the request and blocks POST until a later receipt", context do
@@ -996,6 +1015,112 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
              AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
 
     assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "a committed delete with a lost response has no replay checkpoint", context do
+    assignment = assignment()
+    adapter = adapter_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, allocation_key(assignment), adapter)
+
+    witness_input = witness_input(fn _request -> {:ok, receipt(true, String.duplicate("8", 64))} end)
+
+    post_fun = fn _url, options ->
+      request = Jason.decode!(Keyword.fetch!(options, :body))
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "data" => %{
+             "prepareId" => request["prepareId"],
+             "projectionId" => "projection-one",
+             "reservationId" => "reservation-one",
+             "preparedAt" => "2026-09-27T12:00:00.000Z",
+             "replayed" => false
+           }
+         }
+       }}
+    end
+
+    caller = caller_context(context, adapter, witness_input, post_fun)
+    assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    Agent.update(context.client, &Map.put(&1, :raise_after_suspended_delete, true))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    {:ok, claim_key} = AbortPrepareJournal.identity_key(prepared.prepare_ack_guard_context.claim)
+    checkpoint_path = Path.join(context.root, claim_key <> ".confirmed-delete.json")
+    refute File.exists?(checkpoint_path)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+
+    Agent.update(context.client, &Map.put(&1, :raise_after_suspended_delete, false))
+
+    assert {:held, :suspended_abort_job_already_absent} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    refute File.exists?(checkpoint_path)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "a post-delete Pod reappearance prevents the confirmed-delete checkpoint", context do
+    assignment = assignment()
+    adapter = adapter_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, allocation_key(assignment), adapter)
+
+    witness_input = witness_input(fn _request -> {:ok, receipt(true, String.duplicate("9", 64))} end)
+
+    post_fun = fn _url, options ->
+      request = Jason.decode!(Keyword.fetch!(options, :body))
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "data" => %{
+             "prepareId" => request["prepareId"],
+             "projectionId" => "projection-one",
+             "reservationId" => "reservation-one",
+             "preparedAt" => "2026-09-27T12:00:00.000Z",
+             "replayed" => false
+           }
+         }
+       }}
+    end
+
+    caller = caller_context(context, adapter, witness_input, post_fun)
+    assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+
+    late_pod = %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "namespace" => prepared.observation["compiledIdentity"]["namespace"],
+        "name" => "other-worker",
+        "uid" => "late-pod-uid",
+        "resourceVersion" => "late-pod-rv",
+        "labels" => %{},
+        "ownerReferences" => []
+      },
+      "spec" => %{
+        "volumes" => [
+          %{"name" => "shared", "persistentVolumeClaim" => %{"claimName" => prepared.observation["slotBinding"]["claimName"]}}
+        ]
+      }
+    }
+
+    Agent.update(context.client, &Map.put(&1, :pod_injected_on_suspended_delete, {"late-pod", late_pod}))
+
+    assert {:held, :suspended_abort_pod_absence_unverified} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    {:ok, claim_key} = AbortPrepareJournal.identity_key(prepared.prepare_ack_guard_context.claim)
+    refute File.exists?(Path.join(context.root, claim_key <> ".confirmed-delete.json"))
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
   end
 
   test "confirmation rejects a changed assignment lease claim before root or Kubernetes access", context do

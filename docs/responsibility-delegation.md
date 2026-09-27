@@ -217,7 +217,16 @@ requires configured host journal/workspace roots and disables the test-only
 provider transport and witness injection seams. The concrete
 `RKE2Job.JournalPrepareAckGuard` verifies the saved provider acknowledgment and
 the exact assignment, allocation and observation before the caller passes them
-to `confirm_abort_unstarted_owned/6`. The caller is not wired into the
+to `confirm_abort_unstarted_owned/6`. After conditional deletion and complete
+post-delete Job/Pod absence checks, the caller writes a synced confirmed-delete
+checkpoint bound to that claim, exact assignment/allocation, provider prepare
+request, Job UID/resourceVersion and Pod snapshot. A retry with this checkpoint
+revalidates the root intent and provider acknowledgment, verifies the exact
+checkpoint, and requires the Job and all owned Pods to remain absent before
+replaying success. If deletion may have committed but the response or
+post-delete evidence was lost before the checkpoint became durable, retry
+remains held because absence alone cannot prove which operation removed the
+Job. The caller is not wired into the
 production managed-executor lifecycle. Linux filesystem crash durability still
 needs runtime qualification; Windows production use is rejected because the
 journal does not verify Windows ACLs. No OAuth/provider release or signed final
