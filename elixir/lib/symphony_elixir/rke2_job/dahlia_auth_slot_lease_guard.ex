@@ -11,7 +11,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @behaviour SymphonyElixir.RKE2Job.AuthSlotLeaseGuard
 
-  alias SymphonyElixir.RKE2Job.AuthSlotSpec
+  alias SymphonyElixir.RKE2Job.{AuthSlotSpec, HTTPClient}
 
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
@@ -23,22 +23,25 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     preflight = %{
       slot_id: slot_id,
       claim_name: Map.get(catalog, slot_id),
+      claim_uid: "preflight",
       lease_id: "preflight",
       assignment_sha256: digest,
       seat: seat
     }
 
     with {:ok, _fragments} <- AuthSlotSpec.compile(assignment, preflight, catalog),
-         {:ok, data} <- post(context, "/reserve", %{assignmentDigest: digest, slotId: slot_id}),
+         {:ok, claim_uid} <- read_claim_uid(context, preflight.claim_name),
+         {:ok, data} <- post(context, "/reserve", %{assignmentDigest: digest, slotId: slot_id, claimUid: claim_uid}),
          true <- is_boolean(data["replayed"]),
          slot = %{
            slot_id: data["slotId"],
            claim_name: data["claimName"],
+           claim_uid: data["claimUid"],
            lease_id: data["leaseId"],
            assignment_sha256: digest,
            seat: seat
          },
-         true <- slot.slot_id == slot_id and valid_lease_id?(slot.lease_id),
+         true <- slot.slot_id == slot_id and slot.claim_uid == claim_uid and valid_lease_id?(slot.lease_id),
          {:ok, _fragments} <- AuthSlotSpec.compile(assignment, slot, catalog) do
       {:ok, slot}
     else
@@ -52,14 +55,18 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @impl true
   def reserve(slot, assignment, context) do
     with :ok <- matching_assignment?(slot, assignment),
+         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
+         true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
            post(context, "/reserve", %{
              assignmentDigest: assignment.sha256,
-             slotId: slot.slot_id
+             slotId: slot.slot_id,
+             claimUid: claim_uid
            }),
          true <-
            data["leaseId"] == slot.lease_id and data["slotId"] == slot.slot_id and
-             data["claimName"] == slot.claim_name and is_boolean(data["replayed"]) do
+             data["claimName"] == slot.claim_name and data["claimUid"] == claim_uid and
+             is_boolean(data["replayed"]) do
       :ok
     else
       _ -> {:held, :codex_auth_slot_reservation_unverified}
@@ -69,6 +76,8 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @impl true
   def bind_uid(slot, assignment, allocation, context) do
     with :ok <- matching_assignment?(slot, assignment),
+         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
+         true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
            post(context, "/" <> slot.lease_id <> "/bind-job", %{
              allocationId: allocation.id
@@ -83,6 +92,8 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @impl true
   def authorize(slot, assignment, allocation, context) do
     with :ok <- matching_assignment?(slot, assignment),
+         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
+         true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
            post(context, "/" <> slot.lease_id <> "/authorize", %{
              allocationId: allocation.id
@@ -113,14 +124,11 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     do: {:held, :codex_auth_slot_release_verification_unavailable}
 
   defp matching_assignment?(
-         %{assignment_sha256: digest, seat: seat, lease_id: lease_id, slot_id: slot_id, claim_name: claim_name},
+         %{assignment_sha256: digest, seat: seat} = slot,
          %{sha256: digest, seat: seat}
-       )
-       when is_binary(lease_id) and is_binary(slot_id) and is_binary(claim_name) do
-    if Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, lease_id) and
-         Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, slot_id) and
-         Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, claim_name) and
-         byte_size(slot_id) <= 63 and byte_size(claim_name) <= 63 do
+       ) do
+    if valid_lease_id?(Map.get(slot, :lease_id)) and valid_slot_name?(Map.get(slot, :slot_id)) and
+         valid_slot_name?(Map.get(slot, :claim_name)) and valid_claim_uid?(Map.get(slot, :claim_uid)) do
       :ok
     else
       :invalid_binding
@@ -133,6 +141,51 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     do: Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, value)
 
   defp valid_lease_id?(_value), do: false
+
+  defp valid_slot_name?(value) when is_binary(value),
+    do: byte_size(value) <= 63 and Regex.match?(~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/, value)
+
+  defp valid_slot_name?(_value), do: false
+
+  defp valid_claim_uid?(value) when is_binary(value),
+    do: byte_size(value) in 1..256 and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/, value)
+
+  defp valid_claim_uid?(_value), do: false
+
+  defp read_claim_uid(context, claim_name) when is_map(context) and is_binary(claim_name) do
+    namespace = Map.get(context, :pvc_namespace)
+    kube_context = Map.get(context, :pvc_client_context)
+    reader = Map.get(context, :pvc_read_fun, &HTTPClient.get_pvc/3)
+
+    if is_binary(namespace) and is_function(reader, 3) do
+      reader.(namespace, claim_name, kube_context)
+      |> verified_pvc_uid(namespace, claim_name)
+    else
+      {:error, :pvc_reader_unavailable}
+    end
+  rescue
+    _error -> {:error, :pvc_identity_unverified}
+  end
+
+  defp read_claim_uid(_context, _claim_name), do: {:error, :pvc_reader_unavailable}
+
+  defp verified_pvc_uid(
+         {:ok,
+          %{
+            "apiVersion" => "v1",
+            "kind" => "PersistentVolumeClaim",
+            "metadata" => %{"namespace" => namespace, "name" => claim_name, "uid" => uid} = metadata,
+            "status" => %{"phase" => "Bound"}
+          }},
+         namespace,
+         claim_name
+       ) do
+    if valid_claim_uid?(uid) and is_nil(Map.get(metadata, "deletionTimestamp")),
+      do: {:ok, uid},
+      else: {:error, :pvc_identity_unverified}
+  end
+
+  defp verified_pvc_uid(_response, _namespace, _claim_name), do: {:error, :pvc_identity_unverified}
 
   defp post(context, suffix, body) do
     with {:ok, base_url, token, reservation_id} <- configuration(context),

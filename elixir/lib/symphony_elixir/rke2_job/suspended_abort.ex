@@ -239,6 +239,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
       "slotId" => slot.slot_id,
       "leaseId" => slot.lease_id,
       "claimName" => slot.claim_name,
+      "claimUid" => slot.claim_uid,
       "assignmentSHA256" => assignment.sha256,
       "seat" => assignment.seat
     }

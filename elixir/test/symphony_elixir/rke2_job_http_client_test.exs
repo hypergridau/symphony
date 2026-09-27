@@ -73,6 +73,22 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert {:error, {:kubernetes_http_status, 403}} = HTTPClient.list_pods(@namespace, context())
   end
 
+  test "PVC read stays in the configured namespace and rejects missing or malformed identity" do
+    pvc = %{"apiVersion" => "v1", "kind" => "PersistentVolumeClaim", "metadata" => %{"name" => "codex-home-one", "namespace" => @namespace, "uid" => "pvc-uid-one"}, "status" => %{"phase" => "Bound"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.method == "GET"
+      assert conn.request_path == "/api/v1/namespaces/#{@namespace}/persistentvolumeclaims/codex-home-one"
+      Req.Test.json(conn, pvc)
+    end)
+
+    assert {:ok, ^pvc} = HTTPClient.get_pvc(@namespace, "codex-home-one", context())
+
+    Req.Test.expect(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 404, "not found") end)
+    assert {:error, :not_found} = HTTPClient.get_pvc(@namespace, "codex-home-one", context())
+    assert {:error, :invalid_kubernetes_pvc_identity} = HTTPClient.get_pvc(@namespace, "../other", context())
+  end
+
   test "cleanup Pod snapshot retains the complete list resource version" do
     pod = %{"apiVersion" => "v1", "kind" => "Pod", "metadata" => %{"name" => "worker-abc", "namespace" => @namespace, "uid" => "pod-uid"}}
 

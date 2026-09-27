@@ -62,6 +62,21 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     end
   end
 
+  @doc "Reads the named PVC from the exact configured namespace for OAuth slot identity checks."
+  @spec get_pvc(String.t(), String.t(), term()) :: {:ok, map()} | {:error, term()}
+  def get_pvc(namespace, name, context) do
+    with {:ok, settings} <- settings(context, namespace),
+         true <- valid_name?(name) do
+      case request(:get, @pod_api_path <> namespace <> "/persistentvolumeclaims/" <> name, nil, settings, :pvc) do
+        {:error, {:kubernetes_http_status, 404}} -> {:error, :not_found}
+        result -> result
+      end
+    else
+      false -> {:error, :invalid_kubernetes_pvc_identity}
+      {:error, _reason} = error -> error
+    end
+  end
+
   @impl true
   @spec activate_job(String.t(), String.t(), String.t(), String.t(), term()) :: {:ok, map()} | {:error, term()}
   def activate_job(namespace, name, uid, resource_version, context) do
@@ -142,6 +157,11 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
        do: {:ok, body}
 
   defp decode_success(:job, _status, _body), do: {:error, :invalid_kubernetes_job_response}
+
+  defp decode_success(:pvc, _status, %{"apiVersion" => "v1", "kind" => "PersistentVolumeClaim", "metadata" => metadata} = body)
+       when is_map(metadata), do: {:ok, body}
+
+  defp decode_success(:pvc, _status, _body), do: {:error, :invalid_kubernetes_pvc_response}
 
   defp decode_success(:pods, status, body) do
     case decode_success(:pod_snapshot, status, body) do

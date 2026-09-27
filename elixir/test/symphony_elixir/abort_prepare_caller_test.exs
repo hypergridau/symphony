@@ -1256,6 +1256,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     slot = %{
       slot_id: "luna-slot-1",
       claim_name: "frigga-codex-luna-slot-1",
+      claim_uid: "pvc-uid-one",
       lease_id: "11111111-2222-4333-8444-555555555501",
       assignment_sha256: assignment.sha256,
       seat: assignment.seat

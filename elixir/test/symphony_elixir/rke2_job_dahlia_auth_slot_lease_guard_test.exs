@@ -5,7 +5,15 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
   @digest String.duplicate("a", 64)
   @lease_id "12345678-1234-4123-8123-123456789abc"
-  @slot %{slot_id: "slot-one", claim_name: "codex-home-one", lease_id: @lease_id, assignment_sha256: @digest, seat: "luna-high"}
+  @pvc_uid "pvc-uid-one"
+  @slot %{
+    slot_id: "slot-one",
+    claim_name: "codex-home-one",
+    claim_uid: @pvc_uid,
+    lease_id: @lease_id,
+    assignment_sha256: @digest,
+    seat: "luna-high"
+  }
   @assignment %{sha256: @digest, seat: "luna-high"}
   @allocation %{id: "rke2job:v1:exact-allocation"}
 
@@ -18,7 +26,13 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       data =
         cond do
           String.ends_with?(url, "/reserve") ->
-            %{"leaseId" => @lease_id, "slotId" => "slot-one", "claimName" => "codex-home-one", "replayed" => true}
+            %{
+              "leaseId" => @lease_id,
+              "slotId" => "slot-one",
+              "claimName" => "codex-home-one",
+              "claimUid" => @pvc_uid,
+              "replayed" => true
+            }
 
           String.ends_with?(url, "/bind-job") ->
             %{"bound" => true}
@@ -33,11 +47,19 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       {:ok, %Req.Response{status: 200, body: %{"data" => data}}}
     end
 
-    context = %{base_url: "https://dahlia.example/", runner_token: "host-only-token", reservation_id: "reservation-one", post_fun: post}
+    context = %{
+      base_url: "https://dahlia.example/",
+      runner_token: "host-only-token",
+      reservation_id: "reservation-one",
+      post_fun: post,
+      pvc_namespace: "frigga",
+      pvc_read_fun: &read_pvc/3
+    }
 
     assert :ok = DahliaAuthSlotLeaseGuard.reserve(@slot, @assignment, context)
-    assert_receive {:post, "https://dahlia.example/runner/v1/verified-assignments/reservation-one/codex-auth-slots/reserve", reserve_opts}
-    assert reserve_opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one"}
+    assert_receive {:post, reserve_url, reserve_opts}
+    assert String.ends_with?(reserve_url, "/reservation-one/codex-auth-slots/reserve")
+    assert reserve_opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one", claimUid: @pvc_uid}
     assert reserve_opts[:headers] == [{"authorization", "Bearer host-only-token"}]
     assert reserve_opts[:retry] == false
     assert reserve_opts[:redirect] == false
@@ -63,8 +85,18 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       base_url: "https://dahlia.example",
       runner_token: "token",
       reservation_id: "reservation-one",
+      pvc_namespace: "frigga",
+      pvc_read_fun: &read_pvc/3,
       post_fun: fn _url, _opts ->
-        {:ok, %Req.Response{status: 200, body: %{"data" => %{"leaseId" => "another", "slotId" => "slot-one", "claimName" => "codex-home-one", "replayed" => false}}}}
+        data = %{
+          "leaseId" => "another",
+          "slotId" => "slot-one",
+          "claimName" => "codex-home-one",
+          "claimUid" => @pvc_uid,
+          "replayed" => false
+        }
+
+        {:ok, %Req.Response{status: 200, body: %{"data" => data}}}
       end
     }
 
@@ -85,6 +117,25 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
     assert {:held, :codex_auth_slot_reservation_unverified} =
              DahliaAuthSlotLeaseGuard.reserve(%{@slot | lease_id: "../other"}, @assignment, context)
+
+    replaced = %{
+      context
+      | pvc_read_fun: fn _, _, _ ->
+          {:ok,
+           %{
+             "apiVersion" => "v1",
+             "kind" => "PersistentVolumeClaim",
+             "metadata" => %{"namespace" => "frigga", "name" => "codex-home-one", "uid" => "replacement-pvc"},
+             "status" => %{"phase" => "Bound"}
+           }}
+        end
+    }
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.reserve(@slot, @assignment, replaced)
+
+    assert {:held, :codex_auth_slot_authorization_unverified} =
+             DahliaAuthSlotLeaseGuard.authorize(@slot, @assignment, @allocation, replaced)
 
     assert {:held, :codex_auth_slot_release_verification_unavailable} =
              DahliaAuthSlotLeaseGuard.release(@slot, @assignment, @allocation, context)
@@ -137,17 +188,23 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     post = fn url, opts ->
       send(caller, {:post, url, opts})
 
-      {:ok,
-       %Req.Response{
-         status: 200,
-         body: %{"data" => %{"leaseId" => @lease_id, "slotId" => "slot-one", "claimName" => "codex-home-one", "replayed" => false}}
-       }}
+      data = %{
+        "leaseId" => @lease_id,
+        "slotId" => "slot-one",
+        "claimName" => "codex-home-one",
+        "claimUid" => @pvc_uid,
+        "replayed" => false
+      }
+
+      {:ok, %Req.Response{status: 200, body: %{"data" => data}}}
     end
 
     context = %{
       base_url: "https://dahlia.example",
       runner_token: "host-only-token",
       reservation_id: "reservation-one",
+      pvc_namespace: "frigga",
+      pvc_read_fun: &read_pvc/3,
       post_fun: post
     }
 
@@ -157,19 +214,77 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     assert slot == @slot
     assert_receive {:post, url, opts}
     assert String.ends_with?(url, "/reservation-one/codex-auth-slots/reserve")
-    assert opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one"}
+    assert opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one", claimUid: @pvc_uid}
 
     assert {:held, :codex_auth_slot_reservation_unverified} =
              DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", %{"slot-one" => "other-claim"}, context)
 
-    assert_receive {:post, _, _}
+    refute_receive {:post, _, _}
+
+    aliased_catalog = %{"slot-one" => "codex-home-one", "slot-two" => "codex-home-one"}
 
     assert {:held, :codex_auth_slot_reservation_unverified} =
-             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", %{"slot-one" => "codex-home-one", "slot-two" => "codex-home-one"}, context)
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", aliased_catalog, context)
 
     refute_receive {:post, _, _}
 
     assert {:held, :codex_auth_slot_reservation_unverified} =
              DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, %{})
+
+    unbound = %{
+      context
+      | pvc_read_fun: fn _, _, _ ->
+          metadata = %{"namespace" => "frigga", "name" => "codex-home-one", "uid" => @pvc_uid}
+
+          {:ok,
+           %{
+             "apiVersion" => "v1",
+             "kind" => "PersistentVolumeClaim",
+             "metadata" => metadata,
+             "status" => %{"phase" => "Pending"}
+           }}
+        end
+    }
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, unbound)
+
+    deleting = %{
+      context
+      | pvc_read_fun: fn _, _, _ ->
+          metadata = %{
+            "namespace" => "frigga",
+            "name" => "codex-home-one",
+            "uid" => @pvc_uid,
+            "deletionTimestamp" => "2026-09-27T00:00:00Z"
+          }
+
+          {:ok,
+           %{
+             "apiVersion" => "v1",
+             "kind" => "PersistentVolumeClaim",
+             "metadata" => metadata,
+             "status" => %{"phase" => "Bound"}
+           }}
+        end
+    }
+
+    assert {:held, :codex_auth_slot_reservation_unverified} =
+             DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, deleting)
   end
+
+  defp read_pvc("frigga", "codex-home-one", _context) do
+    metadata = %{"namespace" => "frigga", "name" => "codex-home-one", "uid" => @pvc_uid}
+
+    pvc = %{
+      "apiVersion" => "v1",
+      "kind" => "PersistentVolumeClaim",
+      "metadata" => metadata,
+      "status" => %{"phase" => "Bound"}
+    }
+
+    {:ok, pvc}
+  end
+
+  defp read_pvc(_namespace, _claim_name, _context), do: {:error, :not_found}
 end
