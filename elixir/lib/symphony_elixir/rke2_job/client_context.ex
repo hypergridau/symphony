@@ -6,6 +6,11 @@ defmodule SymphonyElixir.RKE2Job.ClientContext do
   never loads credentials itself, and callers must not persist its result.
   """
 
-  @callback client_context(map(), :allocate | :delete, String.t(), term()) ::
+  @callback client_context(
+              map(),
+              :allocate | :activate | :delete | :abort_prepare | :abort_confirm | :finalize,
+              String.t(),
+              term()
+            ) ::
               {:ok, term()} | {:error, term()}
 end

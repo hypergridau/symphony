@@ -191,6 +191,23 @@ object identifiers. The adapter return shapes are deliberately narrow so
 workspace paths, command strings, credential values and raw process output are
 not lifecycle fields.
 
+The slotted suspended-Job abort source path is split into
+prepare_abort_unstarted_owned/4 and confirm_abort_unstarted_owned/6. The first
+returns a credential-free immutable-input observation of the compiled identity,
+allocation ID, current slot binding, suspended Job tuple and complete Pod snapshot
+without deleting anything. A trusted host persists that exact observation with
+Dahlia and supplies the durable provider acknowledgment plus its configured
+prepare_ack_guard verification to confirmation. Confirmation checks that the
+acknowledgment binds the exact assignment digest, allocation ID and observation,
+then revalidates the slot binding and Kubernetes evidence before conditional
+deletion. The compatibility abort entrypoints always hold. Slot verification uses
+the paused-safe /verify-bound route, which checks the current lease/allocation
+binding while admission is paused. A Pod can still appear between the complete
+pre-delete snapshot and DELETE; post-delete Pod verification holds in that case.
+The prepare acknowledgment guard is a required host-supplied port; Symphony has
+no production persistence implementation. No OAuth/provider release or signed
+final abort proof is performed by Symphony.
+
 Before execution, the typed adapter acquires a JIT credential lease bound to the
 assignment digest and allocation, renews it using a stable key, and refuses to
 execute when the lease is denied or expired. Lease responses contain only the

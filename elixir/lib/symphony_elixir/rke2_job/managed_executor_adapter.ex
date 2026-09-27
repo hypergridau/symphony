@@ -103,17 +103,55 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
 
   defp direct_delete_allowed?(_config), do: :ok
 
-  @doc "Conditionally removes a never-activated slotted Job; retains OAuth and provider leases."
-  @spec abort_unstarted_owned(allocation(), map(), String.t(), term()) :: :ok | {:held, term()} | {:error, term()}
-  def abort_unstarted_owned(allocation, assignment, idempotency_key, context) do
+  @doc "Deprecated compatibility entrypoint; held because it cannot carry a durable prepare acknowledgment."
+  @deprecated "Use prepare_abort_unstarted_owned/4, persist Dahlia's acknowledgment, then confirm_abort_unstarted_owned/6."
+  @spec abort_unstarted_owned(allocation(), map(), String.t(), term()) ::
+          {:held, :durable_abort_prepare_ack_required}
+  def abort_unstarted_owned(_allocation, _assignment, _idempotency_key, _context),
+    do: {:held, :durable_abort_prepare_ack_required}
+
+  @doc "Reads and returns immutable-prepare input for a suspended slotted Job; performs no delete."
+  @spec prepare_abort_unstarted_owned(allocation(), map(), String.t(), term()) ::
+          {:ok, map()} | {:held, term()} | {:error, term()}
+  def prepare_abort_unstarted_owned(allocation, assignment, idempotency_key, context) do
     with :ok <- validate_assignment(assignment),
          :ok <- validate_key(idempotency_key, assignment, :abort_unstarted),
          {:ok, ports} <- ports(context),
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
-         :ok <- auth_slot_guard(context, ports.config, :authorize, [ports.config[:auth_slot], assignment, allocation]),
-         {:ok, client_context} <- client_context(ports, assignment, :abort_unstarted, idempotency_key) do
-      SuspendedAbort.abort_owned(assignment, uid, provider_opts(ports, client_context))
+         :ok <- auth_slot_guard(context, ports.config, :verify_bound, [ports.config[:auth_slot], assignment, allocation]),
+         {:ok, client_context} <- client_context(ports, assignment, :abort_prepare, idempotency_key) do
+      SuspendedAbort.prepare_owned(assignment, allocation.id, uid, provider_opts(ports, client_context))
+    else
+      {:held, reason} -> {:held, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Deprecated confirmation entrypoint; held because it has no provider acknowledgment."
+  @deprecated "Pass Dahlia's durable prepare acknowledgment to confirm_abort_unstarted_owned/6."
+  @spec confirm_abort_unstarted_owned(allocation(), map(), String.t(), map(), term()) ::
+          {:held, :durable_abort_prepare_ack_required}
+  def confirm_abort_unstarted_owned(_allocation, _assignment, _idempotency_key, _observation, _context),
+    do: {:held, :durable_abort_prepare_ack_required}
+
+  @doc "Verifies a durable provider acknowledgment, rechecks the observation, and conditionally deletes the Job."
+  @spec confirm_abort_unstarted_owned(allocation(), map(), String.t(), map(), map(), term()) ::
+          :ok | {:held, term()} | {:error, term()}
+  def confirm_abort_unstarted_owned(allocation, assignment, idempotency_key, observation, prepare_ack, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :abort_unstarted),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, uid} <- allocation_uid(allocation, expected),
+         :ok <- auth_slot_guard(context, ports.config, :verify_bound, [ports.config[:auth_slot], assignment, allocation]),
+         {:ok, client_context} <- client_context(ports, assignment, :abort_confirm, idempotency_key) do
+      ack_opts =
+        provider_opts(ports, client_context)
+        |> Keyword.put(:prepare_ack_guard, Map.get(context, :prepare_ack_guard))
+        |> Keyword.put(:prepare_ack_guard_context, Map.get(context, :prepare_ack_guard_context))
+
+      SuspendedAbort.confirm_owned(assignment, allocation.id, uid, observation, prepare_ack, ack_opts)
     else
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}

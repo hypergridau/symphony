@@ -51,6 +51,9 @@ defmodule SymphonyElixir.RKE2JobFakeAuthSlotLeaseGuard do
   def authorize(slot, assignment, allocation, agent), do: record(:authorize, slot, assignment, allocation, agent)
 
   @impl true
+  def verify_bound(slot, assignment, allocation, agent), do: record(:verify_bound, slot, assignment, allocation, agent)
+
+  @impl true
   def release(slot, assignment, allocation, agent), do: record(:release, slot, assignment, allocation, agent)
 
   defp record(action, slot, assignment, allocation, agent) do
@@ -67,6 +70,28 @@ defmodule SymphonyElixir.RKE2JobFakeAuthSlotLeaseGuard do
       {result, %{state | events: [event | state.events]}}
     end)
   end
+end
+
+defmodule SymphonyElixir.RKE2JobFakePrepareAckGuard do
+  @behaviour SymphonyElixir.RKE2Job.PrepareAckGuard
+
+  @impl true
+  def verify(_assignment_digest, _allocation_id, _observation, _ack, %{raise?: true}),
+    do: raise("prepare acknowledgment verifier failed")
+
+  @impl true
+  def verify(assignment_digest, allocation_id, observation, ack, context) when is_map(context) do
+    if context.assignment_digest == assignment_digest and context.allocation_id == allocation_id and
+         context.observation == observation and context.ack == ack do
+      :ok
+    else
+      {:held, :prepare_ack_observation_mismatch}
+    end
+  end
+
+  @impl true
+  def verify(_assignment_digest, _allocation_id, _observation, _ack, _context),
+    do: {:held, :prepare_ack_context_unavailable}
 end
 
 defmodule SymphonyElixir.RKE2JobFakeAllocationRegistry do
@@ -86,7 +111,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{JobSpec, ManagedExecutorAdapter, ResultJournal}
+  alias SymphonyElixir.RKE2Job.{JobSpec, ManagedExecutorAdapter, ResultJournal, SuspendedAbort}
   alias SymphonyElixir.RKE2JobFakeClient
   alias SymphonyElixir.Worker.CLI
 
@@ -293,36 +318,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert {:ok, allocation} =
              ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
 
-    assert :ok =
-             ManagedExecutorAdapter.abort_unstarted_owned(
-               allocation,
-               assignment,
-               key(assignment, :abort_unstarted),
-               opts
-             )
-
-    assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
-    refute :release in slot_actions(context)
-
-    assert {:held, :suspended_abort_job_already_absent} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
-               allocation,
-               assignment,
-               key(assignment, :abort_unstarted),
-               opts
-             )
-  end
-
-  test "suspended abort requires the current bound slot authorization", context do
-    assignment = assignment()
-    opts = slot_context(context, assignment)
-
-    assert {:ok, allocation} =
-             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
-
-    Agent.update(context.slot_lease, &%{&1 | denied: :authorize})
-
-    assert {:held, :synthetic_slot_lease_denial} =
+    assert {:held, :durable_abort_prepare_ack_required} =
              ManagedExecutorAdapter.abort_unstarted_owned(
                allocation,
                assignment,
@@ -331,8 +327,316 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              )
 
     assert Agent.get(context.client, & &1.deletes) == []
-    assert :authorize in slot_actions(context)
+    assert {:held, :durable_abort_prepare_ack_required} = SuspendedAbort.abort_owned(assignment, "job-uid", [])
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    assert {:held, :durable_abort_prepare_ack_required} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               opts
+             )
+
+    assert {:held, :durable_abort_prepare_ack_required} =
+             SuspendedAbort.confirm_owned(assignment, "job-uid", observation, opts)
+
+    assert :ok =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
     refute :release in slot_actions(context)
+
+    assert {:held, :suspended_abort_job_already_absent} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+  end
+
+  test "suspended abort requires the current bound slot verification", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.slot_lease, &%{&1 | denied: :verify_bound})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    assert :verify_bound in slot_actions(context)
+    refute :release in slot_actions(context)
+  end
+
+  test "suspended abort prepare is read-only and confirmation consumes the exact observation", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert observation["schemaVersion"] == 1
+    assert is_binary(observation["observedAt"])
+    assert observation["compiledIdentity"]["assignmentSHA256"] == assignment.sha256
+    assert observation["compiledIdentity"]["compiledJobSHA256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert observation["allocationId"] == allocation.id
+    assert observation["slotBinding"]["leaseId"] == opts.config.auth_slot.lease_id
+
+    assert observation["job"] == %{
+             "uid" => elem(allocation_uid(allocation), 1),
+             "resourceVersion" => "17",
+             "generation" => 1,
+             "suspended" => true,
+             "noExecution" => true
+           }
+
+    assert observation["podSnapshot"]["complete"]
+    assert observation["podSnapshot"]["ownedPodsAbsent"]
+    assert observation["podSnapshot"]["resourceVersion"] == "list-rv-9"
+    assert observation["podSnapshot"]["sha256"] =~ ~r/\A[0-9a-f]{64}\z/
+    assert Agent.get(context.client, & &1.deletes) == []
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    assert :ok =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+    refute Map.has_key?(observation, "token")
+  end
+
+  test "suspended abort confirmation holds altered and stale prepare observations", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    altered = put_in(observation, ["job", "resourceVersion"], "tampered-rv")
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    assert {:held, :prepare_ack_observation_mismatch} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               altered,
+               ack,
+               guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+
+    changed_binding = put_in(opts, [:config, :auth_slot, :lease_id], "lease:slot-1:43")
+
+    changed_guarded_opts =
+      Map.merge(changed_binding, Map.take(guarded_opts, [:prepare_ack_guard, :prepare_ack_guard_context]))
+
+    assert {:held, :suspended_abort_observation_invalid} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               changed_guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+
+    Agent.update(context.client, &Map.put(&1, :pod_list_resource_version, "list-rv-10"))
+
+    assert {:held, :suspended_abort_pods_changed_since_prepare} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "suspended abort confirmation rejects replay after successful deletion", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    assert :ok =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert {:held, :suspended_abort_job_already_absent} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "suspended abort confirmation holds a conditional-delete race after prepare", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    Agent.update(context.client, &Map.put(&1, :delete_error, :precondition_conflict))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    refute :release in slot_actions(context)
+  end
+
+  test "suspended abort confirmation requires a matching durable prepare acknowledgment guard", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+    assert {:held, :abort_prepare_ack_guard_missing} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               opts
+             )
+
+    changed_ack = Map.put(ack, "prepareId", "different-prepare-id")
+
+    assert {:held, :prepare_ack_observation_mismatch} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               changed_ack,
+               guarded_opts
+             )
+
+    raising_guard_opts =
+      Map.put(guarded_opts, :prepare_ack_guard_context, %{raise?: true})
+
+    assert {:held, :abort_prepare_ack_verification_failed} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               raising_guard_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
   end
 
   test "suspended abort holds if a claim Pod appears after the first snapshot", context do
@@ -347,7 +651,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &Map.put(&1, :pod_injected_on_suspended_delete, {"late-pod", pod}))
 
     assert {:held, :suspended_abort_pod_absence_unverified} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -368,7 +672,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &Map.put(&1, :raise_after_suspended_delete, true))
 
     assert {:held, :suspended_abort_delete_uncertain} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -391,7 +695,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &put_in(&1, [:jobs, job_key, "metadata", "generation"], 2))
 
     assert {:held, :suspended_abort_identity_or_start_unverified} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -402,7 +706,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &Map.put(&1, :delete_error, :precondition_conflict))
 
     assert {:held, :suspended_abort_delete_uncertain} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -418,7 +722,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     end)
 
     assert {:held, :suspended_abort_pod_absence_unverified} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -440,7 +744,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     original = Agent.get(context.client, &Map.fetch!(&1.jobs, job_key))
 
     call = fn ->
-      ManagedExecutorAdapter.abort_unstarted_owned(
+      abort_with_ack(
         allocation,
         assignment,
         key(assignment, :abort_unstarted),
@@ -480,7 +784,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &Map.put(&1, :pods, %{"claim-pod" => labelled}))
 
     assert {:held, :suspended_abort_pod_absence_unverified} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -491,7 +795,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.client, &Map.put(&1, :pods, %{"claim-pod" => malformed}))
 
     assert {:held, :suspended_abort_pod_absence_unverified} =
-             ManagedExecutorAdapter.abort_unstarted_owned(
+             abort_with_ack(
                allocation,
                assignment,
                key(assignment, :abort_unstarted),
@@ -850,6 +1154,40 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
       |> Map.put(:auth_slot, slot)
       |> Map.put(:auth_slot_catalog, %{slot.slot_id => slot.claim_name})
     end)
+  end
+
+  defp ack_context(assignment, allocation, observation, opts) do
+    ack = %{"prepareId" => "prepare-fixture"}
+
+    guard_context = %{
+      assignment_digest: assignment.sha256,
+      allocation_id: allocation.id,
+      observation: observation,
+      ack: ack
+    }
+
+    guarded_opts =
+      opts
+      |> Map.put(:prepare_ack_guard, SymphonyElixir.RKE2JobFakePrepareAckGuard)
+      |> Map.put(:prepare_ack_guard_context, guard_context)
+
+    {ack, guarded_opts}
+  end
+
+  defp abort_with_ack(allocation, assignment, idempotency_key, opts) do
+    with {:ok, observation} <-
+           ManagedExecutorAdapter.prepare_abort_unstarted_owned(allocation, assignment, idempotency_key, opts) do
+      {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+
+      ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+        allocation,
+        assignment,
+        idempotency_key,
+        observation,
+        ack,
+        guarded_opts
+      )
+    end
   end
 
   defp slot_actions(context) do
