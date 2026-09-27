@@ -26,13 +26,27 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
   @spec record_abort_prepare_intent(map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
   def record_abort_prepare_intent(input, reservation, prepare_id, prepare_request_sha256)
       when is_map(input) and is_map(reservation) do
-    with {:ok, request} <- abort_prepare_intent_request(input, reservation, prepare_id, prepare_request_sha256),
-         {:ok, response} <- invoke(input, request) do
-      validate_response(response)
+    case record_abort_prepare_intent_receipt(input, reservation, prepare_id, prepare_request_sha256) do
+      {:ok, _receipt} -> :ok
+      {:error, _reason} = error -> error
     end
   end
 
   def record_abort_prepare_intent(_input, _reservation, _prepare_id, _prepare_request_sha256),
+    do: {:error, :invalid_abort_prepare_intent}
+
+  @doc "Records the exact provider abort-prepare intent and returns its validated root receipt."
+  @spec record_abort_prepare_intent_receipt(map(), map(), String.t(), String.t()) ::
+          {:ok, map()} | {:error, term()}
+  def record_abort_prepare_intent_receipt(input, reservation, prepare_id, prepare_request_sha256)
+      when is_map(input) and is_map(reservation) do
+    with {:ok, request} <- abort_prepare_intent_request(input, reservation, prepare_id, prepare_request_sha256),
+         {:ok, response} <- invoke(input, request) do
+      validate_receipt(response)
+    end
+  end
+
+  def record_abort_prepare_intent_receipt(_input, _reservation, _prepare_id, _prepare_request_sha256),
     do: {:error, :invalid_abort_prepare_intent}
 
   @doc "Records exact pre-execution abort proof references as root-witness provenance only."
@@ -187,4 +201,18 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
     do: {:error, {:host_witness_rejected, reason}}
 
   defp validate_response(_response), do: {:error, :invalid_host_witness_receipt}
+
+  defp validate_receipt(%{"ok" => true, "receipt" => receipt}) when is_map(receipt) do
+    case validate_response(%{"ok" => true, "receipt" => receipt}) do
+      :ok -> {:ok, receipt}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_receipt(response) do
+    case validate_response(response) do
+      :ok -> {:error, :invalid_host_witness_receipt}
+      {:error, _reason} = error -> error
+    end
+  end
 end
