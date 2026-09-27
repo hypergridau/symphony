@@ -593,7 +593,13 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     bundle
   end
 
-  defp config, do: %{namespace: "symphony-beta", image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64)}
+  defp config,
+    do: %{
+      namespace: "symphony-beta",
+      image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64),
+      repository_id: "123456789"
+    }
+
   defp key(assignment, stage), do: assignment.sha256 <> ":" <> Atom.to_string(stage)
 
   defp store_defaulted_job(job, uid) do
