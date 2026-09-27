@@ -21,6 +21,22 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
     end)
   end
 
+  def list_pods_snapshot(namespace, agent) do
+    Agent.get(agent, fn state ->
+      case Map.get(state, :list_pods_snapshot_error) do
+        nil ->
+          {:ok,
+           %{
+             items: state |> Map.get(:pods, %{}) |> Map.values() |> Enum.filter(&(get_in(&1, ["metadata", "namespace"]) == namespace)),
+             resource_version: Map.get(state, :pod_list_resource_version, "list-rv-9")
+           }}
+
+        reason ->
+          {:error, reason}
+      end
+    end)
+  end
+
   @impl true
   def activate_job(namespace, name, uid, resource_version, agent) do
     Agent.get_and_update(agent, &activate_job_state(&1, {namespace, name}, uid, resource_version))
@@ -84,10 +100,28 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
 
     case Map.get(state.jobs, key) do
       %{"metadata" => %{"uid" => ^uid}} ->
-        {:ok, %{state | jobs: Map.delete(state.jobs, key), deletes: [uid | state.deletes]}}
+        pods = remaining_pods(state, uid)
+        {:ok, state |> Map.put(:pods, pods) |> Map.put(:jobs, Map.delete(state.jobs, key)) |> Map.put(:deletes, [uid | state.deletes])}
 
       _ ->
         {{:error, :uid_precondition_failed}, state}
+    end
+  end
+
+  defp remaining_pods(state, uid) do
+    pods = Map.get(state, :pods, %{})
+
+    if Map.get(state, :delete_pods_on_delete?, false) do
+      pods
+      |> Enum.reject(fn {_pod_id, pod} ->
+        pod
+        |> get_in(["metadata", "ownerReferences"])
+        |> List.wrap()
+        |> Enum.any?(&(&1["uid"] == uid))
+      end)
+      |> Map.new()
+    else
+      pods
     end
   end
 
