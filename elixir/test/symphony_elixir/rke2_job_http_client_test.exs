@@ -73,6 +73,25 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
     assert {:error, {:kubernetes_http_status, 403}} = HTTPClient.list_pods(@namespace, context())
   end
 
+  test "cleanup Pod snapshot retains the complete list resource version" do
+    pod = %{"apiVersion" => "v1", "kind" => "Pod", "metadata" => %{"name" => "worker-abc", "namespace" => @namespace, "uid" => "pod-uid"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.request_path == "/api/v1/namespaces/#{@namespace}/pods"
+      json_response(conn, 200, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => %{"resourceVersion" => "117"}, "items" => [pod]})
+    end)
+
+    assert {:ok, %{items: [^pod], resource_version: "117"}} =
+             HTTPClient.list_pods_snapshot(@namespace, context())
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => %{"resourceVersion" => "118", "continue" => "next-page"}, "items" => []})
+    end)
+
+    assert {:error, :invalid_kubernetes_pod_list_response} =
+             HTTPClient.list_pods_snapshot(@namespace, context())
+  end
+
   test "delete uses the server UID and foreground cascading cleanup" do
     Req.Test.expect(__MODULE__, fn conn ->
       assert conn.method == "DELETE"
