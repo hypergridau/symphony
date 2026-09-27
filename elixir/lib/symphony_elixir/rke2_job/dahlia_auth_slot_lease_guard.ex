@@ -95,6 +95,20 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   end
 
   @impl true
+  def verify_bound(slot, assignment, allocation, context) do
+    with :ok <- matching_assignment?(slot, assignment),
+         {:ok, data} <-
+           post(context, "/" <> slot.lease_id <> "/verify-bound", %{
+             allocationId: allocation.id
+           }),
+         true <- data == %{"bound" => true} do
+      :ok
+    else
+      _ -> {:held, :codex_auth_slot_bound_verification_unverified}
+    end
+  end
+
+  @impl true
   def release(_slot, _assignment, _allocation, _context),
     do: {:held, :codex_auth_slot_release_verification_unavailable}
 

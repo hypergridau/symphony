@@ -25,6 +25,9 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
           String.ends_with?(url, "/authorize") ->
             %{"authorized" => true}
+
+          String.ends_with?(url, "/verify-bound") ->
+            %{"bound" => true}
         end
 
       {:ok, %Req.Response{status: 200, body: %{"data" => data}}}
@@ -48,6 +51,11 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     assert_receive {:post, authorize_url, authorize_opts}
     assert String.ends_with?(authorize_url, "/#{@lease_id}/authorize")
     assert authorize_opts[:json] == %{allocationId: @allocation.id}
+
+    assert :ok = DahliaAuthSlotLeaseGuard.verify_bound(@slot, @assignment, @allocation, context)
+    assert_receive {:post, verify_url, verify_opts}
+    assert String.ends_with?(verify_url, "/#{@lease_id}/verify-bound")
+    assert verify_opts[:json] == %{allocationId: @allocation.id}
   end
 
   test "holds wrong lease, response, missing configuration, and release" do
@@ -69,6 +77,9 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     assert {:held, :codex_auth_slot_authorization_unverified} =
              DahliaAuthSlotLeaseGuard.authorize(@slot, @assignment, @allocation, context)
 
+    assert {:held, :codex_auth_slot_bound_verification_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_bound(@slot, @assignment, @allocation, context)
+
     assert {:held, :codex_auth_slot_reservation_unverified} =
              DahliaAuthSlotLeaseGuard.reserve(@slot, @assignment, %{})
 
@@ -77,6 +88,47 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
     assert {:held, :codex_auth_slot_release_verification_unavailable} =
              DahliaAuthSlotLeaseGuard.release(@slot, @assignment, @allocation, context)
+  end
+
+  test "verify-bound requires the exact binding response and assignment" do
+    context = %{
+      base_url: "https://dahlia.example",
+      runner_token: "token",
+      reservation_id: "reservation-one",
+      post_fun: fn _url, _opts ->
+        {:ok, %Req.Response{status: 200, body: %{"data" => %{"bound" => true}}}}
+      end
+    }
+
+    assert :ok = DahliaAuthSlotLeaseGuard.verify_bound(@slot, @assignment, @allocation, context)
+
+    mismatch = %{
+      context
+      | post_fun: fn _url, _opts ->
+          {:ok, %Req.Response{status: 200, body: %{"data" => %{"bound" => false}}}}
+        end
+    }
+
+    assert {:held, :codex_auth_slot_bound_verification_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_bound(@slot, @assignment, @allocation, mismatch)
+
+    extra_field = %{
+      context
+      | post_fun: fn _url, _opts ->
+          {:ok, %Req.Response{status: 200, body: %{"data" => %{"bound" => true, "replayed" => true}}}}
+        end
+    }
+
+    assert {:held, :codex_auth_slot_bound_verification_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_bound(@slot, @assignment, @allocation, extra_field)
+
+    assert {:held, :codex_auth_slot_bound_verification_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_bound(
+               %{@slot | assignment_sha256: String.duplicate("b", 64)},
+               @assignment,
+               @allocation,
+               context
+             )
   end
 
   test "prepares only Dahlia's exact lease and the trusted one-to-one slot catalog" do
@@ -92,7 +144,13 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
        }}
     end
 
-    context = %{base_url: "https://dahlia.example", runner_token: "host-only-token", reservation_id: "reservation-one", post_fun: post}
+    context = %{
+      base_url: "https://dahlia.example",
+      runner_token: "host-only-token",
+      reservation_id: "reservation-one",
+      post_fun: post
+    }
+
     catalog = %{"slot-one" => "codex-home-one"}
 
     assert {:ok, slot} = DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, context)
