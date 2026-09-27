@@ -286,6 +286,221 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert Agent.get(context.client, & &1.deletes) == []
   end
 
+  test "suspended slotted abort removes only the exact unstarted Job and retains the slot lease", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert :ok =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
+    refute :release in slot_actions(context)
+
+    assert {:held, :suspended_abort_job_already_absent} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+  end
+
+  test "suspended abort requires the current bound slot authorization", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.slot_lease, &%{&1 | denied: :authorize})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    assert :authorize in slot_actions(context)
+    refute :release in slot_actions(context)
+  end
+
+  test "suspended abort holds if a claim Pod appears after the first snapshot", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    [1, namespace, _name, _uid, _digest] = allocation_payload(allocation)
+    pod = unrelated_claim_pod(namespace, opts.config.auth_slot.claim_name)
+    Agent.update(context.client, &Map.put(&1, :pod_injected_on_suspended_delete, {"late-pod", pod}))
+
+    assert {:held, :suspended_abort_pod_absence_unverified} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+    refute :release in slot_actions(context)
+  end
+
+  test "suspended abort holds when the delete committed but its client raised", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.client, &Map.put(&1, :raise_after_suspended_delete, true))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+    refute :release in slot_actions(context)
+  end
+
+  test "suspended abort holds on activation history, conditional-delete conflict and claim mount", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    [1, namespace, name, _uid, _digest] = allocation_payload(allocation)
+    job_key = {namespace, name}
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key, "metadata", "generation"], 2))
+
+    assert {:held, :suspended_abort_identity_or_start_unverified} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key, "metadata", "generation"], 1))
+    Agent.update(context.client, &Map.put(&1, :delete_error, :precondition_conflict))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    Agent.update(context.client, &Map.put(&1, :delete_error, nil))
+    claim = opts.config.auth_slot.claim_name
+    pod = unrelated_claim_pod(namespace, claim)
+
+    Agent.update(context.client, fn state ->
+      Map.update(state, :pods, %{"claim-pod" => pod}, &Map.put(&1, "claim-pod", pod))
+    end)
+
+    assert {:held, :suspended_abort_pod_absence_unverified} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "suspended abort rejects execution status, replacement UID and incomplete Pod readback", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    [1, namespace, name, uid, _digest] = allocation_payload(allocation)
+    job_key = {namespace, name}
+    original = Agent.get(context.client, &Map.fetch!(&1.jobs, job_key))
+
+    call = fn ->
+      ManagedExecutorAdapter.abort_unstarted_owned(
+        allocation,
+        assignment,
+        key(assignment, :abort_unstarted),
+        opts
+      )
+    end
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key, "status"], %{"startTime" => "2026-09-27T00:00:00Z"}))
+    assert {:held, :suspended_abort_identity_or_start_unverified} = call.()
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key], put_in(original, ["metadata", "uid"], "replacement")))
+    assert {:held, :suspended_abort_identity_or_start_unverified} = call.()
+
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key], original))
+    Agent.update(context.client, &Map.put(&1, :list_pods_snapshot_error, :timeout))
+    assert {:held, :suspended_abort_pod_read_unavailable} = call.()
+
+    Agent.update(context.client, fn state ->
+      state |> Map.delete(:list_pods_snapshot_error) |> Map.put(:pod_list_resource_version, nil)
+    end)
+
+    assert {:held, :suspended_abort_pod_absence_unverified} = call.()
+    assert Agent.get(context.client, & &1.deletes) == []
+    assert Agent.get(context.client, fn state -> get_in(state.jobs[job_key], ["metadata", "uid"]) end) == uid
+  end
+
+  test "suspended abort holds when a Pod signals the Job or has malformed volume data", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    [1, namespace, _name, uid, _digest] = allocation_payload(allocation)
+    pod = unrelated_claim_pod(namespace, "other-claim")
+    labelled = put_in(pod, ["metadata", "labels"], %{"batch.kubernetes.io/controller-uid" => uid})
+    Agent.update(context.client, &Map.put(&1, :pods, %{"claim-pod" => labelled}))
+
+    assert {:held, :suspended_abort_pod_absence_unverified} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    malformed = put_in(pod, ["spec", "volumes"], [%{"persistentVolumeClaim" => "invalid"}])
+    Agent.update(context.client, &Map.put(&1, :pods, %{"claim-pod" => malformed}))
+
+    assert {:held, :suspended_abort_pod_absence_unverified} =
+             ManagedExecutorAdapter.abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
   test "allocates through the provider and records exact namespace, name, digest, and UID", context do
     assignment = assignment()
 
@@ -639,6 +854,22 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
   defp slot_actions(context) do
     Agent.get(context.slot_lease, fn state -> state.events |> Enum.reverse() |> Enum.map(&elem(&1, 0)) end)
+  end
+
+  defp unrelated_claim_pod(namespace, claim) do
+    %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "namespace" => namespace,
+        "name" => "other-worker",
+        "uid" => "claim-pod",
+        "resourceVersion" => "claim-rv-1",
+        "labels" => %{},
+        "ownerReferences" => []
+      },
+      "spec" => %{"volumes" => [%{"name" => "shared", "persistentVolumeClaim" => %{"claimName" => claim}}]}
+    }
   end
 
   defp terminal_job_and_pod(context, assignment, allocation, mode \\ :preflight) do

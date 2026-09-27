@@ -80,6 +80,39 @@ defmodule SymphonyElixir.RKE2JobFakeClient do
     end)
   end
 
+  @impl true
+  def delete_suspended_job(namespace, name, uid, resource_version, agent) do
+    result =
+      Agent.get_and_update(agent, fn state ->
+        case Map.get(state.jobs, {namespace, name}) do
+          %{
+            "metadata" => %{"uid" => ^uid, "resourceVersion" => ^resource_version},
+            "spec" => %{"suspend" => true}
+          }
+          when is_nil(state.delete_error) ->
+            delete_and_inject_pod(state, namespace, name, uid)
+
+          _ ->
+            {{:error, :suspended_delete_precondition_failed}, state}
+        end
+      end)
+
+    if Agent.get(agent, &Map.get(&1, :raise_after_suspended_delete, false)), do: raise("delete response lost")
+    result
+  end
+
+  defp delete_and_inject_pod(state, namespace, name, uid) do
+    {reply, next} = delete_from_state(state, namespace, name, uid)
+
+    next =
+      case Map.get(state, :pod_injected_on_suspended_delete) do
+        {id, pod} -> Map.update(next, :pods, %{id => pod}, &Map.put(&1, id, pod))
+        _ -> next
+      end
+
+    {reply, next}
+  end
+
   defp pending_delete(state, namespace, name, uid) do
     case Map.get(state.jobs, {namespace, name}) do
       %{"metadata" => %{"uid" => ^uid}} = job ->

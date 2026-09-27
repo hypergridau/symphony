@@ -101,6 +101,26 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     end
   end
 
+  @doc "Deletes a suspended Job only if its UID and resource version still match the verified read."
+  @impl true
+  @spec delete_suspended_job(String.t(), String.t(), String.t(), String.t(), term()) :: :ok | {:error, term()}
+  def delete_suspended_job(namespace, name, uid, resource_version, context) do
+    with {:ok, settings} <- settings(context, namespace),
+         true <- valid_name?(name) and valid_uid?(uid) and valid_resource_version?(resource_version) do
+      body = %{
+        "apiVersion" => "v1",
+        "kind" => "DeleteOptions",
+        "preconditions" => %{"uid" => uid, "resourceVersion" => resource_version},
+        "propagationPolicy" => "Foreground"
+      }
+
+      request(:delete, jobs_path(namespace) <> "/" <> name, body, settings, :delete)
+    else
+      false -> {:error, :invalid_kubernetes_job_identity}
+      {:error, _reason} = error -> error
+    end
+  end
+
   defp request(method, path, body, settings, response_kind) do
     case Req.request(request_options(method, path, body, settings)) do
       {:ok, response} -> http_response(method, response_kind, response)
