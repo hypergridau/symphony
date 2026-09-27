@@ -159,6 +159,59 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:error, :invalid_claim_dispatch_transition} = WorkPackageClaim.begin_paused_recovery(input)
   end
 
+  test "uncertain spawn intent can recover only an exact existing root receipt" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    parent = self()
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue"),
+        do: {:ok, response(%{"data" => reservation_payload()})},
+        else: {:ok, response(%{"data" => claim_result_payload()})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assert {:error, :claim_spawn_replay_unavailable} = WorkPackageClaim.replay_spawn_intent(input)
+
+    uncertain = %{input | host_witness_fun: fn _request -> {:error, :root_witness_unavailable} end}
+    assert {:error, :root_witness_unavailable} = WorkPackageClaim.begin_spawn(uncertain)
+
+    replay = %{
+      input
+      | host_witness_fun: fn request ->
+          send(parent, {:spawn_replay, request})
+
+          {:ok,
+           %{
+             "ok" => true,
+             "receipt" => %{
+               "version" => 1,
+               "sequence" => 3,
+               "hash" => String.duplicate("a", 64),
+               "replayed" => true
+             }
+           }}
+        end
+    }
+
+    assert :ok = WorkPackageClaim.replay_spawn_intent(replay)
+    assert_receive {:spawn_replay, %{"operation" => "spawn_intent", "replayOnly" => true}}
+
+    missing = %{
+      replay
+      | host_witness_fun: fn _request -> {:error, {:host_witness_rejected, "spawn intent replay missing"}} end
+    }
+
+    assert {:error, {:host_witness_rejected, "spawn intent replay missing"}} =
+             WorkPackageClaim.replay_spawn_intent(missing)
+  end
+
   test "claim response remains indeterminate when root cannot record its binding" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
