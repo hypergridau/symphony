@@ -1,0 +1,9 @@
+{
+  "name": "symphony-disposable-worker-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned Codex CLI runtime for the Symphony one-shot RKE2 worker",
+  "dependencies": {
+    "@openai/codex": "0.157.1"
+  }
+}

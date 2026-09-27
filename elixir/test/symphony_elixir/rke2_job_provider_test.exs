@@ -40,6 +40,8 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     pod = get_in(job, ["spec", "template", "spec"])
     assert container["image"] == config.image
     assert container["command"] == ["/usr/local/bin/symphony-worker"]
+    assert container["terminationMessagePath"] == "/tmp/symphony-worker-result"
+    assert container["terminationMessagePolicy"] == "File"
     assert %{"name" => "SYMPHONY_REPOSITORY_ID", "value" => config.repository_id} in container["env"]
     assert container["securityContext"]["allowPrivilegeEscalation"] == false
     assert container["securityContext"]["readOnlyRootFilesystem"] == true
@@ -47,23 +49,9 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert pod["automountServiceAccountToken"] == false
     assert pod["serviceAccountName"] == "disposable-worker"
 
-    assert Enum.find(container["volumeMounts"], &(&1["name"] == "broker-identity")) ==
-             %{"name" => "broker-identity", "mountPath" => "/var/run/secrets/frigga-broker", "readOnly" => true}
-
-    assert Enum.find(pod["volumes"], &(&1["name"] == "broker-identity")) == %{
-             "name" => "broker-identity",
-             "projected" => %{
-               "sources" => [
-                 %{
-                   "serviceAccountToken" => %{
-                     "audience" => "hypergrid-runner-broker",
-                     "expirationSeconds" => 600,
-                     "path" => "token"
-                   }
-                 }
-               ]
-             }
-           }
+    assert %{"name" => "SYMPHONY_WORKER_MODE", "value" => "preflight"} in container["env"]
+    refute Enum.any?(container["volumeMounts"], &(&1["name"] == "broker-identity"))
+    refute Enum.any?(pod["volumes"], &(&1["name"] == "broker-identity"))
 
     assert pod["volumes"]
            |> Enum.filter(&Map.has_key?(&1, "emptyDir"))
@@ -98,6 +86,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-slot"] == slot.slot_id
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-lease"] == slot.lease_id
     assert %{"name" => "CODEX_HOME", "value" => "/var/lib/frigga-codex-home"} in container["env"]
+    assert %{"name" => "SYMPHONY_WORKER_MODE", "value" => "codex"} in container["env"]
     mount = %{"name" => "codex-auth-slot", "mountPath" => "/var/lib/frigga-codex-home", "readOnly" => false}
 
     volume = %{
@@ -108,6 +97,8 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert mount in container["volumeMounts"]
     assert volume in pod["volumes"]
     assert %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}} in pod["volumes"]
+    assert %{"name" => "broker-identity", "mountPath" => "/var/run/secrets/frigga-broker", "readOnly" => true} in container["volumeMounts"]
+    assert Enum.any?(pod["volumes"], &(&1["name"] == "broker-identity"))
 
     wrong_digest = put_in(auth_config, [:auth_slot, :assignment_sha256], String.duplicate("0", 64))
     assert {:error, :rke2_job_auth_slot_invalid} = JobSpec.compile(assignment, wrong_digest)
@@ -293,7 +284,25 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     tampered = [
       put_in(created, ["spec", "template", "spec", "automountServiceAccountToken"], true),
       put_in(created, ["spec", "template", "spec", "serviceAccountName"], "default"),
-      put_in(created, ["spec", "template", "spec", "volumes", Access.at(2), "projected", "sources", Access.at(0), "serviceAccountToken", "audience"], "kubernetes"),
+      update_in(created, ["spec", "template", "spec", "volumes"], fn volumes ->
+        volumes ++
+          [
+            %{
+              "name" => "broker-identity",
+              "projected" => %{
+                "sources" => [
+                  %{
+                    "serviceAccountToken" => %{
+                      "audience" => "kubernetes",
+                      "expirationSeconds" => 600,
+                      "path" => "token"
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+      end),
       put_in(created, ["spec", "template", "spec", "hostNetwork"], true),
       put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "securityContext", "allowPrivilegeEscalation"], true),
       put_in(created, ["spec", "template", "spec", "containers", Access.at(0), "image"], "other@sha256:" <> String.duplicate("b", 64))

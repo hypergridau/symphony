@@ -1,0 +1,47 @@
+name: disposable-worker-image
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "elixir/lib/symphony_elixir/worker/**"
+      - "elixir/lib/symphony_elixir/cli.ex"
+      - "elixir/lib/symphony_elixir/managed_assignment_bundle.ex"
+      - "elixir/lib/symphony_elixir/rke2_job/**"
+      - "elixir/mix.exs"
+      - "elixir/mix.lock"
+      - "elixir/worker-image/**"
+      - ".github/workflows/worker-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-publish:
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build the worker image
+        env:
+          IMAGE: ghcr.io/hypergridau/symphony-worker
+          TAG: sha-${{ github.sha }}
+        run: docker build --file elixir/worker-image/Dockerfile --tag "$IMAGE:$TAG" .
+
+      - name: Publish the immutable source tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ghcr.io/hypergridau/symphony-worker
+          TAG: sha-${{ github.sha }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$TAG"
+          digest="$(docker inspect --format='{{index .RepoDigests 0}}' "$IMAGE:$TAG")"
+          printf 'image=%s\n' "$digest" >> "$GITHUB_STEP_SUMMARY"

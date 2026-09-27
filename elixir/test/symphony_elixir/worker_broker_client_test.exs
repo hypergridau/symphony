@@ -155,6 +155,26 @@ defmodule SymphonyElixir.WorkerBrokerClientTest do
     assert :ok = BrokerClient.revoke("lease-2", context)
   end
 
+  test "creates or reconciles the exact signed branch from its expected base", %{context: context} do
+    base_oid = String.duplicate("a", 40)
+    branch_head = String.duplicate("b", 40)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.request_path == "/v1/branch"
+      {:ok, body, conn} = Plug.Conn.read_body(conn)
+      assert Jason.decode!(body) == %{"leaseId" => "lease-2", "expectedBaseOid" => base_oid}
+      Req.Test.json(conn, %{"status" => "created", "branchRef" => @subject.branchRef, "headOid" => branch_head})
+    end)
+
+    assert {:ok, ^branch_head} = BrokerClient.branch("lease-2", base_oid, @subject.branchRef, context)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{"status" => "created", "branchRef" => "refs/heads/other", "headOid" => branch_head})
+    end)
+
+    assert {:held, :broker_uncertain} = BrokerClient.branch("lease-2", base_oid, @subject.branchRef, context)
+  end
+
   test "denials and uncertain responses fail closed without retries", %{context: context} do
     Req.Test.expect(__MODULE__, fn conn -> Req.Test.json(conn, %{"issued" => false, "reason" => "authority_denied"}) end)
     assert {:error, :broker_denied} = BrokerClient.issue(@subject, :git_checkout, "checkout-4", @now, 300, context)
@@ -174,6 +194,7 @@ defmodule SymphonyElixir.WorkerBrokerClientTest do
 
     assert {:error, :invalid_broker_request} = BrokerClient.issue(@subject, :git_checkout, "key", @now, 601, context)
     assert {:error, :invalid_broker_request} = BrokerClient.commit("lease-2", "bad", "Add canary", [], context)
+    assert {:error, :invalid_broker_request} = BrokerClient.branch("lease-2", "bad", @subject.branchRef, context)
 
     assert {:error, :invalid_broker_request} =
              BrokerClient.commit("lease-2", String.duplicate("a", 40), "Add canary", [nil], context)
