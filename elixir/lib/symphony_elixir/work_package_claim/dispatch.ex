@@ -3,16 +3,21 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  @phases ~w(submitted confirmed recovery_pending spawn_started blocked)
-  @keys ~w(phase attempts retry_at_ms authority_digest)
+  @phases ~w(submitted confirmed allocation_suspended recovery_pending spawn_started blocked)
+  @legacy_keys ~w(phase attempts retry_at_ms authority_digest)
+  @keys @legacy_keys ++ ["allocation_id"]
   @max_attempts 6
 
   @spec decode(term()) :: {:ok, map() | nil} | {:error, term()}
   def decode(nil), do: {:ok, nil}
 
   def decode(value) when is_map(value) do
-    if Enum.sort(Map.keys(value)) == Enum.sort(@keys) do
-      decoded = Map.new(value, fn {key, item} -> {String.to_existing_atom(key), item} end)
+    if Enum.sort(Map.keys(value)) in [Enum.sort(@legacy_keys), Enum.sort(@keys)] do
+      decoded =
+        value
+        |> Map.new(fn {key, item} -> {String.to_existing_atom(key), item} end)
+        |> Map.put_new(:allocation_id, nil)
+
       if valid?(decoded), do: {:ok, decoded}, else: {:error, :invalid_dispatch_journal}
     else
       {:error, :invalid_dispatch_journal}
@@ -25,8 +30,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   def valid?(nil), do: true
 
   def valid?(%{phase: phase, attempts: attempts, retry_at_ms: retry_at, authority_digest: digest} = value) do
-    map_size(value) == 4 and phase in @phases and is_integer(attempts) and attempts in 1..@max_attempts and
-      is_integer(retry_at) and retry_at >= 0 and is_binary(digest) and byte_size(digest) == 64
+    valid_phase?(phase, value) and is_integer(attempts) and attempts in 1..@max_attempts and
+      is_integer(retry_at) and retry_at >= 0 and is_binary(digest) and byte_size(digest) == 64 and
+      valid_allocation_id?(Map.get(value, :allocation_id))
   end
 
   def valid?(_value), do: false
@@ -40,7 +46,15 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     with :ok <- retry_allowed(previous, digest),
          :ok <- retry_due(previous, DateTime.to_unix(now, :millisecond)) do
       attempts = if previous, do: previous.attempts + 1, else: 1
-      dispatch = %{phase: "submitted", attempts: attempts, retry_at_ms: DateTime.to_unix(now, :millisecond) + min(5_000 * Integer.pow(2, attempts - 1), 60_000), authority_digest: digest}
+
+      dispatch = %{
+        phase: "submitted",
+        attempts: attempts,
+        retry_at_ms: DateTime.to_unix(now, :millisecond) + min(5_000 * Integer.pow(2, attempts - 1), 60_000),
+        authority_digest: digest,
+        allocation_id: nil
+      }
+
       Journal.put(journal, key, Map.put(reservation, :dispatch, dispatch))
     end
   end
@@ -51,6 +65,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     do: {:error, :claim_authority_changed}
 
   defp retry_allowed(%{phase: "spawn_started"}, _digest), do: {:error, :claim_spawn_already_attempted}
+  defp retry_allowed(%{phase: "allocation_suspended"}, _digest), do: {:error, :suspended_allocation_controller_required}
   defp retry_allowed(%{phase: "recovery_pending"}, _digest), do: {:error, :claim_reconciliation_required}
   defp retry_allowed(%{phase: "blocked"}, _digest), do: {:error, :claim_reconciliation_required}
 
@@ -75,6 +90,14 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   @spec begin_recovery(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_recovery(journal, key, input) when is_map(input) do
     case journal.reservations[key] do
+      %{dispatch: %{phase: "allocation_suspended", authority_digest: digest} = dispatch} = reservation
+      when is_binary(digest) ->
+        if digest == authority_digest(input) do
+          Journal.put(journal, key, %{reservation | dispatch: dispatch})
+        else
+          {:error, :claim_authority_changed}
+        end
+
       %{dispatch: %{phase: phase, authority_digest: digest} = dispatch} = reservation
       when phase in ["submitted", "confirmed"] and is_binary(digest) ->
         if digest == authority_digest(input) do
@@ -89,6 +112,48 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   end
 
   def begin_recovery(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
+
+  @doc "Durably records the exact ready allocation while its Job remains suspended."
+  @spec record_suspended_allocation(map(), String.t(), map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def record_suspended_allocation(journal, key, input, allocation_id)
+      when is_map(input) and is_binary(allocation_id) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "confirmed"} = dispatch} = reservation ->
+        record_new_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id)
+
+      %{dispatch: %{phase: "allocation_suspended"} = dispatch} = reservation ->
+        retain_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id)
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def record_suspended_allocation(_journal, _key, _input, _allocation_id),
+    do: {:error, :suspended_allocation_identity_invalid}
+
+  defp record_new_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id) do
+    cond do
+      dispatch.authority_digest != authority_digest(input) ->
+        {:error, :claim_authority_changed}
+
+      not valid_allocation_id?(allocation_id) ->
+        {:error, :suspended_allocation_identity_invalid}
+
+      true ->
+        next_dispatch = dispatch |> Map.put(:phase, "allocation_suspended") |> Map.put(:allocation_id, allocation_id)
+        Journal.put(journal, key, %{reservation | dispatch: next_dispatch})
+    end
+  end
+
+  defp retain_suspended_allocation(journal, key, reservation, %{allocation_id: allocation_id} = dispatch, input, allocation_id) do
+    if dispatch.authority_digest == authority_digest(input),
+      do: Journal.put(journal, key, %{reservation | dispatch: dispatch}),
+      else: {:error, :claim_authority_changed}
+  end
+
+  defp retain_suspended_allocation(_journal, _key, _reservation, _dispatch, _input, _allocation_id),
+    do: {:error, :suspended_allocation_identity_changed}
 
   @doc "Fences only a synchronously rejected pre-witness spawn attempt."
   @spec begin_pre_witness_recovery(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -113,6 +178,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   @spec begin_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_spawn(journal, key, input) do
     case get_in(journal, [:reservations, key, :dispatch]) do
+      %{phase: "allocation_suspended"} ->
+        {:error, :suspended_allocation_controller_required}
+
       %{authority_digest: digest} ->
         if digest == authority_digest(input),
           do: change_phase(journal, key, "confirmed", "spawn_started"),
@@ -140,7 +208,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     key = Journal.reservation_key(issue_id, profile, repository, generation)
 
     case journal.reservations[key] do
-      %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed"] -> {:ok, reservation}
+      %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed", "allocation_suspended"] -> {:ok, reservation}
       %{dispatch: %{phase: "spawn_started"}} -> {:error, :claim_spawn_already_attempted}
       %{dispatch: %{phase: "recovery_pending"}} -> {:error, :claim_reconciliation_required}
       %{dispatch: %{phase: "blocked"}} -> {:error, :claim_reconciliation_required}
@@ -149,11 +217,16 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   end
 
   @spec ready?(map(), non_neg_integer()) :: boolean()
+  def ready?(%{dispatch: %{phase: "allocation_suspended"}}, _now_ms), do: false
+
   def ready?(%{dispatch: dispatch}, now_ms), do: dispatch.attempts < @max_attempts and dispatch.retry_at_ms <= now_ms
 
   @spec retry_status(map(), non_neg_integer()) :: :ok | {:error, term()}
   def retry_status(%{dispatch: %{phase: "confirmed", attempts: attempts}}, _now_ms) when attempts >= @max_attempts,
     do: {:error, :claim_confirmed_revalidation_required}
+
+  def retry_status(%{dispatch: %{phase: "allocation_suspended"}}, _now_ms),
+    do: {:error, :suspended_allocation_controller_required}
 
   def retry_status(%{dispatch: %{attempts: attempts}}, _now_ms) when attempts >= @max_attempts,
     do: {:error, :claim_recovery_exhausted}
@@ -173,10 +246,21 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   defp change_phase(journal, key, expected, next) do
     case journal.reservations[key] do
       %{dispatch: %{phase: ^expected} = dispatch} = reservation ->
-        Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: next}})
+        Journal.put(journal, key, %{reservation | dispatch: Map.put(dispatch, :phase, next)})
 
       _ ->
         {:error, :invalid_claim_dispatch_transition}
     end
   end
+
+  defp valid_phase?(phase, %{allocation_id: allocation_id} = value) do
+    map_size(value) in [4, 5] and phase in @phases and
+      ((phase == "allocation_suspended" and is_binary(allocation_id) and valid_allocation_id?(allocation_id)) or
+         (phase != "allocation_suspended" and is_nil(allocation_id)))
+  end
+
+  defp valid_allocation_id?(nil), do: true
+
+  defp valid_allocation_id?(value),
+    do: is_binary(value) and byte_size(value) in 1..1_024 and String.printable?(value) and String.trim(value) == value
 end
