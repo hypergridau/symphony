@@ -312,19 +312,32 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     }
 
   defp valid_confirmed_delete?(checkpoint, claim, record, uid) when is_map(checkpoint) do
-    fields = ~w(schema_version claim assignment_digest allocation_id prepare_id request_sha256 job_uid job_resource_version post_delete_pod_snapshot)
-    pods = checkpoint["post_delete_pod_snapshot"]
-
-    Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
-      checkpoint["schema_version"] == @schema_version and checkpoint["claim"] == claim and
-      checkpoint["assignment_digest"] == record.assignment_digest and
-      checkpoint["allocation_id"] == record.allocation_id and checkpoint["prepare_id"] == record.prepare_id and
-      checkpoint["request_sha256"] == record.request_sha256 and checkpoint["job_uid"] == uid and
-      checkpoint["job_resource_version"] == record.observation["job"]["resourceVersion"] and
-      valid_pod_evidence?(pods)
+    valid_confirmed_delete_shape?(checkpoint) and
+      confirmed_delete_identity_matches?(checkpoint, claim, record) and
+      confirmed_job_matches?(checkpoint, record, uid)
   end
 
   defp valid_confirmed_delete?(_checkpoint, _claim, _record, _uid), do: false
+
+  defp valid_confirmed_delete_shape?(checkpoint) do
+    fields =
+      ~w(schema_version claim assignment_digest allocation_id prepare_id request_sha256 job_uid job_resource_version post_delete_pod_snapshot)
+
+    Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
+      checkpoint["schema_version"] == @schema_version and
+      valid_pod_evidence?(checkpoint["post_delete_pod_snapshot"])
+  end
+
+  defp confirmed_delete_identity_matches?(checkpoint, claim, record) do
+    checkpoint["claim"] == claim and checkpoint["assignment_digest"] == record.assignment_digest and
+      checkpoint["allocation_id"] == record.allocation_id and checkpoint["prepare_id"] == record.prepare_id and
+      checkpoint["request_sha256"] == record.request_sha256
+  end
+
+  defp confirmed_job_matches?(checkpoint, record, uid) do
+    checkpoint["job_uid"] == uid and
+      checkpoint["job_resource_version"] == record.observation["job"]["resourceVersion"]
+  end
 
   defp valid_pod_evidence?(pods) when is_map(pods) do
     fields = ~w(resourceVersion sha256 itemCount complete ownedPodsAbsent)
