@@ -2386,9 +2386,16 @@ assignment digest. The worker image MUST be digest-pinned in trusted provider co
 assignment data MUST NOT select an image, command, volume, namespace, or service account.
 The generated Job MUST use a fixed worker entrypoint, ephemeral workspace storage, bounded
 resource requests/limits and active deadline, and restrictive pod/container security settings.
-It MUST NOT mount host paths or persistent volumes, enable a service-account token, or include
-secret values. A provider MUST accept an existing Job only when its bound identity and
+It MUST NOT mount host paths or include secret values in its spec. A host-selected Codex OAuth
+session-slot claim MAY be the sole persistent volume after an exclusive durable reservation binds
+the slot to the signed assignment. A trusted one-to-one catalog MUST bind each slot ID to its
+permitted claim. The suspended Job's server UID MUST join that reservation
+before activation. That writable claim MUST be separate from
+the ephemeral repository workspace, MUST NOT be selected by assignment data, and MUST NOT be
+shared with concurrent Jobs. The Pod MUST disable automatic service-account token mounting;
+an explicitly projected audience-limited broker token is permitted. A provider MUST accept an existing Job only when its bound identity and
 expected spec match. Deletion MUST first read and verify the exact Job and use its server UID
 as a precondition; unknown or mismatched objects remain held. A fakeable client contract and
-deterministic compiler do not imply a live cluster client, spawn integration, or runtime
+deterministic compiler, including an optional slot mount, do not establish an exclusive lease,
+session health, a live cluster client, spawn integration, or runtime
 qualification.

@@ -797,6 +797,14 @@ the canonical bundle and `internal_beta`/`rke2` placement; it does not verify th
 signature itself. It compiles the bundle into a deterministic Job using a digest-pinned
 image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
+Trusted configuration may also supply an OAuth session-slot claim with an assignment digest,
+seat and lease reference, plus a one-to-one catalog of permitted slot ID and claim pairs. The
+compiler binds the selected catalog entry and lease reference into the exact Job,
+mounts it writable only at `CODEX_HOME`, and leaves the repository workspace ephemeral. The
+compiler does not acquire or verify an exclusive durable slot lease, check session health, or
+authorize activation; those remain required host-owned lifecycle steps. The active private Job
+can read the mounted account credential. A slot must not be reused until the old Job UID and
+Pod are gone and the refreshed auth cache is durably retained or quarantined.
 After the suspended Job is created or reconciled, the adapter requires Dahlia to acknowledge
 its exact allocation ID and server UID against the validated provider claim's reservation.
 The trusted host passes `claim_binding`, `allocation_registry_context.base_url`, and
