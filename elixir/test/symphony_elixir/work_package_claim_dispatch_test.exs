@@ -160,6 +160,25 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
              })
   end
 
+  test "legacy in-memory spawn markers remain valid journal rows", %{journal: journal, key: key} do
+    reservation =
+      Map.put(journal.reservations[key], :dispatch, %{
+        phase: "spawn_started",
+        attempts: 1,
+        retry_at_ms: 0,
+        authority_digest: String.duplicate("a", 64)
+      })
+
+    legacy = %{journal | reservations: Map.put(journal.reservations, key, reservation)}
+    path = Path.join(System.tmp_dir!(), "claim-legacy-spawn-marker-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+
+    assert :ok = Journal.save(path, legacy)
+    assert {:ok, loaded} = Journal.load(path)
+    assert loaded.reservations[key].dispatch.phase == "spawn_started"
+    assert loaded.reservations[key].dispatch.allocation_id == nil
+  end
+
   defp round_trip(journal) do
     path = Path.join(System.tmp_dir!(), "claim-suspended-allocation-#{System.unique_integer([:positive])}.json")
     on_exit(fn -> File.rm(path) end)

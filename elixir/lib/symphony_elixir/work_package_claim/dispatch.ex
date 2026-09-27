@@ -253,11 +253,16 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     end
   end
 
-  defp valid_phase?(phase, %{allocation_id: allocation_id} = value) do
-    map_size(value) in [4, 5] and phase in @phases and
-      ((phase == "allocation_suspended" and is_binary(allocation_id) and valid_allocation_id?(allocation_id)) or
-         (phase != "allocation_suspended" and is_nil(allocation_id)))
+  defp valid_phase?("allocation_suspended", %{allocation_id: allocation_id} = value) do
+    map_size(value) == 5 and is_binary(allocation_id) and valid_allocation_id?(allocation_id)
   end
+
+  defp valid_phase?(phase, value) when phase in @phases and phase != "allocation_suspended" do
+    (map_size(value) == 4 and not Map.has_key?(value, :allocation_id)) or
+      (map_size(value) == 5 and is_nil(Map.get(value, :allocation_id)))
+  end
+
+  defp valid_phase?(_phase, _value), do: false
 
   defp valid_allocation_id?(nil), do: true
 
