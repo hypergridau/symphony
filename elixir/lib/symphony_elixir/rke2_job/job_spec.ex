@@ -38,6 +38,9 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
          :ok <- valid_target(assignment),
          :ok <- valid_config(config),
          {:ok, auth_slot} <- AuthSlotSpec.compile(assignment, Map.get(config, :auth_slot), Map.get(config, :auth_slot_catalog)),
+         worker_mode = if(auth_slot.env == [], do: "preflight", else: "codex"),
+         broker_identity_mounts = if(worker_mode == "codex", do: [broker_identity_mount()], else: []),
+         broker_identity_volumes = if(worker_mode == "codex", do: [broker_identity_volume()], else: []),
          name = job_name(assignment),
          {:ok, assignment_json} <- Jason.encode(assignment),
          true <- byte_size(assignment_json) <= 32_768 do
@@ -84,11 +87,14 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                    "imagePullPolicy" => "IfNotPresent",
                    "command" => @worker_command,
                    "args" => ["--assignment-json", assignment_json],
+                   "terminationMessagePath" => "/tmp/symphony-worker-result",
+                   "terminationMessagePolicy" => "File",
                    "env" =>
                      [
                        %{"name" => "SYMPHONY_ASSIGNMENT_SHA256", "value" => assignment.sha256},
                        %{"name" => "SYMPHONY_ASSIGNMENT_ID", "value" => identity(assignment)},
-                       %{"name" => "SYMPHONY_REPOSITORY_ID", "value" => config.repository_id}
+                       %{"name" => "SYMPHONY_REPOSITORY_ID", "value" => config.repository_id},
+                       %{"name" => "SYMPHONY_WORKER_MODE", "value" => worker_mode}
                      ] ++ auth_slot.env,
                    "resources" => @resources,
                    "securityContext" => %{
@@ -103,30 +109,15 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                    "volumeMounts" =>
                      [
                        %{"name" => "workspace", "mountPath" => "/workspace", "readOnly" => false},
-                       %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false},
-                       %{"name" => "broker-identity", "mountPath" => @broker_token_mount, "readOnly" => true}
-                     ] ++ auth_slot.volume_mounts
+                       %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false}
+                     ] ++ broker_identity_mounts ++ auth_slot.volume_mounts
                  }
                ],
                "volumes" =>
                  [
                    %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}},
-                   %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}},
-                   %{
-                     "name" => "broker-identity",
-                     "projected" => %{
-                       "sources" => [
-                         %{
-                           "serviceAccountToken" => %{
-                             "audience" => @broker_audience,
-                             "expirationSeconds" => 600,
-                             "path" => "token"
-                           }
-                         }
-                       ]
-                     }
-                   }
-                 ] ++ auth_slot.volumes
+                   %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}}
+                 ] ++ broker_identity_volumes ++ auth_slot.volumes
              }
            }
          }
@@ -395,4 +386,25 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   end
 
   defp compact(value), do: :crypto.hash(:sha256, value) |> Base.encode16(case: :lower) |> binary_part(0, 32)
+
+  defp broker_identity_mount do
+    %{"name" => "broker-identity", "mountPath" => @broker_token_mount, "readOnly" => true}
+  end
+
+  defp broker_identity_volume do
+    %{
+      "name" => "broker-identity",
+      "projected" => %{
+        "sources" => [
+          %{
+            "serviceAccountToken" => %{
+              "audience" => @broker_audience,
+              "expirationSeconds" => 600,
+              "path" => "token"
+            }
+          }
+        ]
+      }
+    }
+  end
 end

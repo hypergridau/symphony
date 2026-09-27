@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.{LogFile, ResponsibilityBootstrap}
+  alias SymphonyElixir.Worker.CLI, as: WorkerCLI
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @activation_switch :activate_responsibility_graph
@@ -26,7 +27,10 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    case args do
+      ["--assignment-json" | _worker_args] -> WorkerCLI.main(args)
+      _ -> main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    end
   end
 
   @doc false

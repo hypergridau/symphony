@@ -56,6 +56,16 @@ defmodule SymphonyElixir.Worker.BrokerClient do
     end
   end
 
+  @spec branch(String.t(), String.t(), String.t(), map()) :: result(String.t())
+  def branch(lease_id, expected_base_oid, branch_ref, context \\ %{}) do
+    if valid_lease_id?(lease_id) and oid?(expected_base_oid) and valid_branch_ref?(branch_ref) do
+      post("/v1/branch", %{leaseId: lease_id, expectedBaseOid: expected_base_oid}, context)
+      |> branch_response(branch_ref)
+    else
+      {:error, :invalid_broker_request}
+    end
+  end
+
   @spec pull_request(String.t(), String.t(), map()) :: result(%{number: pos_integer(), url: String.t()})
   def pull_request(lease_id, repository_ref, context \\ %{}) do
     if valid_lease_id?(lease_id) and valid_repo_ref?(repository_ref) do
@@ -123,6 +133,14 @@ defmodule SymphonyElixir.Worker.BrokerClient do
   defp commit_response({:ok, %{"status" => "denied"}}), do: {:error, :broker_denied}
   defp commit_response({:ok, _body}), do: {:held, :broker_uncertain}
   defp commit_response(other), do: other
+
+  defp branch_response({:ok, %{"status" => "created", "branchRef" => branch_ref, "headOid" => oid}}, branch_ref) do
+    if oid?(oid), do: {:ok, oid}, else: {:held, :broker_uncertain}
+  end
+
+  defp branch_response({:ok, %{"status" => "denied"}}, _branch_ref), do: {:error, :broker_denied}
+  defp branch_response({:ok, _body}, _branch_ref), do: {:held, :broker_uncertain}
+  defp branch_response(other, _branch_ref), do: other
 
   defp pull_request_response({:ok, %{"status" => "created", "number" => number, "url" => url}}, repository_ref)
        when is_integer(number) and number > 0 do
@@ -241,6 +259,10 @@ defmodule SymphonyElixir.Worker.BrokerClient do
     do: is_binary(value) and byte_size(value) in 1..256 and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/, value)
 
   defp valid_repo_ref?(value), do: is_binary(value) and Regex.match?(~r/\A[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\z/, value)
+
+  defp valid_branch_ref?(value),
+    do: is_binary(value) and byte_size(value) in 12..256 and Regex.match?(~r|\Arefs/heads/[A-Za-z0-9][A-Za-z0-9._/-]*\z|, value) and not String.contains?(value, "..")
+
   defp oid?(value), do: is_binary(value) and Regex.match?(~r/\A[a-f0-9]{40}\z/, value)
 
   defp valid_message?(value),

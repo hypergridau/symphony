@@ -1,0 +1,9 @@
+.git
+.codex
+**/_build
+**/deps
+**/node_modules
+**/cover
+**/doc
+**/logs
+**/dist

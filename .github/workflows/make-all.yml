@@ -36,3 +36,6 @@ jobs:
 
       - name: Verify make all
         run: make all
+
+      - name: Build the disposable worker image
+        run: docker build --file worker-image/Dockerfile --tag symphony-worker:ci ..
