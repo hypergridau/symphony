@@ -9,6 +9,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
   provider claim; an uncertain outcome remains held for reconciliation.
   """
 
+  alias SymphonyElixir.RKE2Job.AbortPrepareJournal
   alias SymphonyElixir.RKE2Job.JobSpec
 
   @safe_version ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\z/
@@ -62,11 +63,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
          {:ok, claim} <- slot_claim(config),
          :ok <- validate_observation(observation, assignment, allocation_id, expected, uid, config),
          :ok <- verify_prepare_ack(assignment, allocation_id, observation, prepare_ack, opts),
-         {:ok, job} <- read_job(client, context, expected),
-         :ok <- match_prepared_job(job, expected, uid, observation["job"]),
-         {:ok, pod_evidence} <- read_pod_evidence(client, context, expected, uid, claim),
-         :ok <- match_prepared_pods(pod_evidence, observation["podSnapshot"]),
-         :ok <- delete_and_confirm(client, context, expected, uid, observation, claim) do
+         :ok <- confirm_with_checkpoint(client, context, expected, uid, observation, claim, opts) do
       :ok
     else
       {:held, _} = held -> held
@@ -284,14 +281,71 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
       else: {:held, :suspended_abort_pods_changed_since_prepare}
   end
 
+  defp confirm_with_checkpoint(client, context, expected, uid, observation, claim, opts) do
+    case Keyword.get(opts, :confirmed_delete_journal) do
+      %{journal_root: root, claim: journal_claim, record: record} ->
+        case AbortPrepareJournal.load_confirmed_delete(root, journal_claim, record, uid) do
+          {:ok, _checkpoint} ->
+            verify_confirmed_delete_replay(client, context, expected, uid, claim)
+
+          :missing ->
+            checkpoint_context = %{journal_root: root, claim: journal_claim, record: record}
+            verify_and_delete(client, context, expected, uid, observation, claim, checkpoint_context)
+
+          {:held, _reason} = held ->
+            held
+        end
+
+      nil ->
+        verify_and_delete(client, context, expected, uid, observation, claim, nil)
+
+      _ ->
+        {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
+    end
+  end
+
+  defp verify_and_delete(client, context, expected, uid, observation, claim, checkpoint_context) do
+    with {:ok, job} <- read_job(client, context, expected),
+         :ok <- match_prepared_job(job, expected, uid, observation["job"]),
+         {:ok, pod_evidence} <- read_pod_evidence(client, context, expected, uid, claim),
+         :ok <- match_prepared_pods(pod_evidence, observation["podSnapshot"]),
+         {:ok, post_delete_pods} <- delete_and_confirm(client, context, expected, uid, observation, claim),
+         :ok <- record_confirmed_delete(checkpoint_context, uid, post_delete_pods) do
+      :ok
+    else
+      {:held, _} = held -> held
+    end
+  end
+
+  defp verify_confirmed_delete_replay(client, context, expected, uid, claim) do
+    namespace = get_in(expected, ["metadata", "namespace"])
+    name = get_in(expected, ["metadata", "name"])
+
+    case safe_client_call(fn -> client.get_job(namespace, name, context) end) do
+      {:error, :not_found} ->
+        case read_pod_evidence(client, context, expected, uid, claim) do
+          {:ok, _evidence} -> :ok
+          {:held, _} = held -> held
+        end
+
+      _ ->
+        {:held, :suspended_abort_confirmed_delete_replay_mismatch}
+    end
+  end
+
+  defp record_confirmed_delete(nil, _uid, _pod_evidence), do: :ok
+
+  defp record_confirmed_delete(%{journal_root: root, claim: claim, record: record}, uid, pod_evidence),
+    do: AbortPrepareJournal.record_confirmed_delete(root, claim, record, uid, pod_evidence)
+
   defp delete_and_confirm(client, context, expected, uid, observation, claim) do
     namespace = get_in(expected, ["metadata", "namespace"])
     name = get_in(expected, ["metadata", "name"])
     version = observation["job"]["resourceVersion"]
 
     with :ok <- safe_client_call(fn -> client.delete_suspended_job(namespace, name, uid, version, context) end),
-         :ok <- confirm_absent(client, context, namespace, name, uid, expected, claim) do
-      :ok
+         {:ok, evidence} <- confirm_absent(client, context, namespace, name, uid, expected, claim) do
+      {:ok, evidence}
     else
       {:held, _} = held -> held
       _ -> {:held, :suspended_abort_delete_uncertain}
@@ -354,7 +408,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
     case safe_client_call(fn -> client.get_job(namespace, name, context) end) do
       {:error, :not_found} ->
         case read_pod_evidence(client, context, expected, uid, claim) do
-          {:ok, _evidence} -> :ok
+          {:ok, evidence} -> {:ok, evidence}
           {:held, _} = held -> held
         end
 

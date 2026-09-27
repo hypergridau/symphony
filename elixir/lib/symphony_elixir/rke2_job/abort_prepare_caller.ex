@@ -68,6 +68,7 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
         caller_context.adapter_context
         |> Map.put(:prepare_ack_guard, JournalPrepareAckGuard)
         |> Map.put(:prepare_ack_guard_context, %{journal_root: caller_context.journal_root, claim: claim})
+        |> Map.put(:confirmed_delete_journal, %{journal_root: caller_context.journal_root, claim: claim, record: record})
 
       ManagedExecutorAdapter.confirm_abort_unstarted_owned(
         allocation,
