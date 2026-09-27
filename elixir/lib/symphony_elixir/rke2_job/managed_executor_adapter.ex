@@ -9,8 +9,9 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   provider; this module does not load credentials or contact a cluster by itself.
   The trusted host also supplies its Dahlia registration context. Allocation is
   not ready until Dahlia acknowledges the exact server-assigned Job UID.
-  Allocation leaves Jobs suspended. Activation requires a host-owned guard to
-  revalidate admission and credential readiness before any Kubernetes call.
+  Allocation leaves Jobs suspended. Activation checks slot and Kubernetes
+  credential readiness before its final host-owned guard; the guard must
+  revalidate admission immediately before the Kubernetes activation call.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
@@ -52,14 +53,23 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, ports} <- ports(context),
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
-         :ok <- authorize_activation(context, assignment, allocation, idempotency_key),
+         :ok <- activation_guard_present(context),
          :ok <- auth_slot_guard(context, ports.config, :authorize, [ports.config[:auth_slot], assignment, allocation]),
-         {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key) do
+         {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key),
+         :ok <- authorize_activation(context, assignment, allocation, idempotency_key) do
       Provider.activate_owned(assignment, uid, provider_opts(ports, client_context))
     else
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp activation_guard_present(context) when is_map(context) do
+    guard = Map.get(context, :activation_guard)
+
+    if is_atom(guard) and Code.ensure_loaded?(guard) and function_exported?(guard, :authorize, 4),
+      do: :ok,
+      else: {:held, :activation_guard_missing}
   end
 
   defp authorize_activation(context, assignment, allocation, idempotency_key) when is_map(context) do
