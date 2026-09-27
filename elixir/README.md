@@ -834,6 +834,15 @@ JSON argument, assignment digest environment value, and repository ID environmen
 It produces the exact broker subject after validating the existing bundle contract.
 It performs no broker call or Codex execution; the production worker executable and host
 result/cleanup lifecycle are still required before running a Job.
+`SymphonyElixir.Worker.BrokerClient` now provides the Job-local broker operations. It
+reads the projected Kubernetes token for each request, fixes the in-cluster broker
+origin, disables redirects and retries, bounds request time, and holds uncertain
+responses. Checkout token bytes stay in the caller's memory; no worker executable
+uses this client yet. The broker Deployment remains at zero replicas and admission
+paused pending the full lifecycle and runtime qualification.
+The current ClusterIP transport is HTTP. Before live admission, qualify the private
+cluster trust boundary and narrow worker-to-broker network policy; the projected
+bearer is replayable while its bound Job is live if an observer can read that traffic.
 The fakeable client contract supports create/get/activate/delete and namespace Pod-list reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
 server UID. Deletion requests foreground cascading cleanup and returns success only after
