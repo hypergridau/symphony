@@ -8,6 +8,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.RKE2Job.AuthSlotSpec
 
   @api_version "batch/v1"
   @kind "Job"
@@ -23,13 +24,19 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
     "limits" => %{"cpu" => "2", "memory" => "4Gi"}
   }
 
-  @type config :: %{required(:namespace) => String.t(), required(:image) => String.t()}
+  @type config :: %{
+          required(:namespace) => String.t(),
+          required(:image) => String.t(),
+          optional(:auth_slot) => map(),
+          optional(:auth_slot_catalog) => map()
+        }
 
   @spec compile(map(), config()) :: {:ok, map()} | {:error, term()}
   def compile(assignment, config) when is_map(assignment) and is_map(config) do
     with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
          :ok <- valid_target(assignment),
          :ok <- valid_config(config),
+         {:ok, auth_slot} <- AuthSlotSpec.compile(assignment, Map.get(config, :auth_slot), Map.get(config, :auth_slot_catalog)),
          name = job_name(assignment),
          {:ok, assignment_json} <- Jason.encode(assignment),
          true <- byte_size(assignment_json) <= 32_768 do
@@ -41,11 +48,15 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
            "name" => name,
            "namespace" => config.namespace,
            "labels" => labels(assignment),
-           "annotations" => %{
-             "symphony.hypergrid.au/assignment-sha256" => assignment.sha256,
-             "symphony.hypergrid.au/assignment-issue-id" => assignment.lease.issue_id,
-             "symphony.hypergrid.au/assignment-generation" => Integer.to_string(assignment.lease.generation)
-           }
+           "annotations" =>
+             Map.merge(
+               %{
+                 "symphony.hypergrid.au/assignment-sha256" => assignment.sha256,
+                 "symphony.hypergrid.au/assignment-issue-id" => assignment.lease.issue_id,
+                 "symphony.hypergrid.au/assignment-generation" => Integer.to_string(assignment.lease.generation)
+               },
+               auth_slot.annotations
+             )
          },
          "spec" => %{
            "suspend" => true,
@@ -72,10 +83,11 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                    "imagePullPolicy" => "IfNotPresent",
                    "command" => @worker_command,
                    "args" => ["--assignment-json", assignment_json],
-                   "env" => [
-                     %{"name" => "SYMPHONY_ASSIGNMENT_SHA256", "value" => assignment.sha256},
-                     %{"name" => "SYMPHONY_ASSIGNMENT_ID", "value" => identity(assignment)}
-                   ],
+                   "env" =>
+                     [
+                       %{"name" => "SYMPHONY_ASSIGNMENT_SHA256", "value" => assignment.sha256},
+                       %{"name" => "SYMPHONY_ASSIGNMENT_ID", "value" => identity(assignment)}
+                     ] ++ auth_slot.env,
                    "resources" => @resources,
                    "securityContext" => %{
                      "allowPrivilegeEscalation" => false,
@@ -86,31 +98,33 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                      "capabilities" => %{"drop" => ["ALL"]},
                      "seccompProfile" => %{"type" => "RuntimeDefault"}
                    },
-                   "volumeMounts" => [
-                     %{"name" => "workspace", "mountPath" => "/workspace", "readOnly" => false},
-                     %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false},
-                     %{"name" => "broker-identity", "mountPath" => @broker_token_mount, "readOnly" => true}
-                   ]
+                   "volumeMounts" =>
+                     [
+                       %{"name" => "workspace", "mountPath" => "/workspace", "readOnly" => false},
+                       %{"name" => "tmp", "mountPath" => "/tmp", "readOnly" => false},
+                       %{"name" => "broker-identity", "mountPath" => @broker_token_mount, "readOnly" => true}
+                     ] ++ auth_slot.volume_mounts
                  }
                ],
-               "volumes" => [
-                 %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}},
-                 %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}},
-                 %{
-                   "name" => "broker-identity",
-                   "projected" => %{
-                     "sources" => [
-                       %{
-                         "serviceAccountToken" => %{
-                           "audience" => @broker_audience,
-                           "expirationSeconds" => 600,
-                           "path" => "token"
+               "volumes" =>
+                 [
+                   %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}},
+                   %{"name" => "tmp", "emptyDir" => %{"sizeLimit" => "256Mi"}},
+                   %{
+                     "name" => "broker-identity",
+                     "projected" => %{
+                       "sources" => [
+                         %{
+                           "serviceAccountToken" => %{
+                             "audience" => @broker_audience,
+                             "expirationSeconds" => 600,
+                             "path" => "token"
+                           }
                          }
-                       }
-                     ]
+                       ]
+                     }
                    }
-                 }
-               ]
+                 ] ++ auth_slot.volumes
              }
            }
          }

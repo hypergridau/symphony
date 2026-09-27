@@ -74,6 +74,61 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     refute inspect(job) =~ "GITHUB_TOKEN"
   end
 
+  test "mounts only the host-selected OAuth slot bound to this signed assignment" do
+    assignment = assignment()
+
+    slot = %{
+      slot_id: "luna-slot-1",
+      claim_name: "frigga-codex-luna-slot-1",
+      lease_id: "lease:slot-1:42",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    auth_config =
+      config()
+      |> Map.put(:auth_slot, slot)
+      |> Map.put(:auth_slot_catalog, %{slot.slot_id => slot.claim_name})
+
+    assert {:ok, job} = JobSpec.compile(assignment, auth_config)
+    pod = get_in(job, ["spec", "template", "spec"])
+    container = hd(pod["containers"])
+
+    assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-slot"] == slot.slot_id
+    assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-lease"] == slot.lease_id
+    assert %{"name" => "CODEX_HOME", "value" => "/var/lib/frigga-codex-home"} in container["env"]
+    mount = %{"name" => "codex-auth-slot", "mountPath" => "/var/lib/frigga-codex-home", "readOnly" => false}
+
+    volume = %{
+      "name" => "codex-auth-slot",
+      "persistentVolumeClaim" => %{"claimName" => slot.claim_name, "readOnly" => false}
+    }
+
+    assert mount in container["volumeMounts"]
+    assert volume in pod["volumes"]
+    assert %{"name" => "workspace", "emptyDir" => %{"sizeLimit" => "10Gi"}} in pod["volumes"]
+
+    wrong_digest = put_in(auth_config, [:auth_slot, :assignment_sha256], String.duplicate("0", 64))
+    assert {:error, :rke2_job_auth_slot_invalid} = JobSpec.compile(assignment, wrong_digest)
+
+    assert {:error, :rke2_job_auth_slot_invalid} =
+             JobSpec.compile(assignment, put_in(auth_config, [:auth_slot, :seat], "another-seat"))
+
+    assert {:error, :rke2_job_auth_slot_invalid} =
+             JobSpec.compile(assignment, put_in(auth_config, [:auth_slot, :claim_name], "../other"))
+
+    assert {:error, :rke2_job_auth_slot_invalid} =
+             JobSpec.compile(assignment, Map.delete(auth_config, :auth_slot_catalog))
+
+    assert {:error, :rke2_job_auth_slot_invalid} =
+             JobSpec.compile(assignment, put_in(auth_config, [:auth_slot_catalog], %{"other-slot" => slot.claim_name}))
+
+    aliased_catalog = %{slot.slot_id => slot.claim_name, "other-slot" => slot.claim_name}
+
+    assert {:error, :rke2_job_auth_slot_invalid} =
+             JobSpec.compile(assignment, put_in(auth_config, [:auth_slot_catalog], aliased_catalog))
+  end
+
   test "rejects wrong placement, changed assignment, and unpinned or invalid trusted config" do
     assignment = assignment()
 
@@ -175,6 +230,30 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     Agent.update(client, &put_in(&1, [:jobs, {config().namespace, expected["metadata"]["name"]}], foreign))
 
     assert {:held, :job_identity_or_spec_mismatch} = Provider.ensure(assignment, opts(client))
+  end
+
+  test "a suspended Job cannot be reconciled under another OAuth slot lease", %{client: client} do
+    assignment = assignment()
+
+    slot = %{
+      slot_id: "luna-slot-1",
+      claim_name: "frigga-codex-luna-slot-1",
+      lease_id: "lease:slot-1:42",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    first_config =
+      config()
+      |> Map.put(:auth_slot, slot)
+      |> Map.put(:auth_slot_catalog, %{slot.slot_id => slot.claim_name})
+
+    first = Keyword.put(opts(client), :config, first_config)
+    assert {:ok, _job} = Provider.ensure(assignment, first)
+
+    changed = Keyword.put(opts(client), :config, put_in(first_config, [:auth_slot, :lease_id], "lease:slot-1:43"))
+    assert {:held, :job_identity_or_spec_mismatch} = Provider.ensure(assignment, changed)
+    assert Agent.get(client, & &1.creates) == 1
   end
 
   test "holds unresolved existing-Job reads and delete adapter failures", %{client: client} do
