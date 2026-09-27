@@ -805,6 +805,11 @@ compiler does not acquire or verify an exclusive durable slot lease, check sessi
 authorize activation; those remain required host-owned lifecycle steps. The active private Job
 can read the mounted account credential. A slot must not be reused until the old Job UID and
 Pod are gone and the refreshed auth cache is durably retained or quarantined.
+When a slot is selected, the managed RKE2 adapter now requires a host-owned slot lease guard to
+reserve before Job creation, bind the actual server UID before allocation is ready, authorize
+before activation, and confirm safe release after Job and Pod deletion. Missing, denied, or
+uncertain guard responses hold the operation. This port has no production implementation yet;
+its presence is not evidence that a durable lease or refresh check exists.
 After the suspended Job is created or reconciled, the adapter requires Dahlia to acknowledge
 its exact allocation ID and server UID against the validated provider claim's reservation.
 The trusted host passes `claim_binding`, `allocation_registry_context.base_url`, and

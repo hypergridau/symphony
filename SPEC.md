@@ -2399,3 +2399,8 @@ as a precondition; unknown or mismatched objects remain held. A fakeable client 
 deterministic compiler, including an optional slot mount, do not establish an exclusive lease,
 session health, a live cluster client, spawn integration, or runtime
 qualification.
+The managed adapter MUST hold a selected-slot allocation unless its trusted lease guard
+acknowledges reservation before Job creation and binds the server UID after registration. It
+MUST hold activation unless the guard reauthorizes the same assignment, lease and UID. It
+MUST not report slot release until Job and Pod absence is confirmed and the guard confirms
+durable session retention or quarantine. A missing guard MUST fail closed.
