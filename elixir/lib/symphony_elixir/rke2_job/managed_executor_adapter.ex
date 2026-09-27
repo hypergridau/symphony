@@ -14,7 +14,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{HTTPClient, JobAllocationRegistration, JobSpec, Provider}
+  alias SymphonyElixir.RKE2Job.{HTTPClient, JobAllocationRegistration, JobSpec, Provider, ResultJournal, ResultReader}
 
   @allocation_version 1
 
@@ -78,7 +78,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     _error -> {:held, :activation_authorization_failed}
   end
 
-  @doc "Deletes only the exact Job UID recorded in a prior allocation."
+  @doc "Deletes an un-slotted allocation's exact Job UID; slotted Jobs require terminal finalization."
   @spec delete_owned(allocation(), map(), String.t(), term()) :: :ok | {:held, term()} | {:error, term()}
   def delete_owned(allocation, assignment, idempotency_key, context) do
     with :ok <- validate_assignment(assignment),
@@ -86,6 +86,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, ports} <- ports(context),
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
+         :ok <- direct_delete_allowed?(ports.config),
          {:ok, client_context} <- client_context(ports, assignment, :delete, idempotency_key),
          :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)),
          :ok <- auth_slot_guard(context, ports.config, :release, [ports.config[:auth_slot], assignment, allocation]) do
@@ -93,6 +94,52 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     else
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp direct_delete_allowed?(%{auth_slot: slot}) when is_map(slot),
+    do: {:held, :terminal_finalization_required}
+
+  defp direct_delete_allowed?(_config), do: :ok
+
+  @doc "Journals one terminal worker result before deleting its exact Job UID; retains the OAuth slot lease."
+  @spec finalize_terminal_owned(allocation(), map(), String.t(), term()) ::
+          {:ok, map()} | {:held, term()} | {:error, term()}
+  def finalize_terminal_owned(allocation, assignment, idempotency_key, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :finalize),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, uid} <- allocation_uid(allocation, expected),
+         {:ok, client_context} <- client_context(ports, assignment, :finalize, idempotency_key),
+         {:ok, observation} <- terminal_checkpoint(assignment, uid, ports, client_context, context),
+         :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)) do
+      {:ok, observation}
+    else
+      {:held, reason} -> {:held, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp terminal_checkpoint(assignment, uid, ports, client_context, context) do
+    root = if is_map(context), do: Map.get(context, :result_journal_root), else: nil
+
+    case ResultJournal.load(assignment, uid, root) do
+      {:ok, observation} -> {:ok, observation}
+      :missing -> read_and_journal_terminal(assignment, uid, ports, client_context, root)
+      other -> other
+    end
+  end
+
+  defp read_and_journal_terminal(assignment, uid, ports, client_context, root) do
+    with {:ok, observation} <-
+           ResultReader.read(assignment, uid,
+             client: ports.client,
+             client_context: client_context,
+             config: ports.config
+           ),
+         {:ok, _path} <- ResultJournal.record(assignment, observation, root) do
+      ResultJournal.load(assignment, uid, root)
     end
   end
 

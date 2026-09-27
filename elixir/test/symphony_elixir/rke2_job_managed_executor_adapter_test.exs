@@ -86,8 +86,9 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{JobSpec, ManagedExecutorAdapter}
+  alias SymphonyElixir.RKE2Job.{JobSpec, ManagedExecutorAdapter, ResultJournal}
   alias SymphonyElixir.RKE2JobFakeClient
+  alias SymphonyElixir.Worker.CLI
 
   setup do
     {:ok, client} =
@@ -111,7 +112,97 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     {:ok, slot_lease} = Agent.start_link(fn -> %{events: [], denied: nil} end)
 
-    %{client: client, credentials: credentials, registration: registration, slot_lease: slot_lease}
+    if match?({:win32, _}, :os.type()), do: Process.put(:result_journal_windows_test_only, true)
+    root = Path.join(System.tmp_dir!(), "symphony-terminal-finalizer-#{System.unique_integer([:positive])}")
+    :ok = File.mkdir_p(root)
+    if match?({:unix, _}, :os.type()), do: :ok = File.chmod(root, 0o700)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    %{client: client, credentials: credentials, registration: registration, slot_lease: slot_lease, root: root}
+  end
+
+  test "terminal finalization journals before UID-fenced deletion and replays after deletion", context do
+    assignment = assignment()
+    opts = adapter_context(context) |> Map.put(:result_journal_root, context.root)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    terminal_job_and_pod(context, assignment, allocation)
+
+    unrelated = %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "namespace" => config().namespace,
+        "name" => "unrelated-pod",
+        "uid" => "unrelated-uid",
+        "resourceVersion" => "unrelated-rv",
+        "labels" => %{},
+        "ownerReferences" => []
+      }
+    }
+
+    Agent.update(context.client, &put_in(&1, [:pods, "unrelated-uid"], unrelated))
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert observation["job_uid"] == elem(allocation_uid(allocation), 1)
+    assert {:ok, ^observation} = ResultJournal.load(assignment, observation["job_uid"], context.root)
+    assert observation["pod_uid"] == "pod-uid-1"
+    assert Agent.get(context.client, & &1.deletes) == [observation["job_uid"]]
+    assert Agent.get(context.client, &Map.has_key?(&1.pods, "unrelated-uid"))
+
+    assert {:ok, replay} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert replay == observation
+    assert Agent.get(context.client, & &1.deletes) == [observation["job_uid"]]
+  end
+
+  test "terminal finalization holds before delete when readback or journal is unavailable", context do
+    assignment = assignment()
+    opts = adapter_context(context) |> Map.put(:result_journal_root, context.root)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    terminal_job_and_pod(context, assignment, allocation)
+
+    Agent.update(context.client, &Map.put(&1, :list_pods_snapshot_error, :timeout))
+
+    assert {:held, :job_pod_result_read_unavailable} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    Agent.update(context.client, &Map.delete(&1, :list_pods_snapshot_error))
+
+    assert {:error, :invalid_job_result_journal_root} =
+             ManagedExecutorAdapter.finalize_terminal_owned(
+               allocation,
+               assignment,
+               key(assignment, :finalize),
+               Map.delete(opts, :result_journal_root)
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "slotted terminal finalization keeps the OAuth lease held after Job and Pod cleanup", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment) |> Map.put(:result_journal_root, context.root)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    terminal_job_and_pod(context, assignment, allocation, :codex)
+
+    assert {:ok, %{"result" => %{"status" => "completed"}}} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
+    refute :release in slot_actions(context)
   end
 
   test "OAuth slot requires a lease guard before creating a Job", context do
@@ -147,7 +238,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert Agent.get(context.client, & &1.creates) == 0
   end
 
-  test "OAuth slot lease binds the Job UID and gates activation and release", context do
+  test "OAuth slot lease binds the Job UID and gates activation and direct deletion", context do
     assignment = assignment()
     opts = slot_context(context, assignment)
 
@@ -166,11 +257,15 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     Agent.update(context.slot_lease, &%{&1 | denied: nil})
 
     assert {:ok, _job} = ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
-    assert :ok = ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
-    assert [:reserve, :bind_uid, :authorize, :authorize, :release] == slot_actions(context)
+
+    assert {:held, :terminal_finalization_required} =
+             ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    assert [:reserve, :bind_uid, :authorize, :authorize] == slot_actions(context)
   end
 
-  test "OAuth slot remains held when UID binding or safe release is unverified", context do
+  test "OAuth slot remains held after UID binding failure and rejects a direct delete", context do
     assignment = assignment()
     opts = slot_context(context, assignment)
     Agent.update(context.slot_lease, &%{&1 | denied: :bind_uid})
@@ -184,17 +279,11 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert {:ok, allocation} =
              ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
 
-    Agent.update(context.client, &Map.put(&1, :list_pods_error, :timeout))
-
-    assert {:held, {:job_pod_readback_failed, :timeout}} =
+    assert {:held, :terminal_finalization_required} =
              ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
 
     refute :release in slot_actions(context)
-    Agent.update(context.client, &Map.delete(&1, :list_pods_error))
-    Agent.update(context.slot_lease, &%{&1 | denied: :release})
-
-    assert {:held, :synthetic_slot_lease_denial} =
-             ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+    assert Agent.get(context.client, & &1.deletes) == []
   end
 
   test "allocates through the provider and records exact namespace, name, digest, and UID", context do
@@ -550,6 +639,86 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
   defp slot_actions(context) do
     Agent.get(context.slot_lease, fn state -> state.events |> Enum.reverse() |> Enum.map(&elem(&1, 0)) end)
+  end
+
+  defp terminal_job_and_pod(context, assignment, allocation, mode \\ :preflight) do
+    [1, namespace, name, uid, _digest] = allocation_payload(allocation)
+    job_key = {namespace, name}
+
+    base_receipt =
+      CLI.base_result(
+        %{
+          subject: %{
+            assignmentDigest: assignment.sha256,
+            issueUuid: assignment.lease.issue_id,
+            generation: assignment.lease.generation,
+            repositoryRef: assignment.repository_ref,
+            branchRef: "refs/heads/" <> assignment.branch
+          }
+        },
+        "preflight_passed",
+        "auth_slot_required"
+      )
+
+    receipt =
+      if mode == :codex do
+        Map.merge(base_receipt, %{
+          status: "completed",
+          reason: "pull_request_created",
+          checkout_lease_id: "checkout-1",
+          checkout_revocation: "confirmed",
+          broker_lease_id: "publish-1",
+          revocation: "confirmed",
+          codex_exit_code: 0,
+          base_oid: String.duplicate("a", 40),
+          branch_head_oid: String.duplicate("b", 40),
+          head_oid: String.duplicate("c", 40),
+          changed_files: 1,
+          pull_request_number: 123,
+          pull_request_url: "https://github.com/hypergridau/symphony/pull/123"
+        })
+      else
+        base_receipt
+      end
+
+    pod = %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "namespace" => namespace,
+        "name" => name <> "-a",
+        "uid" => "pod-uid-1",
+        "resourceVersion" => "pod-rv-8",
+        "labels" => %{"batch.kubernetes.io/job-name" => name},
+        "ownerReferences" => [
+          %{"apiVersion" => "batch/v1", "kind" => "Job", "name" => name, "uid" => uid, "controller" => true}
+        ]
+      },
+      "status" => %{
+        "phase" => "Succeeded",
+        "containerStatuses" => [
+          %{
+            "name" => "symphony-worker",
+            "ready" => false,
+            "state" => %{"terminated" => %{"exitCode" => 0, "message" => Jason.encode!(receipt)}}
+          }
+        ]
+      }
+    }
+
+    Agent.update(context.client, fn state ->
+      job =
+        state.jobs
+        |> Map.fetch!(job_key)
+        |> put_in(["metadata", "resourceVersion"], "job-rv-7")
+        |> put_in(["spec", "suspend"], false)
+        |> Map.put("status", %{"conditions" => [%{"type" => "Complete", "status" => "True"}]})
+
+      state
+      |> put_in([:jobs, job_key], job)
+      |> Map.put(:pods, %{pod["metadata"]["uid"] => pod})
+      |> Map.put(:delete_pods_on_delete?, true)
+    end)
   end
 
   defp allocation_uid(allocation) do
