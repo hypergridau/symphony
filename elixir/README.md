@@ -798,7 +798,7 @@ signature itself. It compiles the bundle into a deterministic Job using a digest
 image and trusted namespace supplied by the caller. The Job has fixed execution parameters,
 an ephemeral workspace, restricted container security, bounded resources, and a deadline.
 Trusted configuration may also supply an OAuth session-slot claim with an assignment digest,
-seat and lease reference, plus a one-to-one catalog of permitted slot ID and claim pairs. The
+seat, observed PVC UID and lease reference, plus a one-to-one catalog of permitted slot ID and claim pairs. The
 compiler binds the selected catalog entry and lease reference into the exact Job,
 mounts it writable only at `CODEX_HOME`, and leaves the repository workspace ephemeral. The
 compiler does not acquire or verify an exclusive durable slot lease, check session health, or
@@ -812,7 +812,12 @@ uncertain guard responses hold the operation. No production host wiring is insta
 the port alone is not evidence of a working refresh or cleanup check.
 `DahliaAuthSlotLeaseGuard.prepare_slot/4` can first reserve the selected catalog entry with
 Dahlia and produce the exact lease/claim configuration for `JobSpec`. The adapter's reserve
-callback then checks the same lease again before Job creation. This client remains host-only;
+callback then checks the same lease again before Job creation. The trusted host must supply
+the exact Frigga namespace and Kubernetes client context. The guard reads the Bound PVC's
+server UID before reservation, bind and activation, checks the provider's returned UID,
+and holds on replacement, deletion or unavailable readback. The Job annotation carries
+that UID as a consistency marker; the name-based Kubernetes mount still requires runtime
+identity and final cleanup verification before credential use or slot reuse. This client remains host-only;
 it does not select a slot, authenticate Codex, or install the production host lifecycle.
 After the suspended Job is created or reconciled, the adapter requires Dahlia to acknowledge
 its exact allocation ID and server UID against the validated provider claim's reservation.

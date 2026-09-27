@@ -187,6 +187,7 @@ defmodule SymphonyElixir.RKE2JobResultReaderTest do
         slot = %{
           slot_id: "slot-1",
           claim_name: "codex-auth-slot-1",
+          claim_uid: "pvc-uid-one",
           lease_id: "auth-lease-1",
           assignment_sha256: assignment.sha256,
           seat: assignment.seat

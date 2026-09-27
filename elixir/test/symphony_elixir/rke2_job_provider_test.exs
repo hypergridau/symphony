@@ -71,6 +71,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     slot = %{
       slot_id: "luna-slot-1",
       claim_name: "frigga-codex-luna-slot-1",
+      claim_uid: "pvc-uid-one",
       lease_id: "lease:slot-1:42",
       assignment_sha256: assignment.sha256,
       seat: assignment.seat
@@ -87,6 +88,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
 
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-slot"] == slot.slot_id
     assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-lease"] == slot.lease_id
+    assert job["metadata"]["annotations"]["symphony.hypergrid.au/codex-auth-claim-uid"] == slot.claim_uid
     assert %{"name" => "CODEX_HOME", "value" => "/var/lib/frigga-codex-home"} in container["env"]
     assert %{"name" => "SYMPHONY_WORKER_MODE", "value" => "codex"} in container["env"]
     mount = %{"name" => "codex-auth-slot", "mountPath" => "/var/lib/frigga-codex-home", "readOnly" => false}
@@ -236,6 +238,7 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     slot = %{
       slot_id: "luna-slot-1",
       claim_name: "frigga-codex-luna-slot-1",
+      claim_uid: "pvc-uid-one",
       lease_id: "lease:slot-1:42",
       assignment_sha256: assignment.sha256,
       seat: assignment.seat

@@ -1141,6 +1141,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     slot = %{
       slot_id: "luna-slot-1",
       claim_name: "frigga-codex-luna-slot-1",
+      claim_uid: "pvc-uid-one",
       lease_id: "lease:slot-1:42",
       assignment_sha256: assignment.sha256,
       seat: assignment.seat
