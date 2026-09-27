@@ -4,6 +4,6 @@ defmodule SymphonyElixir.RKE2Job.PrepareAckGuard do
   observation before Symphony removes the suspended Job.
   """
 
-  @callback verify(String.t(), map(), map(), map(), term()) ::
+  @callback verify(String.t(), String.t(), map(), map(), term()) ::
               :ok | {:held, term()} | {:error, term()}
 end

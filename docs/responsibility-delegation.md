@@ -204,9 +204,24 @@ deletion. The compatibility abort entrypoints always hold. Slot verification use
 the paused-safe /verify-bound route, which checks the current lease/allocation
 binding while admission is paused. A Pod can still appear between the complete
 pre-delete snapshot and DELETE; post-delete Pod verification holds in that case.
-The prepare acknowledgment guard is a required host-supplied port; Symphony has
-no production persistence implementation. No OAuth/provider release or signed
-final abort proof is performed by Symphony.
+`RKE2Job.AbortPrepareCaller` is a source-only host caller for this protocol. It
+stores the exact ordered provider request in an exclusive private journal,
+records `abort_prepare_intent` with the root witness before posting, and replays
+the saved bytes after an uncertain provider outcome. The root receipt sequence
+and hash are saved with the intent. Each provider retry and confirmation
+replays that exact root intent and requires the same receipt before continuing.
+Confirmation derives the claim from current witness inputs, pins
+`JournalPrepareAckGuard`, and uses the saved observation instead of caller
+supplied guard state. The pool is part of the journal identity. Production use
+requires configured host journal/workspace roots and disables the test-only
+provider transport and witness injection seams. The concrete
+`RKE2Job.JournalPrepareAckGuard` verifies the saved provider acknowledgment and
+the exact assignment, allocation and observation before the caller passes them
+to `confirm_abort_unstarted_owned/6`. The caller is not wired into the
+production managed-executor lifecycle. Linux filesystem crash durability still
+needs runtime qualification; Windows production use is rejected because the
+journal does not verify Windows ACLs. No OAuth/provider release or signed final
+abort proof is performed by Symphony.
 
 Before execution, the typed adapter acquires a JIT credential lease bound to the
 assignment digest and allocation, renews it using a stable key, and refuses to
