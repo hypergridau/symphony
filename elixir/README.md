@@ -829,6 +829,11 @@ Trusted RKE2 Job config must also provide the positive decimal GitHub `repositor
 the selected pool. The Job passes it as `SYMPHONY_REPOSITORY_ID` to the worker; it is a
 broker subject selector, while Dahlia still checks the request against its verified
 assignment binding. The signed assignment bundle remains unchanged.
+`SymphonyElixir.Worker.Assignment.decode/3` is the worker-side preflight for the Job's
+JSON argument, assignment digest environment value, and repository ID environment value.
+It produces the exact broker subject after validating the existing bundle contract.
+It performs no broker call or Codex execution; the production worker executable and host
+result/cleanup lifecycle are still required before running a Job.
 The fakeable client contract supports create/get/activate/delete and namespace Pod-list reconciliation; a same-name Job
 with a different assignment or spec is held, and deletion requires an exact identity and
 server UID. Deletion requests foreground cascading cleanup and returns success only after
