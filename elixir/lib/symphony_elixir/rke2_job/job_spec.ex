@@ -73,6 +73,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                "restartPolicy" => "Never",
                "automountServiceAccountToken" => false,
                "serviceAccountName" => @worker_service_account,
+               "dnsConfig" => %{"options" => [%{"name" => "ndots", "value" => "1"}]},
                "securityContext" => %{
                  "runAsNonRoot" => true,
                  "runAsUser" => 10_001,

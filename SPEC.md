@@ -2392,7 +2392,9 @@ the slot to the signed assignment. A trusted one-to-one catalog MUST bind each s
 permitted claim. The suspended Job's server UID MUST join that reservation
 before activation. That writable claim MUST be separate from
 the ephemeral repository workspace, MUST NOT be selected by assignment data, and MUST NOT be
-shared with concurrent Jobs. The Pod MUST disable automatic service-account token mounting;
+shared with concurrent Jobs. The Pod MUST set its DNS option `ndots` to `1` so public
+multi-label service names are queried as absolute names first. The Pod MUST disable automatic
+service-account token mounting;
 an explicitly projected audience-limited broker token is permitted. A provider MUST accept an existing Job only when its bound identity and
 expected spec match. Deletion MUST first read and verify the exact Job and use its server UID
 as a precondition; unknown or mismatched objects remain held. A fakeable client contract and
