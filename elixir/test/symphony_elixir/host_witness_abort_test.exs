@@ -47,6 +47,120 @@ defmodule SymphonyElixir.HostWitnessAbortTest do
     }
   end
 
+  test "submits a durable abort-prepare intent bound to the exact claim and provider request" do
+    parent = self()
+
+    witness = fn request ->
+      send(parent, {:root_request, request})
+
+      {:ok,
+       %{
+         "ok" => true,
+         "receipt" => %{"version" => 1, "sequence" => 4, "hash" => String.duplicate("e", 64), "replayed" => false}
+       }}
+    end
+
+    prepare_id = "11111111-2222-3333-4444-555555555501"
+    prepare_request_sha256 = String.duplicate("f", 64)
+
+    assert :ok =
+             HostWitness.record_abort_prepare_intent(
+               input(witness),
+               reservation(),
+               prepare_id,
+               prepare_request_sha256
+             )
+
+    assert_receive {:root_request, request}
+    assert request["version"] == 3
+    assert request["pool"] == "midgard"
+    assert request["operation"] == "abort_prepare_intent"
+
+    assert request["abortPrepare"] == %{
+             "prepareId" => prepare_id,
+             "prepareRequestSHA256" => prepare_request_sha256
+           }
+
+    assert request["claim"]["reservationId"] == "reservation-one"
+
+    assert request["claim"]["nonceHash"] ==
+             :crypto.hash(:sha256, "private-nonce") |> Base.encode16(case: :lower)
+
+    refute inspect(request) =~ "private-nonce"
+  end
+
+  test "abort-prepare request serialization is stable and keeps provider identity exact" do
+    prepare_id = "11111111-2222-3333-4444-555555555501"
+    prepare_request_sha256 = String.duplicate("f", 64)
+
+    assert {:ok, first} =
+             HostWitness.abort_prepare_intent_request(
+               input(fn _ -> :ok end),
+               reservation(),
+               prepare_id,
+               prepare_request_sha256
+             )
+
+    assert {:ok, replay} =
+             HostWitness.abort_prepare_intent_request(
+               input(fn _ -> :ok end),
+               reservation(),
+               prepare_id,
+               prepare_request_sha256
+             )
+
+    assert first == replay
+
+    assert {:ok, changed_id} =
+             HostWitness.abort_prepare_intent_request(
+               input(fn _ -> :ok end),
+               reservation(),
+               "11111111-2222-3333-4444-555555555502",
+               prepare_request_sha256
+             )
+
+    assert {:ok, changed_hash} =
+             HostWitness.abort_prepare_intent_request(
+               input(fn _ -> :ok end),
+               reservation(),
+               prepare_id,
+               String.duplicate("0", 64)
+             )
+
+    refute first == changed_id
+    refute first == changed_hash
+  end
+
+  test "rejects malformed abort-prepare identity and hash before the root call" do
+    parent = self()
+    witness = fn request -> send(parent, {:unexpected_root_call, request}) end
+
+    for {prepare_id, prepare_request_sha256} <- [
+          {"", String.duplicate("a", 64)},
+          {"invalid-id", String.duplicate("a", 64)},
+          {"11111111-2222-3333-4444-555555555501", "not-a-digest"},
+          {"11111111-2222-3333-4444-555555555501", String.duplicate("A", 64)}
+        ] do
+      assert {:error, :invalid_abort_prepare_intent} =
+               HostWitness.record_abort_prepare_intent(
+                 input(witness),
+                 reservation(),
+                 prepare_id,
+                 prepare_request_sha256
+               )
+    end
+
+    assert {:error, :host_witness_claim_incomplete} =
+             HostWitness.record_abort_prepare_intent(
+               input(witness),
+               %{reservation() | issue_id: "another-issue"},
+               "11111111-2222-3333-4444-555555555501",
+               String.duplicate("a", 64)
+             )
+
+    refute_receive {:unexpected_root_call, _}
+  end
+
   test "submits the exact v2 abort references without exposing the reservation nonce" do
     parent = self()
 
