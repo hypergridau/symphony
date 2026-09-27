@@ -38,6 +38,37 @@ defmodule SymphonyElixir.RKE2JobFakeActivationGuard do
   end
 end
 
+defmodule SymphonyElixir.RKE2JobFakeAuthSlotLeaseGuard do
+  @behaviour SymphonyElixir.RKE2Job.AuthSlotLeaseGuard
+
+  @impl true
+  def reserve(slot, assignment, agent), do: record(:reserve, slot, assignment, nil, agent)
+
+  @impl true
+  def bind_uid(slot, assignment, allocation, agent), do: record(:bind_uid, slot, assignment, allocation, agent)
+
+  @impl true
+  def authorize(slot, assignment, allocation, agent), do: record(:authorize, slot, assignment, allocation, agent)
+
+  @impl true
+  def release(slot, assignment, allocation, agent), do: record(:release, slot, assignment, allocation, agent)
+
+  defp record(action, slot, assignment, allocation, agent) do
+    Agent.get_and_update(agent, fn state ->
+      event = {action, slot.slot_id, slot.lease_id, assignment.sha256, allocation && allocation.id}
+
+      result =
+        cond do
+          state.denied == action -> {:held, :synthetic_slot_lease_denial}
+          Map.get(state, :forced_action) == action -> Map.get(state, :forced_response)
+          true -> :ok
+        end
+
+      {result, %{state | events: [event | state.events]}}
+    end)
+  end
+end
+
 defmodule SymphonyElixir.RKE2JobFakeAllocationRegistry do
   @spec ready?(term()) :: boolean()
   def ready?(agent), do: is_pid(agent) and Process.alive?(agent)
@@ -78,7 +109,92 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     {:ok, registration} = Agent.start_link(fn -> %{events: [], result: :ok} end)
 
-    %{client: client, credentials: credentials, registration: registration}
+    {:ok, slot_lease} = Agent.start_link(fn -> %{events: [], denied: nil} end)
+
+    %{client: client, credentials: credentials, registration: registration, slot_lease: slot_lease}
+  end
+
+  test "OAuth slot requires a lease guard before creating a Job", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment) |> Map.delete(:auth_slot_lease_guard)
+
+    assert {:held, :auth_slot_lease_guard_missing} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.client, & &1.creates) == 0
+  end
+
+  test "OAuth slot reservation denial and malformed guard response hold before Job creation", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+    Agent.update(context.slot_lease, &%{&1 | denied: :reserve})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.slot_lease, fn state ->
+      state |> Map.put(:denied, nil) |> Map.put(:forced_action, :reserve) |> Map.put(:forced_response, :unknown)
+    end)
+
+    assert {:held, :invalid_auth_slot_lease_guard_response} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.slot_lease, &Map.put(&1, :forced_response, {:error, :unavailable}))
+
+    assert {:held, {:auth_slot_lease_guard_failed, :unavailable}} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.client, & &1.creates) == 0
+  end
+
+  test "OAuth slot lease binds the Job UID and gates activation and release", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, _uid} = allocation_uid(allocation)
+    assert [:reserve, :bind_uid] == slot_actions(context)
+
+    Agent.update(context.slot_lease, &%{&1 | denied: :authorize})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+
+    assert Agent.get(context.client, &Map.get(&1, :activations, 0)) == 0
+    Agent.update(context.slot_lease, &%{&1 | denied: nil})
+
+    assert {:ok, _job} = ManagedExecutorAdapter.activate_owned(allocation, assignment, key(assignment, :activate), opts)
+    assert :ok = ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+    assert [:reserve, :bind_uid, :authorize, :authorize, :release] == slot_actions(context)
+  end
+
+  test "OAuth slot remains held when UID binding or safe release is unverified", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+    Agent.update(context.slot_lease, &%{&1 | denied: :bind_uid})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.client, & &1.creates) == 1
+    Agent.update(context.slot_lease, &%{&1 | denied: nil})
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    Agent.update(context.client, &Map.put(&1, :list_pods_error, :timeout))
+
+    assert {:held, {:job_pod_readback_failed, :timeout}} =
+             ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
+
+    refute :release in slot_actions(context)
+    Agent.update(context.client, &Map.delete(&1, :list_pods_error))
+    Agent.update(context.slot_lease, &%{&1 | denied: :release})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.delete_owned(allocation, assignment, key(assignment, :delete), opts)
   end
 
   test "allocates through the provider and records exact namespace, name, digest, and UID", context do
@@ -411,6 +527,29 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
       },
       config: config()
     }
+  end
+
+  defp slot_context(context, assignment) do
+    slot = %{
+      slot_id: "luna-slot-1",
+      claim_name: "frigga-codex-luna-slot-1",
+      lease_id: "lease:slot-1:42",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    adapter_context(context)
+    |> Map.put(:auth_slot_lease_guard, SymphonyElixir.RKE2JobFakeAuthSlotLeaseGuard)
+    |> Map.put(:auth_slot_lease_guard_context, context.slot_lease)
+    |> update_in([:config], fn config ->
+      config
+      |> Map.put(:auth_slot, slot)
+      |> Map.put(:auth_slot_catalog, %{slot.slot_id => slot.claim_name})
+    end)
+  end
+
+  defp slot_actions(context) do
+    Agent.get(context.slot_lease, fn state -> state.events |> Enum.reverse() |> Enum.map(&elem(&1, 0)) end)
   end
 
   defp allocation_uid(allocation) do

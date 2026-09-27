@@ -29,6 +29,8 @@ The deterministic Job compiler can optionally mount a host-selected, writable Co
 session-slot claim at `CODEX_HOME` while keeping the repository workspace ephemeral. This is
 source support only: no exclusive slot lease, authenticated session, production worker image,
 or live Job is established by the compiler.
+The managed adapter requires a host-owned slot lease guard at reserve, UID bind, activation,
+and post-cleanup release when that optional mount is selected. No production guard is wired yet.
 The source-only managed executor can release a pre-checkout allocation after a confirmed
 credential denial, expiry, or invalid response, but only through Dahlia's signed abort
 proof and exact provider release acknowledgement. Uncertain credential outcomes stay held.

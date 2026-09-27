@@ -30,10 +30,12 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          :ok <- registration_prerequisites(context, assignment),
          {:ok, client_context} <- client_context(ports, assignment, :allocate, idempotency_key),
+         :ok <- auth_slot_guard(context, ports.config, :reserve, [ports.config[:auth_slot], assignment]),
          {:ok, job} <- Provider.ensure(assignment, provider_opts(ports, client_context)),
          {:ok, id} <- allocation_id(expected, job),
          {:ok, uid} <- allocation_uid(%{id: id, status: :ready}, expected),
-         :ok <- register_allocation(context, assignment, id, uid) do
+         :ok <- register_allocation(context, assignment, id, uid),
+         :ok <- auth_slot_guard(context, ports.config, :bind_uid, [ports.config[:auth_slot], assignment, %{id: id, status: :ready}]) do
       {:ok, %{id: id, status: :ready}}
     else
       {:held, reason} -> {:held, reason}
@@ -50,6 +52,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
          :ok <- authorize_activation(context, assignment, allocation, idempotency_key),
+         :ok <- auth_slot_guard(context, ports.config, :authorize, [ports.config[:auth_slot], assignment, allocation]),
          {:ok, client_context} <- client_context(ports, assignment, :activate, idempotency_key) do
       Provider.activate_owned(assignment, uid, provider_opts(ports, client_context))
     else
@@ -83,11 +86,35 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, ports} <- ports(context),
          {:ok, expected} <- JobSpec.compile(assignment, ports.config),
          {:ok, uid} <- allocation_uid(allocation, expected),
-         {:ok, client_context} <- client_context(ports, assignment, :delete, idempotency_key) do
-      Provider.delete_owned(assignment, uid, provider_opts(ports, client_context))
+         {:ok, client_context} <- client_context(ports, assignment, :delete, idempotency_key),
+         :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)),
+         :ok <- auth_slot_guard(context, ports.config, :release, [ports.config[:auth_slot], assignment, allocation]) do
+      :ok
     else
+      {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp auth_slot_guard(_context, %{auth_slot: nil}, _action, _args), do: :ok
+  defp auth_slot_guard(_context, config, _action, _args) when not is_map_key(config, :auth_slot), do: :ok
+
+  defp auth_slot_guard(context, _config, action, args) when is_map(context) do
+    guard = Map.get(context, :auth_slot_lease_guard)
+    arity = length(args) + 1
+
+    if is_atom(guard) and Code.ensure_loaded?(guard) and function_exported?(guard, action, arity) do
+      case apply(guard, action, args ++ [Map.get(context, :auth_slot_lease_guard_context)]) do
+        :ok -> :ok
+        {:held, reason} -> {:held, reason}
+        {:error, reason} -> {:held, {:auth_slot_lease_guard_failed, reason}}
+        _ -> {:held, :invalid_auth_slot_lease_guard_response}
+      end
+    else
+      {:held, :auth_slot_lease_guard_missing}
+    end
+  rescue
+    _error -> {:held, :auth_slot_lease_guard_failed}
   end
 
   defp validate_assignment(assignment) when is_map(assignment),
