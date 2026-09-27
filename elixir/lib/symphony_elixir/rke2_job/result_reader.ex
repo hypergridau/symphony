@@ -43,6 +43,24 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
 
   def read(_assignment, _job_uid, _opts), do: {:error, :invalid_result_reader_request}
 
+  @doc "Checks the bounded worker schema and exact CLI status/exit pairing for host journaling."
+  @spec valid_receipt_outcome?(map(), integer()) :: boolean()
+  def valid_receipt_outcome?(result, exit_code) when is_map(result) and is_integer(exit_code) do
+    mode = if result["status"] == "preflight_passed", do: "preflight", else: "codex"
+    env = [%{"name" => "SYMPHONY_WORKER_MODE", "value" => mode}]
+
+    valid_result_fields?(result, env) and
+      case result["status"] do
+        "preflight_passed" -> exit_code == 0
+        "completed" -> exit_code == 0
+        "failed" -> exit_code == 1
+        "held" -> exit_code == 2
+        _ -> false
+      end
+  end
+
+  def valid_receipt_outcome?(_result, _exit_code), do: false
+
   defp read_pods(client, context, namespace, uid, expected, job) do
     if JobSpec.owned_job_for_cleanup?(job, expected) and get_in(job, ["metadata", "uid"]) == uid and
          terminal_job?(job) and valid_version?(get_in(job, ["metadata", "resourceVersion"])) do
