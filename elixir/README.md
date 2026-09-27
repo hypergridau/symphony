@@ -881,6 +881,11 @@ identity, refresh its token, or authorize admission. No live API call, credentia
 Pod, or spawn path is exercised or qualified by this source slice. See the
 [managed responsibility contract](../docs/responsibility-delegation.md#managed-assignment-bundle).
 
+The managed Frigga image must use the patched `mint` 1.10.1 and `lazy_html`
+0.1.13 dependency locks before production admission. Earlier locks were affected
+by CVE-2026-82672 and CVE-2026-92106, respectively. This dependency check does
+not replace the Job, credential, and cleanup qualification gates.
+
 Pause the existing global gate before replacing the manifest or its digest, then restart the
 supervised pool and verify its readiness before resuming. This is explicit runtime-owner
 configuration, not a worker-editable authorization file. A restart never silently revives a
