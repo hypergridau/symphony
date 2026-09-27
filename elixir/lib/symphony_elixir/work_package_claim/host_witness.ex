@@ -22,6 +22,19 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
 
   def record(_input, _operation, _reservation), do: {:error, :invalid_host_witness_operation}
 
+  @doc "Records the exact provider abort-prepare intent before cleanup proceeds."
+  @spec record_abort_prepare_intent(map(), map(), String.t(), String.t()) :: :ok | {:error, term()}
+  def record_abort_prepare_intent(input, reservation, prepare_id, prepare_request_sha256)
+      when is_map(input) and is_map(reservation) do
+    with {:ok, request} <- abort_prepare_intent_request(input, reservation, prepare_id, prepare_request_sha256),
+         {:ok, response} <- invoke(input, request) do
+      validate_response(response)
+    end
+  end
+
+  def record_abort_prepare_intent(_input, _reservation, _prepare_id, _prepare_request_sha256),
+    do: {:error, :invalid_abort_prepare_intent}
+
   @doc "Records exact pre-execution abort proof references as root-witness provenance only."
   @spec record_abort(map(), map(), map()) :: :ok | {:error, term()}
   def record_abort(input, reservation, abort_proof)
@@ -35,6 +48,27 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
   end
 
   def record_abort(_input, _reservation, _abort_proof), do: {:error, :invalid_abort_proof_reference}
+
+  @doc false
+  @spec abort_prepare_intent_request(map(), map(), term(), term()) :: {:ok, map()} | {:error, term()}
+  def abort_prepare_intent_request(input, reservation, prepare_id, prepare_request_sha256)
+      when is_map(input) and is_map(reservation) do
+    if valid_prepare_id?(prepare_id) and valid_sha256?(prepare_request_sha256) do
+      with {:ok, base} <- request(input, "abort_prepare_intent", reservation) do
+        abort_prepare = %{
+          "prepareId" => prepare_id,
+          "prepareRequestSHA256" => prepare_request_sha256
+        }
+
+        {:ok, base |> Map.put("version", 3) |> Map.put("abortPrepare", abort_prepare)}
+      end
+    else
+      {:error, :invalid_abort_prepare_intent}
+    end
+  end
+
+  def abort_prepare_intent_request(_input, _reservation, _prepare_id, _prepare_request_sha256),
+    do: {:error, :invalid_abort_prepare_intent}
 
   @doc false
   @spec request(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
@@ -112,6 +146,12 @@ defmodule SymphonyElixir.WorkPackageClaim.HostWitness do
 
     if valid?, do: :ok, else: {:error, :invalid_abort_proof_reference}
   end
+
+  defp valid_prepare_id?(value),
+    do: is_binary(value) and String.match?(value, ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/)
+
+  defp valid_sha256?(value),
+    do: is_binary(value) and String.match?(value, ~r/\A[a-f0-9]{64}\z/)
 
   defp invoke(%{host_witness_fun: witness}, request) when is_function(witness, 1), do: witness.(request)
 
