@@ -21,7 +21,11 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
       token_file: token_file,
       assignment: %{sha256: digest, environment: %{target_environment: :rke2}},
       key: digest <> ":allocate",
-      config: %{credential_root: root, api_server: "https://10.0.14.10:6443"}
+      config: %{
+        credential_root: root,
+        api_server: "https://10.0.14.10:6443",
+        test_owner_uid: File.stat!(root).uid
+      }
     }
   end
 
@@ -81,5 +85,49 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
 
     assert {:error, :rke2_host_client_context_unavailable} =
              HostClientContext.client_context(context.assignment, :allocate, context.key, context.config)
+  end
+
+  test "holds a missing or oversized token after a rotation", context do
+    File.rm!(context.token_file)
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(context.assignment, :allocate, context.key, context.config)
+
+    File.write!(context.token_file, String.duplicate("a", 16_385))
+    File.chmod!(context.token_file, 0o640)
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(context.assignment, :allocate, context.key, context.config)
+  end
+
+  test "holds a writable credential root or unsafe CA file", context do
+    File.chmod!(context.root, 0o720)
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(context.assignment, :allocate, context.key, context.config)
+
+    File.chmod!(context.root, 0o700)
+    File.chmod!(Path.join(context.root, "kubernetes-ca.crt"), 0o666)
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(context.assignment, :allocate, context.key, context.config)
+  end
+
+  test "holds an invalid timeout or missing API endpoint", context do
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(
+               context.assignment,
+               :allocate,
+               context.key,
+               Map.put(context.config, :timeout_ms, 30_001)
+             )
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(
+               context.assignment,
+               :allocate,
+               context.key,
+               Map.delete(context.config, :api_server)
+             )
   end
 end

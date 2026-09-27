@@ -15,15 +15,17 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
   @operations ~w(allocate activate delete abort_prepare abort_confirm finalize)a
   @max_token_bytes 16_384
   @digest ~r/\A[a-f0-9]{64}\z/
+  @test_build Mix.env() == :test
 
   @impl true
   @spec client_context(map(), atom(), String.t(), term()) :: {:ok, map()} | {:error, atom()}
   def client_context(assignment, operation, idempotency_key, config)
       when operation in @operations and is_map(assignment) and is_binary(idempotency_key) and is_map(config) do
     with :ok <- exact_assignment(assignment, operation, idempotency_key),
-         {:ok, root} <- credential_root(config),
-         {:ok, token} <- read_token(Path.join(root, "kubernetes-api.token")),
-         :ok <- regular_root_file(Path.join(root, "kubernetes-ca.crt"), 1_048_576),
+         owner_uid = if(@test_build, do: Map.get(config, :test_owner_uid, 0), else: 0),
+         {:ok, root} <- credential_root(config, owner_uid),
+         {:ok, token} <- read_token(Path.join(root, "kubernetes-api.token"), owner_uid),
+         :ok <- regular_owner_file(Path.join(root, "kubernetes-ca.crt"), 1_048_576, owner_uid),
          api_server when is_binary(api_server) <- Map.get(config, :api_server),
          timeout_ms when is_integer(timeout_ms) and timeout_ms in 1..30_000 <-
            Map.get(config, :timeout_ms, 10_000) do
@@ -56,10 +58,11 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
 
   defp exact_assignment(_assignment, _operation, _idempotency_key), do: :error
 
-  defp credential_root(%{credential_root: root}) when is_binary(root) do
+  defp credential_root(%{credential_root: root}, owner_uid) when is_binary(root) do
     if Path.type(root) == :absolute and Path.expand(root) == root do
       case File.lstat(root) do
-        {:ok, %{type: :directory, uid: 0, mode: mode}} when (mode &&& 0o022) == 0 ->
+        {:ok, %{type: :directory, uid: ^owner_uid, mode: mode}}
+        when (mode &&& 0o022) == 0 ->
           {:ok, root}
 
         _ ->
@@ -70,10 +73,10 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
     end
   end
 
-  defp credential_root(_config), do: :error
+  defp credential_root(_config, _owner_uid), do: :error
 
-  defp read_token(path) do
-    with :ok <- regular_root_file(path, @max_token_bytes),
+  defp read_token(path, owner_uid) do
+    with :ok <- regular_owner_file(path, @max_token_bytes, owner_uid),
          {:ok, raw} <- File.read(path),
          true <- byte_size(raw) <= @max_token_bytes,
          token = String.trim_trailing(raw, "\n"),
@@ -85,9 +88,9 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
     end
   end
 
-  defp regular_root_file(path, maximum) do
+  defp regular_owner_file(path, maximum, owner_uid) do
     case File.lstat(path) do
-      {:ok, %{type: :regular, uid: 0, mode: mode, size: size}}
+      {:ok, %{type: :regular, uid: ^owner_uid, mode: mode, size: size}}
       when (mode &&& 0o022) == 0 and size > 0 and size <= maximum ->
         :ok
 
