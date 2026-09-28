@@ -202,6 +202,25 @@ defmodule SymphonyElixir.WorkPackageClaim do
 
   def record_suspended_allocation(_input, _allocation), do: {:error, :suspended_allocation_identity_invalid}
 
+  @doc "Checks that this exact confirmed claim may acquire its first suspended Job."
+  @spec prepare_suspended_allocation(input()) :: :ok | {:error, term()}
+  def prepare_suspended_allocation(input) when is_map(input) do
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, journal_key(authority)),
+         :ok <- reservation_matches_authority(reservation, authority),
+         %{phase: "confirmed", authority_digest: digest} <- reservation.dispatch,
+         true <- digest == Dispatch.authority_digest(input) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :suspended_allocation_not_admissible}
+    end
+  end
+
+  def prepare_suspended_allocation(_input), do: {:error, :suspended_allocation_not_admissible}
+
   @doc "Returns the exact recorded suspended allocation for controlled resumption."
   @spec suspended_allocation(input()) :: {:ok, String.t()} | {:error, term()}
   def suspended_allocation(input) when is_map(input) do

@@ -16,6 +16,9 @@ defmodule SymphonyElixir.WorkPackageRuntimeTest do
 
   test "managed runtime stays disabled when no provider tuple is configured" do
     assert :disabled = WorkPackageRuntime.configuration(env: %{})
+
+    assert {:error, :rke2_host_requires_work_package_runtime} =
+             WorkPackageRuntime.configuration(env: %{"SYMPHONY_RKE2_WORKER_IMAGE" => "configured"})
   end
 
   test "managed runtime rejects a partial provider tuple" do
@@ -92,6 +95,14 @@ defmodule SymphonyElixir.WorkPackageRuntimeTest do
                    "DAHLIA_WORK_PACKAGE_ARCHIVE_ROOT" => "   "
                  })
              )
+  end
+
+  test "partial RKE2 host settings fail managed runtime startup" do
+    env = Map.put(@required, "SYMPHONY_RKE2_WORKER_IMAGE", "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64))
+
+    assert {:error, {:incomplete_rke2_host_context, missing}} = WorkPackageRuntime.configuration(env: env)
+    assert "SYMPHONY_RKE2_API_SERVER" in missing
+    assert "SYMPHONY_RKE2_AUTH_CLAIM_NAME" in missing
   end
 
   test "recovery configuration requires both an existing absolute directory and an Ed25519 public key" do

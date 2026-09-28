@@ -9,6 +9,7 @@ defmodule SymphonyElixir.WorkPackageRuntime do
 
   alias SymphonyElixir.{Config, WorkPackageCleanup}
   alias SymphonyElixir.ManagedResponsibility.Manifest
+  alias SymphonyElixir.RKE2Job.HostAllocationContext
 
   @provider_url "DAHLIA_WORK_PACKAGE_PROVIDER_URL"
   @runner_token "DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"
@@ -30,6 +31,9 @@ defmodule SymphonyElixir.WorkPackageRuntime do
     present = Enum.filter(@required_env, &present?(Map.get(values, &1)))
 
     cond do
+      present == [] and rke2_declared?(env) ->
+        {:error, :rke2_host_requires_work_package_runtime}
+
       present == [] ->
         :disabled
 
@@ -57,6 +61,7 @@ defmodule SymphonyElixir.WorkPackageRuntime do
          {:ok, journal_path} <- configured_path(env, @journal_path, default_journal_path()),
          {:ok, archive_root} <- configured_path(env, @archive_root, default_archive_root(journal_path)),
          {:ok, managed_delegations} <- Manifest.load(env, System.system_time(:millisecond)),
+         {:ok, disposable_rke2_host_config} <- rke2_host_configuration(env, managed_delegations, values),
          {:ok, claim_recovery} <- recovery_configuration(env) do
       {:ok,
        %{
@@ -69,6 +74,7 @@ defmodule SymphonyElixir.WorkPackageRuntime do
          journal_path: journal_path,
          archive_root: archive_root,
          managed_delegations: managed_delegations,
+         disposable_rke2_host_config: disposable_rke2_host_config,
          claim_recovery: claim_recovery,
          cleanup_prepare_fun: fn state, token, head, entry ->
            WorkPackageCleanup.prepare(state, token, head, entry, archive_root: archive_root)
@@ -83,6 +89,13 @@ defmodule SymphonyElixir.WorkPackageRuntime do
            "DAHLIA_CLEANUP_ATTESTATION_KEY"
          ]
        }}
+    end
+  end
+
+  defp rke2_host_configuration(env, manifest, values) do
+    case HostAllocationContext.configuration(env, manifest, values[@provider_url], values[@runner_token]) do
+      :disabled -> {:ok, nil}
+      other -> other
     end
   end
 
@@ -142,4 +155,10 @@ defmodule SymphonyElixir.WorkPackageRuntime do
   defp default_archive_root(journal_path), do: Path.join(Path.dirname(journal_path), "cleanup-archives")
 
   defp present?(value), do: is_binary(value) and String.trim(value) != ""
+
+  defp rke2_declared?(env) do
+    Enum.any?(env, fn {name, value} ->
+      is_binary(name) and String.starts_with?(name, "SYMPHONY_RKE2_") and present?(value)
+    end)
+  end
 end

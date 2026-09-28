@@ -310,6 +310,15 @@ allocation skips another adapter call. An uncertain allocation keeps the provide
 local lease held. Activation remains unavailable until Job result and cleanup ownership are
 wired into the controller; no disposable runner has been qualified.
 
+The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SERVER`,
+`SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
+`SYMPHONY_RKE2_REPOSITORY_ID`, `SYMPHONY_RKE2_AUTH_SLOT_ID`, and
+`SYMPHONY_RKE2_AUTH_CLAIM_NAME` tuple. Partial settings fail startup. For each new
+allocation, the host reads its rotating Kubernetes token, verifies the exact Bound PVC UID,
+reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
+configuration to the existing suspended controller. No production host has supplied this
+tuple or admitted a Job yet.
+
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
 has already been confirmed. This records a local `Failed attempt` outcome with
