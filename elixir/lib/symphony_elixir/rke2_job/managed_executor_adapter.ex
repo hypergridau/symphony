@@ -178,7 +178,7 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     end
   end
 
-  @doc "Journals one terminal worker result before deleting its exact Job UID; retains the OAuth slot lease."
+  @doc "Journals a terminal result, deletes its exact Job UID, then verifies OAuth slot release."
   @spec finalize_terminal_owned(allocation(), map(), String.t(), term()) ::
           {:ok, map()} | {:held, term()} | {:error, term()}
   def finalize_terminal_owned(allocation, assignment, idempotency_key, context) do
@@ -189,7 +189,8 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, uid} <- allocation_uid(allocation, expected),
          {:ok, client_context} <- client_context(ports, assignment, :finalize, idempotency_key),
          {:ok, observation} <- terminal_checkpoint(assignment, uid, ports, client_context, context),
-         :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)) do
+         :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)),
+         :ok <- auth_slot_guard(context, ports.config, :release, [ports.config[:auth_slot], assignment, allocation]) do
       {:ok, observation}
     else
       {:held, reason} -> {:held, reason}
@@ -225,9 +226,10 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   defp auth_slot_guard(context, _config, action, args) when is_map(context) do
     guard = Map.get(context, :auth_slot_lease_guard)
     arity = length(args) + 1
+    guard_context = auth_slot_guard_context(context, action)
 
     if is_atom(guard) and Code.ensure_loaded?(guard) and function_exported?(guard, action, arity) do
-      case apply(guard, action, args ++ [Map.get(context, :auth_slot_lease_guard_context)]) do
+      case apply(guard, action, args ++ [guard_context]) do
         :ok -> :ok
         {:held, reason} -> {:held, reason}
         {:error, reason} -> {:held, {:auth_slot_lease_guard_failed, reason}}
@@ -239,6 +241,18 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
   rescue
     _error -> {:held, :auth_slot_lease_guard_failed}
   end
+
+  defp auth_slot_guard_context(context, :release) do
+    case Map.get(context, :auth_slot_lease_guard_context) do
+      guard_context when is_map(guard_context) ->
+        Map.put(guard_context, :result_journal_root, Map.get(context, :result_journal_root))
+
+      other ->
+        other
+    end
+  end
+
+  defp auth_slot_guard_context(context, _action), do: Map.get(context, :auth_slot_lease_guard_context)
 
   defp validate_assignment(assignment) when is_map(assignment),
     do: ManagedAssignmentBundle.validate_bundle(assignment)
