@@ -29,6 +29,7 @@ defmodule SymphonyElixir.CLI do
   def main(args) do
     case args do
       ["--assignment-json" | _worker_args] -> WorkerCLI.main(args)
+      ["--verify-auth-cache"] -> WorkerCLI.main(args)
       _ -> main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
     end
   end
