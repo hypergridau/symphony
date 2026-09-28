@@ -568,13 +568,18 @@ defmodule SymphonyElixir.ManagedExecutor do
   end
 
   defp publish_abort_result(record, assignment, ports) do
+    adapter_context =
+      if is_map(ports.adapter_context),
+        do: Map.put(ports.adapter_context, :claim_binding, record.claim_binding),
+        else: ports.adapter_context
+
     response =
       ports.adapter.publish_or_reconcile_abort_result(
         record.allocation,
         assignment,
         record.pre_execution_result,
         key(assignment, "abort-result"),
-        ports.adapter_context
+        adapter_context
       )
 
     case response do
