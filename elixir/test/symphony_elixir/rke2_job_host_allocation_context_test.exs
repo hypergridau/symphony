@@ -24,7 +24,8 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     "SYMPHONY_RKE2_WORKER_IMAGE" => @image,
     "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
     "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
-    "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1"
+    "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
+    "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
   }
 
   test "host settings are all-or-nothing and pinned to a manifest repository" do
@@ -40,10 +41,14 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert {:error, :invalid_rke2_host_context} =
              HostAllocationContext.configuration(Map.put(@env, "SYMPHONY_RKE2_WORKER_IMAGE", "worker:latest"), manifest, "https://provider.example", "host-token")
 
+    assert {:error, :invalid_rke2_host_context} =
+             HostAllocationContext.configuration(Map.put(@env, "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT", "relative/results"), manifest, "https://provider.example", "host-token")
+
     assert {:ok, config} = HostAllocationContext.configuration(@env, manifest, "https://provider.example", "host-token")
     assert config.image == @image
     assert config.repository_ref == "hypergridau/symphony"
     assert config.slot_id == "slot-one"
+    assert config.result_journal_root == "/private/symphony/job-results"
   end
 
   test "prepares one exact slot-bound Job context without storing credentials in the assignment" do
@@ -97,7 +102,19 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert context.config.auth_slot.claim_uid == "pvc-uid-one"
     assert context.config.repository_id == "123456789"
     assert context.claim_binding == binding
+    assert context.result_journal_root == "/private/symphony/job-results"
+    assert context.auth_slot_lease_guard_context.result_journal_root == context.result_journal_root
     refute Map.has_key?(assignment, :runner_token)
+
+    assert {:held, _} =
+             context.auth_slot_lease_guard_context.cleanup_receipt_fun.(
+               context.config.auth_slot,
+               assignment,
+               %{id: "invalid-allocation", status: :ready}
+             )
+
+    assert_receive {:kube_context_requested, ^digest, :finalize, finalize_key}
+    assert finalize_key == digest <> ":finalize"
 
     assert {:held, :rke2_host_allocation_context_unavailable} =
              HostAllocationContext.prepare(assignment, %{binding | issue_id: "another-issue"}, config)
@@ -164,6 +181,9 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert_receive :lease_binding_verified
     assert context.config.auth_slot == slot
     assert context.claim_binding == binding
+    assert context.result_journal_root == "/private/symphony/job-results"
+    assert context.auth_slot_lease_guard_context.result_journal_root == context.result_journal_root
+    assert is_function(context.auth_slot_lease_guard_context.cleanup_receipt_fun, 3)
 
     Process.put(:retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
 

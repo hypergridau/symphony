@@ -1254,7 +1254,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
-      "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1"
+      "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
     }
 
     assert {:ok, config} =
