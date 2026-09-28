@@ -79,6 +79,46 @@ defmodule SymphonyElixir.WorkPackageClaimRecoveryTest do
     assert recovered.responsibility_graph.delegations[delegation].runtime_lease == lease
   end
 
+  test "retained suspended allocation reconciles only after read-only verification", context do
+    {:ok, journal} = Journal.load(context.runtime.journal_path)
+    [key] = Map.keys(journal.reservations)
+    reservation = journal.reservations[key]
+    allocation_id = "rke2job:v1:retained-allocation"
+    retained = put_in(reservation, [:dispatch, :phase], "allocation_suspended")
+    retained = put_in(retained, [:dispatch, :allocation_id], allocation_id)
+    {:ok, journal} = Journal.put(journal, key, retained)
+    assert :ok = Journal.save(context.runtime.journal_path, journal)
+
+    fence = put_in(context.state.execution_fence, [:executions, context.issue.id, :ownership], :unknown)
+    graph = context.state.responsibility_graph
+    now = System.system_time(:millisecond)
+    before = File.read!(context.runtime.journal_path)
+
+    assert {:error, :suspended_allocation_recovery_unavailable} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now)
+
+    assert {:error, :allocation_missing} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now, verify_retained: fn _, _, _ -> {:error, :allocation_missing} end)
+
+    parent = self()
+
+    assert {:ok, candidate_fence, candidate_graph, recovered} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now,
+               verify_retained: fn observed, candidate_fence, _candidate_graph ->
+                 send(parent, {:verified, observed.dispatch.allocation_id, candidate_fence.executions[context.issue.id].ownership})
+                 :ok
+               end
+             )
+
+    assert_receive {:verified, ^allocation_id, :reconciled}
+    assert recovered.token == context.token
+    assert recovered.session_id == context.session
+    assert candidate_fence.executions[context.issue.id].ownership == :reconciled
+    assert fence.executions[context.issue.id].ownership == :unknown
+    assert candidate_graph.delegations[context.delegation].runtime_lease == context.lease
+    assert File.read!(context.runtime.journal_path) == before
+  end
+
   test "pending authority uses its own slot and excludes fresh admission", context do
     assert Orchestrator.should_dispatch_issue_for_test(context.issue, context.state)
     refute Orchestrator.should_dispatch_issue_for_test(Fixture.issue(2), context.state)

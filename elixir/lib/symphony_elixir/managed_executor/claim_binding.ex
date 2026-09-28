@@ -67,6 +67,23 @@ defmodule SymphonyElixir.ManagedExecutor.ClaimBinding do
 
   def from_claim(_claim, _assignment, _runner_id), do: {:error, :provider_claim_invalid}
 
+  @doc "Rebuilds a binding from a previously witnessed journal reservation for read-only restart verification."
+  @spec from_journal(term(), map(), String.t()) :: {:ok, map()} | {:error, :provider_claim_invalid}
+  def from_journal(reservation, assignment, runner_id)
+      when is_map(reservation) and is_map(assignment) and is_binary(runner_id) do
+    if valid_reservation?(reservation) and matches_assignment?(reservation, assignment, runner_id) do
+      {:ok,
+       reservation
+       |> Map.take(@reservation_fields)
+       |> Map.put(:scope_keys, Enum.sort(reservation.scope_keys))
+       |> Map.put(:nonce_sha256, sha256(reservation.reservation_nonce))}
+    else
+      {:error, :provider_claim_invalid}
+    end
+  end
+
+  def from_journal(_reservation, _assignment, _runner_id), do: {:error, :provider_claim_invalid}
+
   defp valid_reservation?(reservation) do
     generation = Map.get(reservation, :generation)
 
