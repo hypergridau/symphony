@@ -2,7 +2,19 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.HostAllocationContext
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec}
+
+  defmodule ReadOnlySlotGuard do
+    def verify_claim_uid(_slot, _context) do
+      send(self(), :claim_uid_verified)
+      :ok
+    end
+
+    def verify_bound(_slot, _assignment, _allocation, _context) do
+      send(self(), :lease_binding_verified)
+      :ok
+    end
+  end
 
   @image "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64)
   @lease_id "12345678-1234-4123-8123-123456789abc"
@@ -91,6 +103,93 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
              HostAllocationContext.prepare(assignment, %{binding | issue_id: "another-issue"}, config)
 
     refute_receive {:slot_post, _, _}
+  end
+
+  test "reattaches only the exact suspended Job and bound OAuth slot without reserving a lease" do
+    assignment = assignment()
+    binding = claim_binding(assignment)
+    {:ok, base} = HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
+
+    slot = %{
+      slot_id: base.slot_id,
+      claim_name: base.claim_name,
+      claim_uid: "pvc-uid-one",
+      lease_id: @lease_id,
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    {:ok, expected} =
+      JobSpec.compile(assignment, %{
+        namespace: "frigga",
+        image: base.image,
+        repository_id: base.repository_id,
+        auth_slot: slot,
+        auth_slot_catalog: %{base.slot_id => base.claim_name}
+      })
+
+    generated = %{
+      "batch.kubernetes.io/controller-uid" => "job-uid-one",
+      "batch.kubernetes.io/job-name" => expected["metadata"]["name"]
+    }
+
+    job =
+      expected
+      |> put_in(["metadata", "uid"], "job-uid-one")
+      |> put_in(["metadata", "labels"], Map.merge(expected["metadata"]["labels"], generated))
+      |> put_in(["spec", "selector"], %{"matchLabels" => %{"batch.kubernetes.io/controller-uid" => "job-uid-one"}})
+      |> put_in(["spec", "template", "metadata", "labels"], Map.merge(expected["spec"]["template"]["metadata"]["labels"], generated))
+
+    assert JobSpec.owned_job?(job, expected)
+
+    allocation_id =
+      "rke2job:v1:" <>
+        Base.url_encode64(Jason.encode!([1, "frigga", expected["metadata"]["name"], "job-uid-one", assignment.sha256]), padding: false)
+
+    caller = self()
+
+    config =
+      base
+      |> Map.put(:slot_guard, ReadOnlySlotGuard)
+      |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:job_read_fun, fn "frigga", name, %{synthetic: true} ->
+        send(caller, {:job_read, name})
+        {:ok, Process.get(:retained_job)}
+      end)
+
+    Process.put(:retained_job, job)
+    assert {:ok, context} = HostAllocationContext.reattach(assignment, binding, allocation_id, config)
+    assert_receive {:job_read, _name}
+    assert_receive :claim_uid_verified
+    assert_receive :lease_binding_verified
+    assert context.config.auth_slot == slot
+    assert context.claim_binding == binding
+
+    Process.put(:retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
+
+    assert {:held, :rke2_retained_allocation_unverified} =
+             HostAllocationContext.reattach(assignment, binding, allocation_id, config)
+
+    refute_receive :claim_uid_verified
+    refute_receive :lease_binding_verified
+
+    Process.put(:retained_job, put_in(job, ["spec", "suspend"], false))
+
+    assert {:held, :rke2_retained_allocation_unverified} =
+             HostAllocationContext.reattach(assignment, binding, allocation_id, config)
+
+    refute_receive :claim_uid_verified
+    refute_receive :lease_binding_verified
+  end
+
+  defp claim_binding(assignment) do
+    %{
+      issue_id: assignment.lease.issue_id,
+      generation: assignment.lease.generation,
+      repository_ref: assignment.repository_ref,
+      runner_id: assignment.seat,
+      reservation_id: "reservation-one"
+    }
   end
 
   defp assignment do

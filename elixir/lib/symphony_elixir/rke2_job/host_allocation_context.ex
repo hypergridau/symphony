@@ -9,7 +9,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{DahliaAuthSlotLeaseGuard, HostClientContext, HTTPClient}
+  alias SymphonyElixir.RKE2Job.{DahliaAuthSlotLeaseGuard, HostClientContext, HTTPClient, JobSpec}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter}
 
   @namespace "frigga"
@@ -41,26 +41,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          {:ok, kube_context} <- client_context(assignment, config),
          guard_context = guard_context(config, binding, kube_context),
          {:ok, slot} <- prepare_slot(assignment, config, guard_context) do
-      {:ok,
-       %{
-         adapter: Map.get(config, :adapter, ManagedExecutorAdapter),
-         client: HTTPClient,
-         client_context_provider: HostClientContext,
-         client_context_provider_context: %{api_server: config.api_server, credential_root: config.credential_root},
-         config: %{
-           namespace: @namespace,
-           image: config.image,
-           repository_id: config.repository_id,
-           auth_slot: slot,
-           auth_slot_catalog: %{config.slot_id => config.claim_name}
-         },
-         allocation_registry: JobAllocationRegistration,
-         allocation_registry_context: %{base_url: config.provider_url, runner_token: config.runner_token},
-         auth_slot_lease_guard: DahliaAuthSlotLeaseGuard,
-         auth_slot_lease_guard_context: guard_context,
-         claim_binding: binding
-       }
-       |> maybe_test_port(config, :test_pid)}
+      {:ok, build_context(config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_host_allocation_context_unavailable}
     end
@@ -69,6 +50,109 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   end
 
   def prepare(_assignment, _binding, _config), do: {:held, :rke2_host_allocation_context_unavailable}
+
+  @doc "Rebuilds a retained suspended Job context from exact readback without reserving another OAuth lease."
+  @spec reattach(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
+  def reattach(assignment, binding, allocation_id, config)
+      when is_map(assignment) and is_map(binding) and is_binary(allocation_id) and is_map(config) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         true <- assignment.repository_ref == config.repository_ref,
+         true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
+         true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
+         {:ok, kube_context} <- client_context(assignment, config),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
+         name = get_in(preflight_job, ["metadata", "name"]),
+         {:ok, job} <- job_reader(config).(@namespace, name, kube_context),
+         {:ok, slot} <- retained_slot(job, assignment, config),
+         {:ok, expected} <- JobSpec.compile(assignment, job_config(config, slot)),
+         true <- JobSpec.owned_job?(job, expected),
+         true <- allocation_id == encoded_allocation_id(expected, job),
+         guard_context = guard_context(config, binding, kube_context),
+         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context),
+         :ok <-
+           slot_guard(config).verify_bound(
+             slot,
+             assignment,
+             %{id: allocation_id, status: :ready},
+             guard_context
+           ) do
+      {:ok, build_context(config, binding, slot, guard_context)}
+    else
+      _ -> {:held, :rke2_retained_allocation_unverified}
+    end
+  rescue
+    _ -> {:held, :rke2_retained_allocation_unverified}
+  end
+
+  def reattach(_assignment, _binding, _allocation_id, _config),
+    do: {:held, :rke2_retained_allocation_unverified}
+
+  defp build_context(config, binding, slot, guard_context) do
+    %{
+      adapter: Map.get(config, :adapter, ManagedExecutorAdapter),
+      client: HTTPClient,
+      client_context_provider: HostClientContext,
+      client_context_provider_context: %{api_server: config.api_server, credential_root: config.credential_root},
+      config: job_config(config, slot),
+      allocation_registry: JobAllocationRegistration,
+      allocation_registry_context: %{base_url: config.provider_url, runner_token: config.runner_token},
+      auth_slot_lease_guard: DahliaAuthSlotLeaseGuard,
+      auth_slot_lease_guard_context: guard_context,
+      claim_binding: binding
+    }
+    |> maybe_test_port(config, :test_pid)
+  end
+
+  defp job_config(config, slot) do
+    %{namespace: @namespace, image: config.image, repository_id: config.repository_id}
+    |> maybe_slot(slot, config)
+  end
+
+  defp maybe_slot(job_config, nil, _config), do: job_config
+
+  defp maybe_slot(job_config, slot, config) do
+    Map.merge(job_config, %{auth_slot: slot, auth_slot_catalog: %{config.slot_id => config.claim_name}})
+  end
+
+  defp retained_slot(job, assignment, config) do
+    annotations = get_in(job, ["metadata", "annotations"])
+    volumes = get_in(job, ["spec", "template", "spec", "volumes"])
+
+    slot = %{
+      slot_id: is_map(annotations) && annotations["symphony.hypergrid.au/codex-auth-slot"],
+      lease_id: is_map(annotations) && annotations["symphony.hypergrid.au/codex-auth-lease"],
+      claim_uid: is_map(annotations) && annotations["symphony.hypergrid.au/codex-auth-claim-uid"],
+      claim_name: retained_claim_name(volumes),
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    if slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
+      do: {:ok, slot},
+      else: {:held, :rke2_retained_allocation_unverified}
+  end
+
+  defp retained_claim_name(volumes) when is_list(volumes) do
+    case Enum.filter(volumes, &(is_map(&1) and &1["name"] == "codex-auth-slot")) do
+      [%{"persistentVolumeClaim" => %{"claimName" => name}}] -> name
+      _ -> nil
+    end
+  end
+
+  defp retained_claim_name(_volumes), do: nil
+
+  defp encoded_allocation_id(expected, job) do
+    namespace = get_in(expected, ["metadata", "namespace"])
+    name = get_in(expected, ["metadata", "name"])
+    uid = get_in(job, ["metadata", "uid"])
+    digest = get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-sha256"])
+
+    if is_binary(uid) and byte_size(uid) > 0,
+      do: "rke2job:v1:" <> Base.url_encode64(Jason.encode!([1, namespace, name, uid, digest]), padding: false),
+      else: nil
+  end
+
+  defp job_reader(config), do: Map.get(config, :job_read_fun, &HTTPClient.get_job/3)
 
   defp validate_configuration(env, %{repository_ref: repository_ref}, provider_url, runner_token)
        when is_binary(repository_ref) and is_binary(provider_url) and is_binary(runner_token) do

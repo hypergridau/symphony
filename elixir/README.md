@@ -322,8 +322,10 @@ tuple or admitted a Job yet.
 The host Kubernetes context accepts the controller's exact `:allocation` and
 `:abort_unstarted` idempotency keys for allocation and both abort phases. An
 allocated Job can be inspected by its recorded UID without another create,
-registration, or OAuth slot reservation; production restart handoff still needs
-the controller recovery path and cannot yet activate a retained Job.
+registration, or OAuth slot reservation. The host can reconstruct a retained
+suspended Job's slot from exact Kubernetes readback and verify the current PVC UID
+and Dahlia binding without another reservation. Production restart handoff still
+needs the controller recovery path and cannot yet activate a retained Job.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
