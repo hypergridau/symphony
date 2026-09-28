@@ -16,6 +16,7 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierAttemptJournal do
   @uuid4 ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/
   @image_prefix "ghcr.io/hypergridau/symphony-worker@sha256:"
   @max_bytes 4_096
+  @result_keys ~w(job_uid job_resource_version pod_uid pod_resource_version pod_list_resource_version auth_cache_status auth_cache_bytes)
 
   @type intent :: map()
 
@@ -33,6 +34,134 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierAttemptJournal do
 
   def ensure(_assignment, _job_uid, _slot, _image, _root),
     do: {:error, :invalid_auth_cache_verifier_attempt}
+
+  @doc "Checkpoints the verified result before the verifier Job can be deleted."
+  @spec record_result(intent(), map(), Path.t()) :: {:ok, map()} | {:held, atom()} | {:error, atom()}
+  def record_result(intent, evidence, root) do
+    with {:ok, path} <- result_path(intent, root),
+         {:ok, payload} <- result_payload(intent, evidence),
+         {:ok, bytes} <- Jason.encode(payload),
+         true <- byte_size(bytes) <= @max_bytes do
+      write_result(path, bytes, payload)
+    else
+      false -> {:error, :invalid_auth_cache_verifier_result_checkpoint}
+      other -> other
+    end
+  rescue
+    _ -> {:held, :auth_cache_verifier_result_write_unavailable}
+  end
+
+  @doc "Loads only a complete checkpoint bound to the persisted verifier intent."
+  @spec load_result(intent(), Path.t()) :: {:ok, map()} | :missing | {:held, atom()} | {:error, atom()}
+  def load_result(intent, root) do
+    with {:ok, path} <- result_path(intent, root) do
+      read_result(path, intent)
+    end
+  rescue
+    _ -> {:held, :auth_cache_verifier_result_read_unavailable}
+  end
+
+  defp write_result(path, bytes, payload) do
+    case :file.open(String.to_charlist(path), [:write, :binary, :exclusive, :raw]) do
+      {:ok, file} -> write_opened_result(file, path, bytes, payload)
+      {:error, :eexist} -> compare_result(path, payload)
+      _ -> {:held, :auth_cache_verifier_result_write_unavailable}
+    end
+  end
+
+  defp write_opened_result(file, path, bytes, payload) do
+    result = with :ok <- File.chmod(path, 0o600), :ok <- :file.write(file, bytes), do: :file.sync(file)
+    closed = :file.close(file)
+
+    if result == :ok and closed == :ok,
+      do: compare_result(path, payload),
+      else: {:held, :auth_cache_verifier_result_write_unavailable}
+  end
+
+  defp read_result(path, intent) do
+    case read_regular(path) do
+      {:ok, bytes} -> decode_result(bytes, intent)
+      {:error, :enoent} -> :missing
+      _ -> {:held, :auth_cache_verifier_result_read_unavailable}
+    end
+  end
+
+  defp decode_result(bytes, intent) do
+    with {:ok, %{"evidence" => evidence} = saved} <- Jason.decode(bytes),
+         {:ok, ^saved} <- result_payload(intent, evidence) do
+      {:ok, evidence}
+    else
+      _ -> {:held, :auth_cache_verifier_result_checkpoint_invalid}
+    end
+  end
+
+  defp compare_result(path, expected) do
+    case read_regular(path) do
+      {:ok, bytes} ->
+        compare_saved_result(path, bytes, expected)
+
+      _ ->
+        {:held, :auth_cache_verifier_result_read_unavailable}
+    end
+  end
+
+  defp compare_saved_result(path, bytes, expected) do
+    case Jason.decode(bytes) do
+      {:ok, ^expected} -> sync_result(path, expected)
+      _ -> {:held, :auth_cache_verifier_result_conflict}
+    end
+  end
+
+  defp sync_result(path, expected) do
+    case sync_directory(Path.dirname(path)) do
+      :ok -> {:ok, expected["evidence"]}
+      _ -> {:held, :auth_cache_verifier_result_sync_unavailable}
+    end
+  end
+
+  defp result_path(%{"assignmentDigest" => digest, "jobUid" => job_uid} = intent, root) do
+    with true <- valid_intent?(intent),
+         {:ok, path} <- journal_path(root, digest, job_uid),
+         {:ok, saved} <- read_regular(path),
+         {:ok, ^intent} <- Jason.decode(saved) do
+      {:ok, String.replace_suffix(path, ".auth-verifier-attempt.json", ".auth-verifier-result.json")}
+    else
+      _ -> {:held, :auth_cache_verifier_attempt_unverified}
+    end
+  end
+
+  defp result_path(_intent, _root), do: {:error, :invalid_auth_cache_verifier_result_checkpoint}
+
+  defp valid_intent?(intent) do
+    slot = %{
+      slot_id: intent["slotId"],
+      lease_id: intent["leaseId"],
+      claim_name: intent["claimName"],
+      claim_uid: intent["claimUid"],
+      assignment_sha256: intent["assignmentDigest"],
+      seat: intent["seat"]
+    }
+
+    Regex.match?(@uuid4, intent["attemptId"]) and
+      valid_binding(intent["assignmentDigest"], intent["seat"], intent["jobUid"], slot, intent["image"]) == :ok and
+      intent == intended_record(intent["assignmentDigest"], intent["seat"], intent["jobUid"], slot, intent["image"], intent["attemptId"])
+  end
+
+  defp result_payload(intent, evidence) when is_map(evidence) do
+    normalized = Map.new(evidence, fn {key, value} -> {to_string(key), value} end)
+
+    if Enum.sort(Map.keys(normalized)) == Enum.sort(@result_keys) and
+         safe_uid?(normalized["job_uid"]) and safe_uid?(normalized["pod_uid"]) and
+         Enum.all?(~w(job_resource_version pod_resource_version pod_list_resource_version), &safe_uid?(normalized[&1])) and
+         normalized["auth_cache_status"] == "codex_login_status_authenticated" and
+         is_integer(normalized["auth_cache_bytes"]) and normalized["auth_cache_bytes"] in 1..10_000_000 do
+      {:ok, %{"schemaVersion" => 1, "attempt" => intent, "evidence" => normalized}}
+    else
+      {:error, :invalid_auth_cache_verifier_result_checkpoint}
+    end
+  end
+
+  defp result_payload(_intent, _evidence), do: {:error, :invalid_auth_cache_verifier_result_checkpoint}
 
   defp write_new(path, digest, seat, job_uid, slot, image) do
     intent = intended_record(digest, seat, job_uid, slot, image, Ecto.UUID.generate())
