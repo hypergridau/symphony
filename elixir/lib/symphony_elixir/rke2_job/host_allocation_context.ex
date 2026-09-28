@@ -9,11 +9,20 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{DahliaAuthSlotLeaseGuard, HostClientContext, HTTPClient, JobSpec}
+  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
+  alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter}
 
   @namespace "frigga"
-  @settings ~w(SYMPHONY_RKE2_API_SERVER SYMPHONY_RKE2_CREDENTIAL_ROOT SYMPHONY_RKE2_WORKER_IMAGE SYMPHONY_RKE2_REPOSITORY_ID SYMPHONY_RKE2_AUTH_SLOT_ID SYMPHONY_RKE2_AUTH_CLAIM_NAME)
+  @settings ~w(
+    SYMPHONY_RKE2_API_SERVER
+    SYMPHONY_RKE2_CREDENTIAL_ROOT
+    SYMPHONY_RKE2_WORKER_IMAGE
+    SYMPHONY_RKE2_REPOSITORY_ID
+    SYMPHONY_RKE2_AUTH_SLOT_ID
+    SYMPHONY_RKE2_AUTH_CLAIM_NAME
+    SYMPHONY_RKE2_RESULT_JOURNAL_ROOT
+  )
   @digest_image ~r|\A[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}\z|
   @dns_label ~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/
 
@@ -98,6 +107,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       allocation_registry_context: %{base_url: config.provider_url, runner_token: config.runner_token},
       auth_slot_lease_guard: DahliaAuthSlotLeaseGuard,
       auth_slot_lease_guard_context: guard_context,
+      result_journal_root: config.result_journal_root,
       claim_binding: binding
     }
     |> maybe_test_port(config, :test_pid)
@@ -162,8 +172,9 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     repository_id = env["SYMPHONY_RKE2_REPOSITORY_ID"]
     slot_id = env["SYMPHONY_RKE2_AUTH_SLOT_ID"]
     claim_name = env["SYMPHONY_RKE2_AUTH_CLAIM_NAME"]
+    result_journal_root = env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
 
-    if valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name) and
+    if valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name, result_journal_root) and
          https_origin?(provider_url) and byte_size(repository_ref) > 0 and byte_size(runner_token) > 0 do
       {:ok,
        %{
@@ -173,6 +184,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          repository_id: repository_id,
          slot_id: slot_id,
          claim_name: claim_name,
+         result_journal_root: result_journal_root,
          repository_ref: repository_ref,
          provider_url: provider_url,
          runner_token: runner_token
@@ -185,10 +197,16 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   defp validate_configuration(_env, _manifest, _provider_url, _runner_token),
     do: {:error, :invalid_rke2_host_context}
 
-  defp valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name) do
-    https_origin?(api_server) and Path.type(root) == :absolute and Path.expand(root) == root and
-      digest_image?(image) and repository_id?(repository_id) and dns_label?(slot_id) and dns_label?(claim_name)
+  defp valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name, result_journal_root) do
+    https_origin?(api_server) and absolute_root?(root) and
+      digest_image?(image) and repository_id?(repository_id) and dns_label?(slot_id) and dns_label?(claim_name) and
+      absolute_root?(result_journal_root)
   end
+
+  defp absolute_root?(root) when is_binary(root),
+    do: Path.type(root) == :absolute and Path.expand(root) == root
+
+  defp absolute_root?(_root), do: false
 
   defp digest_image?(image), do: byte_size(image) <= 512 and Regex.match?(@digest_image, image)
 
@@ -215,10 +233,33 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       runner_token: config.runner_token,
       reservation_id: binding.reservation_id,
       pvc_namespace: @namespace,
-      pvc_client_context: kube_context
+      pvc_client_context: kube_context,
+      result_journal_root: config.result_journal_root,
+      cleanup_receipt_fun: cleanup_receipt_fun(config)
     }
     |> maybe_test_port(config, :pvc_read_fun)
     |> maybe_test_port(config, :post_fun)
+  end
+
+  defp cleanup_receipt_fun(config) do
+    fn slot, assignment, allocation ->
+      provider = Map.get(config, :client_context_fun, &HostClientContext.client_context/4)
+
+      case provider.(assignment, :finalize, assignment.sha256 <> ":finalize", config) do
+        {:ok, client_context} ->
+          AuthCacheVerifierObserver.observe(slot, assignment, allocation, %{
+            config: %{
+              image: config.image,
+              catalog: %{config.slot_id => config.claim_name},
+              journal_root: config.result_journal_root
+            },
+            client_context: client_context
+          })
+
+        _ ->
+          {:held, :rke2_host_cleanup_context_unavailable}
+      end
+    end
   end
 
   defp maybe_test_port(context, config, name) do
