@@ -20,7 +20,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.ManagedExecutor.ClaimBinding
-  alias SymphonyElixir.RKE2Job.SuspendedController
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery}
 
@@ -169,6 +169,14 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assert {:ok, %{phase: "allocation_suspended", allocation_id: ^allocation_id}} =
              WorkPackageClaim.handoff_allocation(input)
+
+    assert {:error, :suspended_allocation_not_admissible} =
+             WorkPackageClaim.prepare_suspended_allocation(input)
+
+    assert {:error, :suspended_allocation_not_admissible} =
+             SuspendedController.allocate(assignment, input, context)
+
+    refute_receive {:allocation_requested, _key}
 
     assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
     assert_receive {:root_witness, "spawn_intent", false}
@@ -1223,6 +1231,101 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.allocation_id == allocation_id
   end
 
+  test "signed dispatch composes trusted host context before suspended allocation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Host-configured disposable allocation",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    env = %{
+      "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
+      "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
+      "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
+      "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1"
+    }
+
+    assert {:ok, config} =
+             HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    caller = self()
+
+    config =
+      config
+      |> Map.put(:adapter, SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter)
+      |> Map.put(:test_pid, caller)
+      |> Map.put(:client_context_fun, fn _, _, _, _ -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:pvc_read_fun, fn "frigga", "codex-oauth-slot-1", %{synthetic: true} ->
+        {:ok,
+         %{
+           "apiVersion" => "v1",
+           "kind" => "PersistentVolumeClaim",
+           "metadata" => %{"namespace" => "frigga", "name" => "codex-oauth-slot-1", "uid" => "pvc-uid-one"},
+           "status" => %{"phase" => "Bound"}
+         }}
+      end)
+      |> Map.put(:post_fun, fn url, _opts ->
+        send(caller, {:slot_reserved, url})
+
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{"data" => %{"slotId" => "slot-one", "claimName" => "codex-oauth-slot-1", "claimUid" => "pvc-uid-one", "leaseId" => "12345678-1234-4123-8123-123456789abc", "replayed" => false}}
+         }}
+      end)
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_host_config: config)
+
+    assert_receive {:slot_reserved, url}
+    assert String.ends_with?(url, "/reservation-349/codex-auth-slots/reserve")
+    assert_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.blocked[@issue_id].error =~ "disposable_rke2_activation_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+
+    recovery_path = temp_path()
+    on_exit(fn -> File.rm_rf(recovery_path) end)
+
+    {recovery_blocked, _runtime} =
+      post_claim_revalidation_failure(recovery_path, issue, issue,
+        before_dispatch_fun: fn input -> assert :ok = WorkPackageClaim.begin_paused_recovery(input) end,
+        disposable_rke2_host_config: config
+      )
+
+    assert recovery_blocked.blocked[@issue_id].error =~ "disposable_rke2_claim_not_admissible"
+    refute_receive {:slot_reserved, _url}
+    refute_receive {:allocation_requested, _key}
+
+    drift_path = temp_path()
+    on_exit(fn -> File.rm_rf(drift_path) end)
+
+    {drift_blocked, _runtime} =
+      post_claim_revalidation_failure(drift_path, issue, issue,
+        before_dispatch_fun: fn input ->
+          assert {:ok, journal} = Journal.load(input.journal_path)
+          [{key, reservation}] = Map.to_list(journal.reservations)
+          assert :ok = Journal.save(input.journal_path, %{journal | reservations: %{key => %{reservation | reservation_nonce: "changed-nonce"}}})
+        end,
+        disposable_rke2_host_config: config
+      )
+
+    assert drift_blocked.blocked[@issue_id].error =~ "disposable_rke2_claim_not_admissible"
+    refute_receive {:slot_reserved, _url}
+    refute_receive {:allocation_requested, _key}
+  end
+
   test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
     path = temp_path()
     pause_root = temp_path()
@@ -1937,7 +2040,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     runtime =
       input
       |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
-      |> Map.merge(Map.new(Keyword.take(opts, [:disposable_rke2_context])))
+      |> Map.merge(Map.new(Keyword.take(opts, [:disposable_rke2_context, :disposable_rke2_host_config])))
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"

@@ -38,7 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.SuspendedController
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -1840,17 +1840,25 @@ defmodule SymphonyElixir.Orchestrator do
          issue,
          %{assignment_bundle: %{environment: %{target_environment: :rke2}}} = dispatch
        ) do
-    context = get_in(state.work_package_runtime || %{}, [:disposable_rke2_context])
+    runtime = state.work_package_runtime || %{}
+    context = Map.get(runtime, :disposable_rke2_context)
+    host_config = Map.get(runtime, :disposable_rke2_host_config)
 
     cond do
       GlobalPause.paused?() ->
         retain_disposable_claim(state, issue, dispatch, :global_pause)
 
-      not is_map(context) or not is_map(Map.get(dispatch, :claim_binding)) ->
+      not is_map(Map.get(dispatch, :claim_binding)) ->
         retain_disposable_claim(state, issue, dispatch, :disposable_rke2_controller_unavailable)
 
+      is_map(context) ->
+        allocate_disposable_job(state, issue, dispatch, {:prepared, context})
+
+      is_map(host_config) ->
+        allocate_disposable_job(state, issue, dispatch, {:host, host_config})
+
       true ->
-        allocate_disposable_job(state, issue, dispatch, Map.put(context, :claim_binding, dispatch.claim_binding))
+        retain_disposable_claim(state, issue, dispatch, :disposable_rke2_controller_unavailable)
     end
   end
 
@@ -1876,7 +1884,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp allocate_disposable_job(state, issue, dispatch, context) do
+  defp allocate_disposable_job(state, issue, dispatch, context_source) do
     input = claim_input(state, issue)
 
     case WorkPackageClaim.handoff_allocation(input) do
@@ -1887,11 +1895,35 @@ defmodule SymphonyElixir.Orchestrator do
         })
 
       {:error, :suspended_allocation_unavailable} ->
-        create_disposable_allocation(state, issue, dispatch, context, input)
+        case WorkPackageClaim.prepare_suspended_allocation(input) do
+          :ok -> prepare_disposable_allocation(state, issue, dispatch, context_source, input)
+          {:error, reason} -> block_claim_recovery(state, issue, {:disposable_rke2_claim_not_admissible, reason})
+        end
 
       {:error, reason} ->
         block_claim_recovery(state, issue, {:disposable_rke2_allocation_state_uncertain, reason})
     end
+  end
+
+  defp prepare_disposable_allocation(state, issue, dispatch, context_source, input) do
+    case SuspendedController.preflight(dispatch.assignment_bundle, input, %{claim_binding: dispatch.claim_binding}) do
+      :ok ->
+        case disposable_context(dispatch, context_source) do
+          {:ok, context} -> create_disposable_allocation(state, issue, dispatch, context, input)
+          {:held, reason} -> block_claim_recovery(state, issue, {:disposable_rke2_context_unavailable, reason})
+        end
+
+      {:error, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_claim_not_admissible, reason})
+    end
+  end
+
+  defp disposable_context(dispatch, {:prepared, context}) do
+    {:ok, Map.put(context, :claim_binding, dispatch.claim_binding)}
+  end
+
+  defp disposable_context(dispatch, {:host, config}) do
+    HostAllocationContext.prepare(dispatch.assignment_bundle, dispatch.claim_binding, config)
   end
 
   defp create_disposable_allocation(state, issue, dispatch, context, input) do

@@ -42,7 +42,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   @spec allocate(map(), map(), map()) :: result()
   def allocate(assignment, claim_input, context)
       when is_map(assignment) and is_map(claim_input) and is_map(context) do
-    with :ok <- validate_inputs(assignment, claim_input, context),
+    with :ok <- preflight(assignment, claim_input, context),
          {:ok, adapter} <- adapter(context),
          {:ok, allocation} <-
            adapter.allocate_or_reconcile(
@@ -58,6 +58,18 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   end
 
   def allocate(_assignment, _claim_input, _context), do: {:error, :invalid_suspended_controller_input}
+
+  @doc "Validates the exact signed claim and journal before host side effects."
+  @spec preflight(map(), map(), map()) :: :ok | {:error, term()}
+  def preflight(assignment, claim_input, context)
+      when is_map(assignment) and is_map(claim_input) and is_map(context) do
+    with :ok <- validate_inputs(assignment, claim_input, context) do
+      WorkPackageClaim.prepare_suspended_allocation(claim_input)
+    end
+  end
+
+  def preflight(_assignment, _claim_input, _context),
+    do: {:error, :invalid_suspended_controller_input}
 
   @doc "Replays the exact claim intent before guarded activation of its Job UID."
   @spec resume(map(), map(), map()) :: result()
