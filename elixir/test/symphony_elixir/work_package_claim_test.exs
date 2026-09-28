@@ -3,7 +3,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
 
   def allocate_or_reconcile(_assignment, key, context) do
     send(context.test_pid, {:allocation_requested, key})
-    {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}}
+    Map.get(context, :allocation_result, {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}})
   end
 
   def activate_owned(allocation, _assignment, key, context) do
@@ -1118,6 +1118,111 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert retained.reservation_nonce == "nonce-349"
   end
 
+  test "signed RKE2 dispatch journals the exact suspended allocation before any activation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Suspended disposable assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      claim_journal_path: path
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+
+    assert_receive {:allocation_requested, allocation_key}
+    assert String.ends_with?(allocation_key, ":allocation")
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "disposable_rke2_activation_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == "rke2job:v1:fixture-allocation"
+  end
+
+  test "uncertain RKE2 allocation keeps the local lease and provider claim" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Uncertain disposable allocation",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      allocation_result: {:held, :create_response_uncertain}
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+
+    assert_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "disposable_rke2_allocation_uncertain"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "confirmed"
+    assert reservation.reservation_id == "reservation-349"
+  end
+
+  test "RKE2 replay retains a journaled allocation without calling the adapter again" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Replayed disposable allocation",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    allocation_id = "rke2job:v1:fixture-allocation"
+
+    before_dispatch = fn input ->
+      assert :ok = WorkPackageClaim.record_suspended_allocation(input, %{id: allocation_id, status: :ready})
+    end
+
+    context = %{adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter, test_pid: self()}
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue,
+        before_dispatch_fun: before_dispatch,
+        disposable_rke2_context: context
+      )
+
+    refute_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ allocation_id
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == allocation_id
+  end
+
   test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
     path = temp_path()
     pause_root = temp_path()
@@ -1152,10 +1257,16 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       File.write!(pause_path, "paused\n")
     end
 
+    context = %{adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter, test_pid: self()}
+
     {blocked, runtime} =
-      post_claim_revalidation_failure(path, issue, issue, before_dispatch_fun: before_dispatch)
+      post_claim_revalidation_failure(path, issue, issue,
+        before_dispatch_fun: before_dispatch,
+        disposable_rke2_context: context
+      )
 
     assert blocked.running == %{}
+    refute_receive {:allocation_requested, _key}
     assert blocked.blocked[@issue_id].error =~ "suspended_job_retained"
     assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
     assert {:ok, journal} = Journal.load(path)
@@ -1826,6 +1937,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     runtime =
       input
       |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
+      |> Map.merge(Map.new(Keyword.take(opts, [:disposable_rke2_context])))
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"
