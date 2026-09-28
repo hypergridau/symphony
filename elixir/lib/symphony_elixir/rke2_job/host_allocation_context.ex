@@ -119,14 +119,8 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- is_map(slot) and slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
          {:ok, kube_context} <- terminal_client_context(assignment, config),
          guard_context = guard_context(config, binding, kube_context),
-         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context),
-         :ok <-
-           slot_guard(config).verify_bound(
-             slot,
-             assignment,
-             %{id: allocation_id, status: :ready},
-             guard_context
-           ) do
+         # The exact lease may already be released; Dahlia validates its retained receipt on replay.
+         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context) do
       {:ok, build_context(config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_terminal_allocation_unverified}

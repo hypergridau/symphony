@@ -335,7 +335,11 @@ cleanup receipts under that private root. The terminal result record also retain
 the exact non-secret OAuth slot binding before the Job is deleted. After a host
 restart, `HostAllocationContext.reattach_terminal/4` can rebuild the finalization
 context from that record, the exact allocation ID, fresh Kubernetes identity,
-the PVC UID, and Dahlia's still-bound lease without recreating the Job or slot.
+and the PVC UID without recreating the Job or slot. A previously released lease
+is valid for terminal replay: Dahlia binds its stored cleanup receipt to the
+exact lease, assignment, Job UID, and PVC UID, so replay cannot release a later
+lease for the same slot. Active and suspended Job reattachment still requires
+the lease to be bound.
 Missing or conflicting records hold cleanup. No production host has supplied this
 tuple or admitted a Job yet.
 
@@ -347,7 +351,8 @@ suspended Job's slot from exact Kubernetes readback and verify the current PVC U
 and Dahlia binding without another reservation. Restart recovery now reconciles
 the journaled suspended claim only after that exact readback. If a prior
 activation intent names an allocation, recovery requires either the exact
-active Job and bound OAuth slot or its durable terminal result and slot binding.
+active Job and bound OAuth slot or its durable terminal result and slot binding,
+including a lease that has already been released after verified cleanup.
 It restores only the existing claim fence; it does not create or resume a Job.
 Activation and terminal ownership remain gated.
 
