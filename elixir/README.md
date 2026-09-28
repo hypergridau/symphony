@@ -310,6 +310,14 @@ allocation skips another adapter call. An uncertain allocation keeps the provide
 local lease held. Activation remains unavailable until Job result and cleanup ownership are
 wired into the controller; no disposable runner has been qualified.
 
+Before the Job create, the claim journal retains the exact validated non-secret
+assignment bundle. A different bundle for the same confirmed claim is rejected.
+Retained allocation recovery reads this snapshot and checks it against the
+journaled claim and Job identity, so changes to the current Linear issue or
+delegation manifest cannot substitute a new assignment during cleanup. A
+missing or altered snapshot holds recovery; the source still does not own
+terminal cleanup.
+
 The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SERVER`,
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
 `SYMPHONY_RKE2_REPOSITORY_ID`, `SYMPHONY_RKE2_AUTH_SLOT_ID`,

@@ -48,6 +48,18 @@ defmodule SymphonyElixir.ManagedAssignmentBundleTest do
     refute Map.has_key?(first, :runner_token)
   end
 
+  test "private recovery snapshot is exact, bounded, and rejects altered bytes" do
+    assert {:ok, bundle} = ManagedAssignmentBundle.build(valid_attrs())
+    assert {:ok, snapshot} = ManagedAssignmentBundle.snapshot(bundle)
+    assert {:ok, ^bundle} = ManagedAssignmentBundle.from_snapshot(snapshot)
+
+    altered = %{bundle | branch: "codex/other"}
+    bytes = :erlang.term_to_binary(altered, [:deterministic]) |> Base.encode64()
+    assert {:error, :invalid_assignment_snapshot} = ManagedAssignmentBundle.from_snapshot(bytes)
+    assert {:error, :invalid_assignment_snapshot} = ManagedAssignmentBundle.from_snapshot(snapshot <> "x")
+    assert {:error, :invalid_assignment_snapshot} = ManagedAssignmentBundle.from_snapshot(String.duplicate("A", 90_001))
+  end
+
   test "fails closed when required objective or environment context is missing" do
     attrs = valid_attrs()
 
