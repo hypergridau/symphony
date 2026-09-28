@@ -120,7 +120,7 @@ defmodule SymphonyElixir.WorkPackageClaim do
       %DateTime{} = now ->
         case authority(input, DateTime.to_unix(now, :millisecond)) do
           {:ok, _authority} ->
-            HostWitness.record(input, "spawn_intent", reservation)
+            record_spawn_intent(input, reservation)
 
           {:error, reason} ->
             fence_failed_spawn_authority(input, reason)
@@ -128,6 +128,17 @@ defmodule SymphonyElixir.WorkPackageClaim do
 
       _ ->
         {:error, :invalid_spawn_revalidation_time}
+    end
+  end
+
+  defp record_spawn_intent(input, reservation) do
+    case HostWitness.record(input, "spawn_intent", reservation) do
+      {:error, {:host_witness_rejected, reason}}
+      when reason in ["global admission paused", "global pause transition active"] ->
+        fence_failed_spawn_authority(input, {:global_pause, reason})
+
+      result ->
+        result
     end
   end
 

@@ -246,6 +246,41 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:error, :invalid_claim_dispatch_transition} = WorkPackageClaim.begin_paused_recovery(input)
   end
 
+  test "explicit root pause rejection demotes a never-witnessed spawn for abort recovery" do
+    for reason <- ["global admission paused", "global pause transition active"] do
+      path = temp_path()
+      on_exit(fn -> File.rm_rf(path) end)
+      %{input: input} = authority_fixture(path)
+
+      request_fun = fn url, _options ->
+        if String.ends_with?(url, "/reservations/by-issue"),
+          do: {:ok, response(%{"data" => reservation_payload()})},
+          else: {:ok, response(%{"data" => claim_result_payload()})}
+      end
+
+      assert {:ok, _claim} =
+               WorkPackageClaim.claim(input,
+                 request_fun: request_fun,
+                 now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+               )
+
+      input = %{
+        input
+        | host_witness_fun: fn %{"operation" => "spawn_intent"} ->
+            {:ok, %{"ok" => false, "error" => reason}}
+          end
+      }
+
+      assert {:error, {:pre_spawn_recovery_pending, {:global_pause, ^reason}}} =
+               WorkPackageClaim.begin_spawn(input)
+
+      assert {:ok, journal} = Journal.load(path)
+      [{_key, reservation}] = Map.to_list(journal.reservations)
+      assert reservation.dispatch.phase == "recovery_pending"
+      assert {:error, :invalid_claim_dispatch_transition} = WorkPackageClaim.begin_paused_recovery(input)
+    end
+  end
+
   test "uncertain spawn intent can recover only an exact existing root receipt" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1041,6 +1076,29 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
   end
 
+  test "root pause denial after spawn_started starts no child and releases the local lease" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
+
+    {after_preflight, runtime} =
+      post_claim_revalidation_failure(path, issue, issue,
+        spawn_directly: true,
+        witness_pause_rejection: "global admission paused"
+      )
+
+    assert after_preflight.running == %{}
+    assert Map.has_key?(after_preflight.blocked, @issue_id)
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].release_reason == :spawn_failed
+    assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
+    assert {:ok, journal} = Journal.load(path)
+    [{_key, reservation}] = Map.to_list(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    assert {:ok, [retained]} = Recovery.unstarted_claims(runtime, after_preflight.execution_fence)
+    assert retained.dispatch.phase == "recovery_pending"
+  end
+
   test "claims a reservation and replays the same journaled tuple after restart" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1545,6 +1603,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assert {:ok, claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
 
+    state = maybe_reject_spawn_witness(state, opts)
+
     state = expire_runtime_delegations(state, graph_path, Keyword.get(opts, :graph_expiry_ms))
 
     state = maybe_add_spawn_expiry_clock(state, input, opts)
@@ -1610,6 +1670,20 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   end
 
   defp expire_assignment_manifest(input, _expiry), do: input
+
+  defp maybe_reject_spawn_witness(state, opts) do
+    case Keyword.get(opts, :witness_pause_rejection) do
+      reason when reason in ["global admission paused", "global pause transition active"] ->
+        witness = fn %{"operation" => "spawn_intent"} ->
+          {:ok, %{"ok" => false, "error" => reason}}
+        end
+
+        %{state | work_package_runtime: Map.put(state.work_package_runtime, :host_witness_fun, witness)}
+
+      _ ->
+        state
+    end
+  end
 
   defp maybe_add_spawn_expiry_clock(state, input, opts) do
     if Keyword.get(opts, :spawn_expiry_boundary, false) do

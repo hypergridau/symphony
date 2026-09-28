@@ -1241,3 +1241,9 @@ exact `spawn_intent` with `replayOnly: true`. The root daemon returns an existin
 receipt under its log lock and refuses to create an intent through this call.
 The caller must still own the final pause gate and exact Job activation decision.
 This recovery API does not start a worker or activate a Job by itself.
+If the root daemon instead explicitly rejects the initial `spawn_intent` with
+`global admission paused` or `global pause transition active`, no root spawn
+intent was appended. Frigga persists `recovery_pending`, releases only the
+local execution lease, and keeps the provider claim blocked for the existing
+never-started reconciliation path. Timeouts, lost replies, and other witness
+errors remain at `spawn_started` until exact root-log replay resolves them.
