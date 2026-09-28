@@ -35,6 +35,119 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierAttemptJournal do
   def ensure(_assignment, _job_uid, _slot, _image, _root),
     do: {:error, :invalid_auth_cache_verifier_attempt}
 
+  @doc "Durably marks the one permitted create call; replay never creates a second Job."
+  @spec begin_create(intent(), Path.t()) :: {:ok, :new | :replayed} | {:held, atom()} | {:error, atom()}
+  def begin_create(intent, root) do
+    with {:ok, path} <- checkpoint_path(intent, root, "create"),
+         {:ok, bytes} <- Jason.encode(%{"schemaVersion" => 1, "attempt" => intent}) do
+      case :file.open(String.to_charlist(path), [:write, :binary, :exclusive, :raw]) do
+        {:ok, file} -> write_create_marker(file, path, bytes)
+        {:error, :eexist} -> compare_create_marker(path, bytes)
+        _ -> {:held, :auth_cache_verifier_create_marker_unavailable}
+      end
+    end
+  rescue
+    _ -> {:held, :auth_cache_verifier_create_marker_unavailable}
+  end
+
+  @doc "Stores the server-assigned verifier Job UID before result observation."
+  @spec record_job_uid(intent(), String.t(), Path.t()) :: {:ok, String.t()} | {:held, atom()} | {:error, atom()}
+  def record_job_uid(intent, uid, root) do
+    with true <- safe_uid?(uid),
+         {:ok, path} <- checkpoint_path(intent, root, "job-uid"),
+         {:ok, _} <- marker_exists(intent, root),
+         {:ok, bytes} <- Jason.encode(%{"schemaVersion" => 1, "attempt" => intent, "jobUid" => uid}) do
+      case :file.open(String.to_charlist(path), [:write, :binary, :exclusive, :raw]) do
+        {:ok, file} -> write_job_uid(file, path, bytes, intent, uid)
+        {:error, :eexist} -> compare_job_uid(path, intent, uid)
+        _ -> {:held, :auth_cache_verifier_job_uid_unavailable}
+      end
+    else
+      false -> {:error, :invalid_auth_cache_verifier_job_uid}
+      other -> other
+    end
+  rescue
+    _ -> {:held, :auth_cache_verifier_job_uid_unavailable}
+  end
+
+  @doc "Reads the exact persisted verifier Job UID, or reports a missing checkpoint."
+  @spec load_job_uid(intent(), Path.t()) :: {:ok, String.t()} | :missing | {:held, atom()} | {:error, atom()}
+  def load_job_uid(intent, root) do
+    with {:ok, path} <- checkpoint_path(intent, root, "job-uid") do
+      case read_regular(path) do
+        {:ok, bytes} -> decode_job_uid(bytes, intent)
+        {:error, :enoent} -> :missing
+        _ -> {:held, :auth_cache_verifier_job_uid_unavailable}
+      end
+    end
+  rescue
+    _ -> {:held, :auth_cache_verifier_job_uid_unavailable}
+  end
+
+  defp write_create_marker(file, path, bytes) do
+    result = with :ok <- File.chmod(path, 0o600), :ok <- :file.write(file, bytes), do: :file.sync(file)
+    closed = :file.close(file)
+
+    if result == :ok and closed == :ok,
+      do: compare_create_marker(path, bytes, :new),
+      else: {:held, :auth_cache_verifier_create_marker_unavailable}
+  end
+
+  defp compare_create_marker(path, bytes, status \\ :replayed) do
+    with {:ok, ^bytes} <- read_regular(path),
+         :ok <- sync_directory(Path.dirname(path)) do
+      {:ok, status}
+    else
+      _ -> {:held, :auth_cache_verifier_create_marker_conflict}
+    end
+  end
+
+  defp marker_exists(intent, root) do
+    with {:ok, path} <- checkpoint_path(intent, root, "create"),
+         {:ok, bytes} <- Jason.encode(%{"schemaVersion" => 1, "attempt" => intent}) do
+      case compare_create_marker(path, bytes) do
+        {:ok, _} -> {:ok, true}
+        _ -> {:held, :auth_cache_verifier_create_marker_unverified}
+      end
+    end
+  end
+
+  defp write_job_uid(file, path, bytes, intent, uid) do
+    result = with :ok <- File.chmod(path, 0o600), :ok <- :file.write(file, bytes), do: :file.sync(file)
+    closed = :file.close(file)
+
+    if result == :ok and closed == :ok,
+      do: compare_job_uid(path, intent, uid),
+      else: {:held, :auth_cache_verifier_job_uid_unavailable}
+  end
+
+  defp compare_job_uid(path, intent, uid) do
+    with {:ok, bytes} <- read_regular(path),
+         {:ok, ^uid} <- decode_job_uid(bytes, intent),
+         :ok <- sync_directory(Path.dirname(path)) do
+      {:ok, uid}
+    else
+      _ -> {:held, :auth_cache_verifier_job_uid_conflict}
+    end
+  end
+
+  defp decode_job_uid(bytes, intent) do
+    case Jason.decode(bytes) do
+      {:ok, %{"schemaVersion" => 1, "attempt" => ^intent, "jobUid" => uid} = saved}
+      when map_size(saved) == 3 and is_binary(uid) ->
+        if safe_uid?(uid), do: {:ok, uid}, else: {:held, :auth_cache_verifier_job_uid_invalid}
+
+      _ ->
+        {:held, :auth_cache_verifier_job_uid_invalid}
+    end
+  end
+
+  defp checkpoint_path(intent, root, kind) do
+    with {:ok, path} <- result_path(intent, root) do
+      {:ok, String.replace_suffix(path, ".auth-verifier-result.json", ".auth-verifier-#{kind}.json")}
+    end
+  end
+
   @doc "Checkpoints the verified result before the verifier Job can be deleted."
   @spec record_result(intent(), map(), Path.t()) :: {:ok, map()} | {:held, atom()} | {:error, atom()}
   def record_result(intent, evidence, root) do

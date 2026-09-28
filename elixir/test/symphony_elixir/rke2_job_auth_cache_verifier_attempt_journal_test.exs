@@ -246,4 +246,32 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierAttemptJournalTest do
 
     assert result["auth_cache_bytes"] == 12_345
   end
+
+  test "marks one create and binds its exact server Job UID", %{root: root} do
+    assert {:ok, intent} = AuthCacheVerifierAttemptJournal.ensure(@assignment, @job_uid, @slot, @image, root)
+    assert :missing = AuthCacheVerifierAttemptJournal.load_job_uid(intent, root)
+
+    assert {:held, :auth_cache_verifier_create_marker_unverified} =
+             AuthCacheVerifierAttemptJournal.record_job_uid(intent, "verifier-job-uid", root)
+
+    assert {:ok, :new} = AuthCacheVerifierAttemptJournal.begin_create(intent, root)
+    assert {:ok, :replayed} = AuthCacheVerifierAttemptJournal.begin_create(intent, root)
+
+    assert {:ok, "verifier-job-uid"} =
+             AuthCacheVerifierAttemptJournal.record_job_uid(intent, "verifier-job-uid", root)
+
+    assert {:ok, "verifier-job-uid"} = AuthCacheVerifierAttemptJournal.load_job_uid(intent, root)
+
+    assert {:ok, "verifier-job-uid"} =
+             AuthCacheVerifierAttemptJournal.record_job_uid(intent, "verifier-job-uid", root)
+
+    assert {:held, :auth_cache_verifier_job_uid_conflict} =
+             AuthCacheVerifierAttemptJournal.record_job_uid(intent, "replacement-job-uid", root)
+
+    [path] = Path.wildcard(Path.join(root, "*.auth-verifier-job-uid.json"))
+    File.chmod!(path, 0o644)
+
+    assert {:held, :auth_cache_verifier_job_uid_unavailable} =
+             AuthCacheVerifierAttemptJournal.load_job_uid(intent, root)
+  end
 end

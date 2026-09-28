@@ -52,15 +52,29 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierResult do
 
   def verify(_expected, _job_uid, _job, _snapshot), do: {:held, :auth_cache_verifier_result_unverified}
 
+  @doc "Checks the exact admitted verifier Job identity and safe spec before it finishes."
+  @spec owned_job?(map(), String.t(), map()) :: boolean()
+  def owned_job?(expected, job_uid, job)
+      when is_map(expected) and is_binary(job_uid) and is_map(job) do
+    safe_id?(job_uid) and owned_job_spec?(expected, job_uid, job)
+  rescue
+    _ -> false
+  end
+
+  def owned_job?(_expected, _job_uid, _job), do: false
+
   defp valid_job?(expected, uid, job) do
+    owned_job_spec?(expected, uid, job) and complete?(job) and not failed?(job)
+  end
+
+  defp owned_job_spec?(expected, uid, job) do
     metadata = Map.get(job, "metadata", %{})
     spec = Map.get(job, "spec", %{})
 
     job["apiVersion"] == "batch/v1" and job["kind"] == "Job" and
       valid_job_metadata?(metadata, expected["metadata"], uid) and
       subset?(expected["spec"], spec) and
-      safe_pod_spec?(get_in(spec, ["template", "spec"])) and
-      complete?(job) and not failed?(job)
+      safe_pod_spec?(get_in(spec, ["template", "spec"]))
   end
 
   defp valid_job_metadata?(metadata, expected, uid) do
