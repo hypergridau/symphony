@@ -38,7 +38,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
 
   @spec prepare(map(), map(), map(), map(), non_neg_integer() | nil, non_neg_integer()) ::
           :new | {:new, map()} | {:new, map(), map()} | {:ok, map(), map(), map()} | {:error, term()}
-  def prepare(runtime, fence, graph, issue, attempt, now_ms) do
+  @spec prepare(map(), map(), map(), map(), non_neg_integer() | nil, non_neg_integer(), keyword()) ::
+          :new | {:new, map()} | {:new, map(), map()} | {:ok, map(), map(), map()} | {:error, term()}
+  def prepare(runtime, fence, graph, issue, attempt, now_ms, opts \\ []) do
     case fence.executions[issue.id] do
       nil ->
         new_without_claim(runtime, issue.id)
@@ -57,7 +59,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
             prepare_released_claim(runtime, fence, graph, issue, attempt, now_ms)
 
           :missing ->
-            prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution)
+            prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
 
           {:error, _reason} = error ->
             error
@@ -65,9 +67,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
     end
   end
 
-  defp prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution) do
+  defp prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts) do
     case Unsubmitted.prepare(runtime, fence, graph, execution, now_ms) do
-      :submitted -> recover(runtime, fence, graph, issue, attempt, now_ms, execution)
+      :submitted -> recover(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
       result -> result
     end
   end
@@ -258,7 +260,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
   defp load_journal(%{journal_path: path}) when is_binary(path), do: Journal.load(path)
   defp load_journal(_runtime), do: :missing
 
-  defp recover(runtime, fence, graph, issue, attempt, now_ms, execution) do
+  defp recover(runtime, fence, graph, issue, attempt, now_ms, execution, opts) do
     with path when is_binary(path) <- runtime[:journal_path],
          {:ok, journal} <- Journal.load(path),
          {:ok, reservation} <-
@@ -268,18 +270,30 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
              runtime.managed_project_profile_id,
              execution.repository,
              execution.generation
-           ),
-         :ok <- Dispatch.retry_status(reservation, now_ms),
-         input = Map.merge(runtime, %{repository_ref: execution.repository}),
+           ) do
+      recover_reservation(runtime, fence, graph, issue, attempt, now_ms, reservation, opts)
+    else
+      {:error, _reason} = error -> error
+      :missing -> {:error, :claim_recovery_journal_missing}
+      _ -> {:error, :claim_recovery_not_ready}
+    end
+  end
+
+  defp recover_reservation(runtime, fence, graph, issue, attempt, now_ms, reservation, opts) do
+    retained = reservation.dispatch.phase == "allocation_suspended"
+
+    with :ok <- retry_gate(reservation, now_ms, retained),
+         input = Map.merge(runtime, %{repository_ref: reservation.repository_ref}),
          true <- same_authority?(reservation, runtime, input),
-         {:ok, fence} <- ExecutionFence.reconcile_unstarted_claim(fence, reservation),
+         {:ok, fence} <- reconcile_fence(fence, reservation, retained),
          lease = runtime_lease(reservation),
          {:ok, graph} <- reconcile_graph(graph, reservation.responsible_delegation_id, lease, now_ms),
          {:ok, graph} <-
            Admission.prepare(graph, fence, runtime[:managed_delegations], issue, attempt, now_ms, runtime),
          {:ok, delegation} <-
-           ResponsibilityGraph.admission_delegation(graph, issue.id, issue.identifier, execution.repository),
-         true <- delegation.id == reservation.responsible_delegation_id and delegation.runtime_lease == lease do
+           ResponsibilityGraph.admission_delegation(graph, issue.id, issue.identifier, reservation.repository_ref),
+         true <- delegation.id == reservation.responsible_delegation_id and delegation.runtime_lease == lease,
+         :ok <- verify_retained(reservation, fence, graph, retained, opts) do
       {:ok, fence, graph,
        %{
          token: %{issue_id: issue.id, generation: reservation.generation},
@@ -289,9 +303,32 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
        }}
     else
       {:error, _reason} = error -> error
-      :missing -> {:error, :claim_recovery_journal_missing}
       _ -> {:error, :claim_recovery_not_ready}
     end
+  end
+
+  defp retry_gate(_reservation, _now_ms, true), do: :ok
+  defp retry_gate(reservation, now_ms, false), do: Dispatch.retry_status(reservation, now_ms)
+
+  defp reconcile_fence(fence, reservation, true), do: ExecutionFence.reconcile_suspended_claim(fence, reservation)
+  defp reconcile_fence(fence, reservation, false), do: ExecutionFence.reconcile_unstarted_claim(fence, reservation)
+
+  defp verify_retained(_reservation, _fence, _graph, false, _opts), do: :ok
+
+  defp verify_retained(reservation, fence, graph, true, opts) do
+    case Keyword.get(opts, :verify_retained) do
+      verifier when is_function(verifier, 3) ->
+        case verifier.(reservation, fence, graph) do
+          :ok -> :ok
+          {:error, _reason} = error -> error
+          _ -> {:error, :suspended_allocation_recovery_unverified}
+        end
+
+      _ ->
+        {:error, :suspended_allocation_recovery_unavailable}
+    end
+  rescue
+    _ -> {:error, :suspended_allocation_recovery_unverified}
   end
 
   defp same_authority?(reservation, runtime, input) do

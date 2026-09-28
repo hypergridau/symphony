@@ -96,10 +96,22 @@ defmodule SymphonyElixir.ExecutionFence do
 
   @doc "Reconciles only a journal-proven, never-started claim at the unchanged current generation."
   @spec reconcile_unstarted_claim(state(), map()) :: {:ok, state()} | {:error, term()}
-  def reconcile_unstarted_claim(state, reservation) do
+  def reconcile_unstarted_claim(state, reservation),
+    do: reconcile_unobserved_claim(state, reservation, ["submitted", "confirmed", "blocked"])
+
+  @doc "Builds an in-memory fence candidate for an externally verified retained suspended allocation."
+  @spec reconcile_suspended_claim(state(), map()) :: {:ok, state()} | {:error, term()}
+  def reconcile_suspended_claim(state, %{dispatch: %{phase: "allocation_suspended", allocation_id: id}} = reservation)
+      when is_binary(id) and byte_size(id) > 0 do
+    reconcile_unobserved_claim(state, reservation, ["allocation_suspended"])
+  end
+
+  def reconcile_suspended_claim(_state, _reservation), do: {:error, :unstarted_claim_not_reconcilable}
+
+  defp reconcile_unobserved_claim(state, reservation, phases) do
     with :ok <- validate_state(state),
          %{dispatch: %{phase: phase}} <- reservation,
-         true <- phase in ["submitted", "confirmed", "blocked"],
+         true <- phase in phases,
          %{status: :active, cleanup: :pending} = execution <- state.executions[reservation.issue_id],
          true <- execution.generation == reservation.generation and execution.repository == reservation.repository_ref,
          true <- execution.ownership in [:reconciled, :unknown] and not Map.get(execution, :termination_unconfirmed, false),

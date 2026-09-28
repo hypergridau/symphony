@@ -143,6 +143,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assignment = suspended_assignment(lease)
     assert {:ok, binding} = ClaimBinding.from_claim(claim, assignment, input.runner_id)
+    assert {:ok, ^binding} = ClaimBinding.from_journal(claim.reservation, assignment, input.runner_id)
+
+    assert {:error, :provider_claim_invalid} =
+             ClaimBinding.from_journal(%{claim.reservation | session_id: "foreign-session"}, assignment, input.runner_id)
 
     context = %{
       adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
@@ -1384,7 +1388,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:ok, restarted_graph} =
              ResponsibilityGraph.mark_unreconciled_after_restart(blocked.responsibility_graph)
 
-    assert {:error, :suspended_allocation_controller_required} =
+    assert {:error, :managed_responsibility_requires_enforcement} =
              Recovery.prepare(runtime, restarted_fence, restarted_graph, issue, nil, System.system_time(:millisecond))
   end
 

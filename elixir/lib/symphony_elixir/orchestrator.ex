@@ -2263,14 +2263,43 @@ defmodule SymphonyElixir.Orchestrator do
   defp prepare_claim_recovery(%State{work_package_runtime: nil}, _issue, _attempt), do: :new
 
   defp prepare_claim_recovery(state, issue, attempt) do
+    verify_retained = fn reservation, fence, graph ->
+      verify_retained_allocation(state, issue, reservation, fence, graph)
+    end
+
     ClaimRecovery.prepare(
       state.work_package_runtime,
       state.execution_fence,
       state.responsibility_graph,
       issue,
       attempt,
-      execution_fence_now_ms()
+      execution_fence_now_ms(),
+      verify_retained: verify_retained
     )
+  end
+
+  defp verify_retained_allocation(state, issue, reservation, fence, graph) do
+    runtime = state.work_package_runtime
+    token = %{issue_id: issue.id, generation: reservation.generation}
+    candidate = %{state | execution_fence: fence, responsibility_graph: graph}
+
+    with %{disposable_rke2_host_config: host_config} when is_map(host_config) <- runtime,
+         {:ok, bundle} <-
+           managed_assignment_bundle(
+             candidate,
+             issue,
+             token,
+             reservation.session_id,
+             reservation.responsible_delegation_id
+           ),
+         %{environment: %{target_environment: :rke2}} <- bundle,
+         {:ok, binding} <- ClaimBinding.from_journal(reservation, bundle, runtime.runner_id),
+         {:ok, _context} <-
+           HostAllocationContext.reattach(bundle, binding, reservation.dispatch.allocation_id, host_config) do
+      :ok
+    else
+      _ -> {:error, :suspended_allocation_recovery_unverified}
+    end
   end
 
   defp claim_input(state, issue) do
