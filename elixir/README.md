@@ -354,7 +354,13 @@ activation intent names an allocation, recovery requires either the exact
 active Job and bound OAuth slot or its durable terminal result and slot binding,
 including a lease that has already been released after verified cleanup.
 It restores only the existing claim fence; it does not create or resume a Job.
-Activation and terminal ownership remain gated.
+For a retained `spawn_started` host claim, the same poll owner now tries the
+existing terminal finalizer against the exact active Job or its durable result
+after deletion. The finalizer records a terminal result, deletes only the
+matching Job UID, and replays OAuth slot release. A pending result leaves the
+claim retained for the next poll. This does not publish the result to Dahlia,
+release its provider reservation, or enable Job activation; those transitions
+remain gated.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
