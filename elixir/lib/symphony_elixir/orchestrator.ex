@@ -38,7 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController, TerminalOwner}
+  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, SuspendedController, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -2019,11 +2019,8 @@ defmodule SymphonyElixir.Orchestrator do
     input = claim_input(state, issue)
 
     case WorkPackageClaim.handoff_allocation(input) do
-      {:ok, %{phase: phase, allocation_id: allocation_id}} ->
-        block_claim_recovery(state, issue, {
-          :disposable_rke2_activation_unavailable,
-          {:suspended_job_retained, phase, allocation_id}
-        })
+      {:ok, retained} ->
+        resume_or_retain_disposable(state, issue, dispatch, input, retained, context_source)
 
       {:error, :suspended_allocation_unavailable} ->
         case WorkPackageClaim.prepare_suspended_allocation(input) do
@@ -2036,11 +2033,44 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp resume_or_retain_disposable(
+         state,
+         issue,
+         dispatch,
+         input,
+         %{phase: "allocation_suspended", allocation_id: allocation_id},
+         {:host, host_config}
+       ) do
+    case HostAllocationContext.reattach(
+           dispatch.assignment_bundle,
+           dispatch.claim_binding,
+           allocation_id,
+           host_config
+         ) do
+      {:ok, context} -> activate_disposable_allocation(state, issue, dispatch, context, input, allocation_id)
+      {:held, reason} -> block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
+    end
+  end
+
+  defp resume_or_retain_disposable(
+         state,
+         issue,
+         _dispatch,
+         _input,
+         %{phase: phase, allocation_id: allocation_id},
+         _context_source
+       ) do
+    block_claim_recovery(state, issue, {
+      :disposable_rke2_activation_unavailable,
+      {:suspended_job_retained, phase, allocation_id}
+    })
+  end
+
   defp prepare_disposable_allocation(state, issue, dispatch, context_source, input) do
     case SuspendedController.preflight(dispatch.assignment_bundle, input, %{claim_binding: dispatch.claim_binding}) do
       :ok ->
         case disposable_context(dispatch, context_source) do
-          {:ok, context} -> create_disposable_allocation(state, issue, dispatch, context, input)
+          {:ok, context} -> create_disposable_allocation(state, issue, dispatch, context, input, context_source)
           {:held, reason} -> block_claim_recovery(state, issue, {:disposable_rke2_context_unavailable, reason})
         end
 
@@ -2057,21 +2087,47 @@ defmodule SymphonyElixir.Orchestrator do
     HostAllocationContext.prepare(dispatch.assignment_bundle, dispatch.claim_binding, config)
   end
 
-  defp create_disposable_allocation(state, issue, dispatch, context, input) do
+  defp create_disposable_allocation(state, issue, dispatch, context, input, context_source) do
     case SuspendedController.allocate(dispatch.assignment_bundle, input, context) do
       {:ok, %{id: allocation_id}} ->
-        # Allocation is durably bound to the claim, but activation remains
-        # gated until the host owns terminal result and cleanup reconciliation.
-        block_claim_recovery(state, issue, {
-          :disposable_rke2_activation_unavailable,
-          {:suspended_job_retained, :allocation_suspended, allocation_id}
-        })
+        if match?({:host, _config}, context_source) do
+          activate_disposable_allocation(state, issue, dispatch, context, input, allocation_id)
+        else
+          block_claim_recovery(state, issue, {
+            :disposable_rke2_activation_unavailable,
+            {:suspended_job_retained, :allocation_suspended, allocation_id}
+          })
+        end
 
       {:held, reason} ->
         block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
 
       {:error, reason} ->
         block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
+    end
+  end
+
+  defp activate_disposable_allocation(state, issue, dispatch, context, input, allocation_id) do
+    case GlobalPause.snapshot() do
+      %{configured?: true, paused?: false, state: "running"} ->
+        context =
+          context
+          |> Map.put(:activation_guard, HostActivationGuard)
+          |> Map.put(:activation_guard_context, %{claim_input: input, claim_binding: dispatch.claim_binding})
+
+        case SuspendedController.resume(dispatch.assignment_bundle, input, context) do
+          {:ok, _active} ->
+            block_claim_recovery(state, issue, {:disposable_rke2_started_retained, allocation_id})
+
+          {:held, reason} ->
+            block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+
+          {:error, reason} ->
+            block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+        end
+
+      _ ->
+        block_claim_recovery(state, issue, {:disposable_rke2_activation_unavailable, allocation_id})
     end
   end
 

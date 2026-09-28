@@ -307,8 +307,12 @@ claim before dispatch. A signed RKE2 assignment cannot fall through to the persi
 open, the serialized dispatcher calls `SuspendedController.allocate/3` to create or reconcile
 one suspended Job and durably bind its exact allocation to the claim. Replay of a journaled
 allocation skips another adapter call. An uncertain allocation keeps the provider claim and
-local lease held. Activation remains unavailable until Job result and cleanup ownership are
-wired into the controller; no disposable runner has been qualified.
+local lease held. With the complete host context and a configured running pause gate,
+the same serialized callback now resumes the exact suspended allocation. It journals
+the root spawn intent before the UID-fenced activation request. The final host guard
+replays current claim and root authority, checks the assignment and allocation binding,
+and reads the pause gate again. A held guard or uncertain activation retains the claim,
+Job, and lease for reconciliation. No disposable runner has been qualified.
 
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
