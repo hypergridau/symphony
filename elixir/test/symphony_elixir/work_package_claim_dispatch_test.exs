@@ -111,6 +111,8 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
     {:ok, confirmed} = Dispatch.confirm(submitted, key)
     allocation_id = "rke2job:v1:exact-allocation"
     {:ok, allocated} = Dispatch.record_suspended_allocation(confirmed, key, @input, allocation_id)
+    assert {:ok, replayed} = Dispatch.record_suspended_allocation(allocated, key, @input, allocation_id)
+    assert replayed.reservations[key].dispatch.allocation_id == allocation_id
 
     reservation = allocated.reservations[key]
     assert reservation.dispatch.phase == "allocation_suspended"
