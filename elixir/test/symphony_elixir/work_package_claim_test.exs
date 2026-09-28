@@ -1288,6 +1288,66 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert MapSet.member?(uncertain.claimed, @issue_id)
   end
 
+  test "restart restores a retained disposable claim before terminal issue reconciliation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Restarted disposable assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      claim_journal_path: path
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+
+    restarted = %{blocked | blocked: %{}, claimed: MapSet.new()}
+    File.rename!(path, path <> ".retained")
+    on_exit(fn -> File.rm_rf(path <> ".retained") end)
+
+    missing = Orchestrator.restore_retained_disposable_claims_for_test(restarted)
+    refute missing.retained_claim_journal_ready?
+    refute Orchestrator.should_dispatch_issue_for_test(issue, missing)
+
+    File.write!(path, "invalid journal")
+
+    unavailable = Orchestrator.restore_retained_disposable_claims_for_test(missing)
+    refute unavailable.retained_claim_journal_ready?
+    refute Orchestrator.should_dispatch_issue_for_test(issue, unavailable)
+    refute MapSet.member?(unavailable.claimed, @issue_id)
+
+    File.rm!(path)
+    File.rename!(path <> ".retained", path)
+
+    lost_fence = %{restarted | execution_fence: %{restarted.execution_fence | executions: %{}}}
+    unpaired = Orchestrator.restore_retained_disposable_claims_for_test(lost_fence)
+    refute unpaired.retained_claim_journal_ready?
+    refute Orchestrator.should_dispatch_issue_for_test(issue, unpaired)
+
+    restored = Orchestrator.restore_retained_disposable_claims_for_test(unavailable)
+
+    assert restored.retained_claim_journal_ready?
+    assert MapSet.member?(restored.claimed, @issue_id)
+    assert restored.blocked[@issue_id].execution_token == %{issue_id: @issue_id, generation: 1}
+    assert restored.blocked[@issue_id].error =~ "rke2job:v1:fixture-allocation"
+    assert Orchestrator.restore_retained_disposable_claims_for_test(restored).blocked == restored.blocked
+
+    terminal = %{issue | state: "Done", dispatchable: false}
+    terminal_held = Orchestrator.reconcile_blocked_issue_states_for_test([terminal], restored)
+    assert MapSet.member?(terminal_held.claimed, @issue_id)
+    assert terminal_held.blocked[@issue_id].issue.state == "Done"
+    refute_receive {:activation_requested, _, _, _}
+  end
+
   test "uncertain RKE2 allocation keeps the local lease and provider claim" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
