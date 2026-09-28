@@ -5,13 +5,13 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   The host must first reserve the slot and put Dahlia's returned lease ID and
   claim into the Job configuration. This guard verifies that reservation again
   before creation, then binds and checks the exact registered Job allocation.
-  Release stays held until a separate cleanup verifier can prove Pod absence,
-  volume detachment, and durable auth-cache health.
+  Release uses a trusted host observer's fresh cleanup receipt after exact Job
+  deletion. Missing or mismatched evidence retains the lease.
   """
 
   @behaviour SymphonyElixir.RKE2Job.AuthSlotLeaseGuard
 
-  alias SymphonyElixir.RKE2Job.{AuthSlotSpec, HTTPClient}
+  alias SymphonyElixir.RKE2Job.{AuthSlotSpec, HTTPClient, ResultJournal}
 
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
@@ -120,8 +120,135 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   end
 
   @impl true
-  def release(_slot, _assignment, _allocation, _context),
-    do: {:held, :codex_auth_slot_release_verification_unavailable}
+  def release(slot, assignment, allocation, context) do
+    with :ok <- matching_assignment?(slot, assignment),
+         {:ok, namespace, uid} <- allocation_identity(allocation, assignment.sha256),
+         {:ok, receipts} <- cleanup_receipts(context, slot, assignment, allocation, namespace, uid),
+         :ok <- release_saved_receipts(context, slot, assignment, allocation, namespace, uid, receipts) do
+      :ok
+    else
+      _ -> {:held, :codex_auth_slot_release_verification_unavailable}
+    end
+  rescue
+    _error -> {:held, :codex_auth_slot_release_verification_unavailable}
+  end
+
+  defp cleanup_receipts(context, slot, assignment, allocation, namespace, uid) do
+    root = Map.get(context, :result_journal_root)
+
+    case ResultJournal.load_cleanup_receipts(assignment, uid, root) do
+      {:ok, receipts} ->
+        {:ok, receipts}
+
+      :missing ->
+        with {:ok, receipt} <- observe_and_record(context, slot, assignment, allocation, namespace, uid, 0),
+             do: {:ok, [{0, receipt}]}
+
+      other ->
+        other
+    end
+  end
+
+  defp observe_and_record(context, slot, assignment, allocation, namespace, uid, version) do
+    observer = Map.get(context, :cleanup_receipt_fun)
+    root = Map.get(context, :result_journal_root)
+
+    with true <- is_function(observer, 3),
+         {:ok, receipt} <- observer.(slot, assignment, allocation),
+         :ok <- matching_receipt?(receipt, slot, namespace, uid),
+         {:ok, _path} <- ResultJournal.record_cleanup_receipt(assignment, uid, receipt, root, version) do
+      ResultJournal.load_cleanup_receipt(assignment, uid, root, version)
+    end
+  end
+
+  defp release_saved_receipts(context, slot, assignment, allocation, namespace, uid, receipts) do
+    case try_saved_receipts(context, slot, allocation, namespace, uid, receipts) do
+      :ok ->
+        :ok
+
+      {:error, :denied} ->
+        refresh_bound_receipt(context, slot, assignment, allocation, namespace, uid, receipts)
+
+      other ->
+        other
+    end
+  end
+
+  defp try_saved_receipts(context, slot, allocation, namespace, uid, receipts) do
+    Enum.reduce_while(receipts, {:error, :denied}, fn {_version, receipt}, _acc ->
+      with :ok <- matching_receipt?(receipt, slot, namespace, uid),
+           {:ok, %{"released" => true}} <-
+             post(context, "/" <> slot.lease_id <> "/release", %{
+               allocationId: allocation.id,
+               receipt: receipt
+             }) do
+        {:halt, :ok}
+      else
+        {:error, :denied} -> {:cont, {:error, :denied}}
+        other -> {:halt, other}
+      end
+    end)
+  end
+
+  defp refresh_bound_receipt(context, slot, assignment, allocation, namespace, uid, [{version, _} | _]) do
+    with :ok <- verify_bound(slot, assignment, allocation, context),
+         {:ok, receipt} <- observe_and_record(context, slot, assignment, allocation, namespace, uid, version + 1) do
+      try_saved_receipts(context, slot, allocation, namespace, uid, [{version + 1, receipt}])
+    end
+  end
+
+  defp allocation_identity(%{id: "rke2job:v1:" <> encoded}, digest) do
+    with {:ok, payload} <- Base.url_decode64(encoded, padding: false),
+         {:ok, [1, namespace, _name, uid, ^digest]} <- Jason.decode(payload),
+         true <- valid_slot_name?(namespace) and valid_claim_uid?(uid) do
+      {:ok, namespace, uid}
+    else
+      _ -> {:error, :invalid_allocation}
+    end
+  end
+
+  defp allocation_identity(_allocation, _digest), do: {:error, :invalid_allocation}
+
+  defp matching_receipt?(receipt, slot, namespace, uid) when is_map(receipt) do
+    expected = %{
+      "namespace" => namespace,
+      "jobUid" => uid,
+      "claimName" => slot.claim_name,
+      "claimUid" => slot.claim_uid,
+      "jobAbsent" => true,
+      "ownedPodsAbsent" => true,
+      "claimPodsAbsent" => true,
+      "authCacheStatus" => "codex_login_status_authenticated"
+    }
+
+    if map_size(receipt) == 13 and
+         Enum.all?(expected, fn {key, value} -> Map.get(receipt, key) == value end) and
+         valid_receipt_values?(receipt) do
+      :ok
+    else
+      {:error, :invalid_receipt}
+    end
+  end
+
+  defp matching_receipt?(_receipt, _slot, _namespace, _uid), do: {:error, :invalid_receipt}
+
+  defp valid_receipt_values?(receipt) do
+    valid_lease_id?(receipt["receiptId"]) and
+      valid_observed_at?(receipt["observedAt"]) and
+      Enum.all?(~w(podListResourceVersion claimPodListResourceVersion), fn key ->
+        is_binary(receipt[key]) and byte_size(receipt[key]) in 1..128
+      end) and
+      is_integer(receipt["authCacheBytes"]) and receipt["authCacheBytes"] in 1..10_000_000
+  end
+
+  defp valid_observed_at?(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, _datetime, _offset} -> true
+      _ -> false
+    end
+  end
+
+  defp valid_observed_at?(_value), do: false
 
   defp matching_assignment?(
          %{assignment_sha256: digest, seat: seat} = slot,
@@ -193,7 +320,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
            base_url <>
              "/runner/v1/verified-assignments/" <>
              URI.encode(reservation_id, &URI.char_unreserved?/1) <> "/codex-auth-slots" <> suffix,
-         {:ok, %Req.Response{status: status, body: %{"data" => data}}} <-
+         {:ok, %Req.Response{status: status, body: %{"data" => data}}} when status in 200..299 and is_map(data) <-
            Map.get(context, :post_fun, &Req.post/2).(url,
              headers: [{"authorization", "Bearer " <> token}],
              json: body,
@@ -201,10 +328,10 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
              receive_timeout: @request_timeout_ms,
              retry: false,
              redirect: false
-           ),
-         true <- status in 200..299 and is_map(data) do
+           ) do
       {:ok, data}
     else
+      {:ok, %Req.Response{status: 409}} -> {:error, :denied}
       _ -> {:error, :unverified}
     end
   rescue

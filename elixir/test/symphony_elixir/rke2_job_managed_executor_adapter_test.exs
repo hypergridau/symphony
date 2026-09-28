@@ -224,7 +224,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert Agent.get(context.client, & &1.deletes) == []
   end
 
-  test "slotted terminal finalization keeps the OAuth lease held after Job and Pod cleanup", context do
+  test "slotted terminal finalization releases only after Job and Pod cleanup", context do
     assignment = assignment()
     opts = slot_context(context, assignment) |> Map.put(:result_journal_root, context.root)
 
@@ -237,7 +237,32 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
 
     assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
-    refute :release in slot_actions(context)
+    assert :release in slot_actions(context)
+  end
+
+  test "terminal result survives denied slot release and retries without another Job delete", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment) |> Map.put(:result_journal_root, context.root)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    terminal_job_and_pod(context, assignment, allocation, :codex)
+    Agent.update(context.slot_lease, &Map.put(&1, :denied, :release))
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    uid = elem(allocation_uid(allocation), 1)
+    assert {:ok, _observation} = ResultJournal.load(assignment, uid, context.root)
+    assert Agent.get(context.client, & &1.deletes) == [uid]
+
+    Agent.update(context.slot_lease, &Map.put(&1, :denied, nil))
+
+    assert {:ok, _observation} =
+             ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert Agent.get(context.client, & &1.deletes) == [uid]
   end
 
   test "OAuth slot requires a lease guard before creating a Job", context do

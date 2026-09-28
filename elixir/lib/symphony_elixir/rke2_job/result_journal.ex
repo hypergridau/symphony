@@ -14,6 +14,7 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   alias SymphonyElixir.RKE2Job.ResultReader
 
   @schema_version 1
+  @max_cleanup_receipts 8
   @max_bytes 8_192
   @uid ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\z/
   @version ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\z/
@@ -55,6 +56,121 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
     end
   rescue
     _ -> {:held, :job_result_journal_read_unavailable}
+  end
+
+  @doc "Persists the one immutable cleanup receipt before a potentially uncertain provider POST."
+  @spec record_cleanup_receipt(map(), String.t(), map(), Path.t()) ::
+          {:ok, Path.t()} | {:held, atom()} | {:error, atom()}
+  def record_cleanup_receipt(assignment, uid, receipt, root),
+    do: record_cleanup_receipt(assignment, uid, receipt, root, 0)
+
+  @doc "Appends a fresh receipt after Dahlia confirms the exact Job binding is retained."
+  @spec record_cleanup_receipt(map(), String.t(), map(), Path.t(), non_neg_integer()) ::
+          {:ok, Path.t()} | {:held, atom()} | {:error, atom()}
+  def record_cleanup_receipt(assignment, uid, receipt, root, version)
+      when is_integer(version) and version >= 0 and version < @max_cleanup_receipts do
+    with {:ok, payload} <- cleanup_payload(assignment, uid, receipt),
+         {:ok, path} <- cleanup_path(root, assignment.sha256, uid, version),
+         {:ok, bytes} <- Jason.encode(payload),
+         true <- byte_size(bytes) <= @max_bytes do
+      case :file.open(String.to_charlist(path), [:write, :binary, :exclusive, :raw]) do
+        {:ok, file} -> write_new(file, path, bytes)
+        {:error, :eexist} -> compare_existing(path, bytes)
+        _ -> {:held, :job_result_journal_write_unavailable}
+      end
+    else
+      false -> {:error, :invalid_job_cleanup_receipt}
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:held, :job_result_journal_write_unavailable}
+  end
+
+  def record_cleanup_receipt(_assignment, _uid, _receipt, _root, _version),
+    do: {:held, :job_cleanup_receipt_capacity_exhausted}
+
+  @doc "Loads the previously submitted cleanup receipt for byte-identical provider replay."
+  @spec load_cleanup_receipt(map(), String.t(), Path.t()) ::
+          {:ok, map()} | :missing | {:held, atom()} | {:error, atom()}
+  def load_cleanup_receipt(assignment, uid, root), do: load_cleanup_receipt(assignment, uid, root, 0)
+
+  @doc "Loads one immutable cleanup receipt version."
+  @spec load_cleanup_receipt(map(), String.t(), Path.t(), non_neg_integer()) ::
+          {:ok, map()} | :missing | {:held, atom()} | {:error, atom()}
+  def load_cleanup_receipt(assignment, uid, root, version)
+      when is_integer(version) and version >= 0 and version < @max_cleanup_receipts do
+    with :ok <- valid_digest_assignment?(assignment),
+         true <- valid_uid?(uid),
+         {:ok, path} <- cleanup_path(root, assignment.sha256, uid, version) do
+      case read_regular(path) do
+        {:ok, bytes} -> decode_cleanup_receipt(bytes, assignment, uid)
+        {:error, :enoent} -> :missing
+        _ -> {:held, :job_result_journal_read_unavailable}
+      end
+    else
+      false -> {:error, :invalid_job_cleanup_receipt}
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:held, :job_result_journal_read_unavailable}
+  end
+
+  def load_cleanup_receipt(_assignment, _uid, _root, _version),
+    do: {:held, :job_cleanup_receipt_capacity_exhausted}
+
+  @doc "Returns contiguous saved receipts newest first, retaining earlier POST replay candidates."
+  @spec load_cleanup_receipts(map(), String.t(), Path.t()) ::
+          {:ok, [{non_neg_integer(), map()}]} | :missing | {:held, atom()} | {:error, atom()}
+  def load_cleanup_receipts(assignment, uid, root) do
+    Enum.reduce_while(0..(@max_cleanup_receipts - 1), :missing, fn version, acc ->
+      accumulate_cleanup_receipt(assignment, uid, root, version, acc)
+    end)
+  end
+
+  defp accumulate_cleanup_receipt(assignment, uid, root, version, acc) do
+    case load_cleanup_receipt(assignment, uid, root, version) do
+      {:ok, receipt} ->
+        previous = if acc == :missing, do: [], else: elem(acc, 1)
+        {:cont, {:ok, [{version, receipt} | previous]}}
+
+      :missing ->
+        {:halt, acc}
+
+      other ->
+        {:halt, other}
+    end
+  end
+
+  defp cleanup_payload(assignment, uid, receipt) do
+    with :ok <- valid_digest_assignment?(assignment),
+         true <- valid_uid?(uid) and is_map(receipt) and receipt["jobUid"] == uid do
+      {:ok, %{"schema_version" => @schema_version, "assignment_digest" => assignment.sha256, "job_uid" => uid, "receipt" => receipt}}
+    else
+      _ -> {:error, :invalid_job_cleanup_receipt}
+    end
+  end
+
+  defp decode_cleanup_receipt(bytes, assignment, uid) when byte_size(bytes) <= @max_bytes do
+    with {:ok, %{"receipt" => receipt} = payload} <- Jason.decode(bytes),
+         {:ok, expected} <- cleanup_payload(assignment, uid, receipt),
+         true <- expected == payload do
+      {:ok, receipt}
+    else
+      _ -> {:held, :job_cleanup_receipt_journal_invalid}
+    end
+  end
+
+  defp decode_cleanup_receipt(_bytes, _assignment, _uid), do: {:held, :job_cleanup_receipt_journal_invalid}
+
+  defp valid_digest_assignment?(%{sha256: digest}) when is_binary(digest) do
+    if Regex.match?(@hex64, digest), do: :ok, else: {:error, :invalid_job_cleanup_receipt}
+  end
+
+  defp valid_digest_assignment?(_assignment), do: {:error, :invalid_job_cleanup_receipt}
+
+  defp cleanup_path(root, digest, uid, version) do
+    with {:ok, path} <- path(root, digest, uid),
+         do: {:ok, path <> ".cleanup" <> if(version == 0, do: "", else: ".#{version}")}
   end
 
   defp write_new(file, path, bytes) do
