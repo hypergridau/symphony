@@ -214,4 +214,36 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierAttemptJournalTest do
     assert {:held, :auth_cache_verifier_result_conflict} =
              AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
   end
+
+  test "rejects unverified result shapes and unsafe checkpoint files", %{root: root} do
+    assert {:ok, intent} = AuthCacheVerifierAttemptJournal.ensure(@assignment, @job_uid, @slot, @image, root)
+
+    for evidence <- [
+          %{@evidence | auth_cache_status: "unknown"},
+          %{@evidence | job_uid: "../other"},
+          Map.delete(@evidence, :pod_resource_version),
+          Map.put(@evidence, :unexpected, true)
+        ] do
+      assert {:error, :invalid_auth_cache_verifier_result_checkpoint} =
+               AuthCacheVerifierAttemptJournal.record_result(intent, evidence, root)
+    end
+
+    path = Path.join(root, @digest <> "-" <> @job_uid <> ".auth-verifier-result.json")
+    File.ln_s!("/tmp/untrusted-result", path)
+
+    assert {:held, :auth_cache_verifier_result_read_unavailable} =
+             AuthCacheVerifierAttemptJournal.load_result(intent, root)
+
+    assert {:held, :auth_cache_verifier_result_read_unavailable} =
+             AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
+
+    File.rm!(path)
+    assert {:ok, result} = AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
+    File.chmod!(path, 0o644)
+
+    assert {:held, :auth_cache_verifier_result_read_unavailable} =
+             AuthCacheVerifierAttemptJournal.load_result(intent, root)
+
+    assert result["auth_cache_bytes"] == 12_345
+  end
 end
