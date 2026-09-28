@@ -335,8 +335,11 @@ allocated Job can be inspected by its recorded UID without another create,
 registration, or OAuth slot reservation. The host can reconstruct a retained
 suspended Job's slot from exact Kubernetes readback and verify the current PVC UID
 and Dahlia binding without another reservation. Restart recovery now reconciles
-the journaled suspended claim only after that exact readback. Activation and
-terminal ownership remain gated.
+the journaled suspended claim only after that exact readback. If a prior
+activation intent names an allocation, recovery requires either the exact
+active Job and bound OAuth slot or its durable terminal result and slot binding.
+It restores only the existing claim fence; it does not create or resume a Job.
+Activation and terminal ownership remain gated.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination

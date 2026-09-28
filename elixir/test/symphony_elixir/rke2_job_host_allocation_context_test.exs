@@ -201,6 +201,21 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
 
     refute_receive :claim_uid_verified
     refute_receive :lease_binding_verified
+
+    assert {:ok, started_context} =
+             HostAllocationContext.reattach_started(assignment, binding, allocation_id, config)
+
+    assert started_context.config.auth_slot == slot
+    assert_receive :claim_uid_verified
+    assert_receive :lease_binding_verified
+
+    Process.put(:retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
+
+    assert {:held, :rke2_retained_allocation_unverified} =
+             HostAllocationContext.reattach_started(assignment, binding, allocation_id, config)
+
+    refute_receive :claim_uid_verified
+    refute_receive :lease_binding_verified
   end
 
   test "reattaches terminal cleanup after Job deletion from the durable result and slot" do

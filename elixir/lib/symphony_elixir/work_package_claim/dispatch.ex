@@ -273,6 +273,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
     case journal.reservations[key] do
       %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed", "allocation_suspended"] -> {:ok, reservation}
+      %{dispatch: %{phase: "spawn_started", allocation_id: id}} = reservation when is_binary(id) -> {:ok, reservation}
       %{dispatch: %{phase: "spawn_started"}} -> {:error, :claim_spawn_already_attempted}
       %{dispatch: %{phase: "recovery_pending"}} -> {:error, :claim_reconciliation_required}
       %{dispatch: %{phase: "blocked"}} -> {:error, :claim_reconciliation_required}

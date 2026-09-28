@@ -119,6 +119,41 @@ defmodule SymphonyElixir.WorkPackageClaimRecoveryTest do
     assert File.read!(context.runtime.journal_path) == before
   end
 
+  test "started disposable allocation recovers only its exact retained identity", context do
+    {:ok, journal} = Journal.load(context.runtime.journal_path)
+    [key] = Map.keys(journal.reservations)
+    reservation = journal.reservations[key]
+    allocation_id = "rke2job:v1:started-allocation"
+    retained = put_in(reservation, [:dispatch, :phase], "spawn_started")
+    retained = put_in(retained, [:dispatch, :allocation_id], allocation_id)
+    {:ok, journal} = Journal.put(journal, key, retained)
+    assert :ok = Journal.save(context.runtime.journal_path, journal)
+
+    fence = put_in(context.state.execution_fence, [:executions, context.issue.id, :ownership], :unknown)
+    graph = context.state.responsibility_graph
+    now = System.system_time(:millisecond)
+    before = File.read!(context.runtime.journal_path)
+
+    assert {:error, :suspended_allocation_recovery_unavailable} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now)
+
+    assert {:error, :wrong_job_uid} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now, verify_retained: fn _, _, _ -> {:error, :wrong_job_uid} end)
+
+    assert {:ok, candidate_fence, _candidate_graph, recovered} =
+             Recovery.prepare(context.runtime, fence, graph, context.issue, nil, now,
+               verify_retained: fn observed, _, _ ->
+                 assert observed.dispatch.phase == "spawn_started"
+                 assert observed.dispatch.allocation_id == allocation_id
+                 :ok
+               end
+             )
+
+    assert recovered.token == context.token
+    assert candidate_fence.executions[context.issue.id].ownership == :reconciled
+    assert File.read!(context.runtime.journal_path) == before
+  end
+
   test "pending authority uses its own slot and excludes fresh admission", context do
     assert Orchestrator.should_dispatch_issue_for_test(context.issue, context.state)
     refute Orchestrator.should_dispatch_issue_for_test(Fixture.issue(2), context.state)

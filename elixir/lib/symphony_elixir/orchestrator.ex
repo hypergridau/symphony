@@ -2295,10 +2295,20 @@ defmodule SymphonyElixir.Orchestrator do
          %{environment: %{target_environment: :rke2}} <- bundle,
          {:ok, binding} <- ClaimBinding.from_journal(reservation, bundle, runtime.runner_id),
          {:ok, _context} <-
-           HostAllocationContext.reattach(bundle, binding, reservation.dispatch.allocation_id, host_config) do
+           reattach_disposable_claim(bundle, binding, reservation.dispatch, host_config) do
       :ok
     else
-      _ -> {:error, :suspended_allocation_recovery_unverified}
+      _ -> {:error, :disposable_allocation_recovery_unverified}
+    end
+  end
+
+  defp reattach_disposable_claim(bundle, binding, %{phase: "allocation_suspended", allocation_id: id}, host_config),
+    do: HostAllocationContext.reattach(bundle, binding, id, host_config)
+
+  defp reattach_disposable_claim(bundle, binding, %{phase: "spawn_started", allocation_id: id}, host_config) do
+    case HostAllocationContext.reattach_started(bundle, binding, id, host_config) do
+      {:ok, _context} = result -> result
+      {:held, _reason} -> HostAllocationContext.reattach_terminal(bundle, binding, id, host_config)
     end
   end
 
