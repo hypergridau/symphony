@@ -1247,6 +1247,47 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.allocation_id == "rke2job:v1:fixture-allocation"
   end
 
+  test "owner drift retains a blocked disposable allocation for exact cleanup" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Retained disposable assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      claim_journal_path: path
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+
+    drifted = %{issue | assignee_id: "another-owner"}
+    reconciled = Orchestrator.reconcile_blocked_issue_states_for_test([drifted], blocked)
+
+    assert Map.has_key?(reconciled.blocked, @issue_id)
+    assert MapSet.member?(reconciled.claimed, @issue_id)
+    assert reconciled.blocked[@issue_id].issue.assignee_id == "another-owner"
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == "rke2job:v1:fixture-allocation"
+    refute_receive {:activation_requested, _, _, _}
+
+    File.rename!(path, path <> ".missing")
+    on_exit(fn -> File.rm_rf(path <> ".missing") end)
+    uncertain = Orchestrator.reconcile_blocked_issue_states_for_test([drifted], reconciled)
+    assert Map.has_key?(uncertain.blocked, @issue_id)
+    assert MapSet.member?(uncertain.claimed, @issue_id)
+  end
+
   test "uncertain RKE2 allocation keeps the local lease and provider claim" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
