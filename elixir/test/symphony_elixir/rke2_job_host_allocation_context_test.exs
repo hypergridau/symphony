@@ -218,7 +218,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     refute_receive :lease_binding_verified
   end
 
-  test "reattaches terminal cleanup after Job deletion from the durable result and slot" do
+  test "reattaches terminal cleanup after Job deletion and OAuth lease release" do
     assignment = assignment()
     binding = claim_binding(assignment)
     {:ok, base} = HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
@@ -288,7 +288,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert_receive {:finalize_context, finalize_key}
     assert finalize_key == assignment.sha256 <> ":finalize"
     assert_receive :claim_uid_verified
-    assert_receive :lease_binding_verified
+    refute_receive :lease_binding_verified
 
     altered_id = String.replace(allocation_id, "rke2job:v1:", "rke2job:v2:")
 
