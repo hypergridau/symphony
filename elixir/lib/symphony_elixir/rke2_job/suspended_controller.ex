@@ -43,6 +43,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   def allocate(assignment, claim_input, context)
       when is_map(assignment) and is_map(claim_input) and is_map(context) do
     with :ok <- preflight(assignment, claim_input, context),
+         :ok <- WorkPackageClaim.record_assignment_snapshot(claim_input, assignment),
          {:ok, adapter} <- adapter(context),
          {:ok, allocation} <-
            adapter.allocate_or_reconcile(

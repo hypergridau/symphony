@@ -2278,20 +2278,11 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
-  defp verify_retained_allocation(state, issue, reservation, fence, graph) do
+  defp verify_retained_allocation(state, _issue, reservation, _fence, _graph) do
     runtime = state.work_package_runtime
-    token = %{issue_id: issue.id, generation: reservation.generation}
-    candidate = %{state | execution_fence: fence, responsibility_graph: graph}
 
     with %{disposable_rke2_host_config: host_config} when is_map(host_config) <- runtime,
-         {:ok, bundle} <-
-           managed_assignment_bundle(
-             candidate,
-             issue,
-             token,
-             reservation.session_id,
-             reservation.responsible_delegation_id
-           ),
+         {:ok, bundle} <- ManagedAssignmentBundle.from_snapshot(Map.get(reservation, :assignment_snapshot)),
          %{environment: %{target_environment: :rke2}} <- bundle,
          {:ok, binding} <- ClaimBinding.from_journal(reservation, bundle, runtime.runner_id),
          {:ok, _context} <-

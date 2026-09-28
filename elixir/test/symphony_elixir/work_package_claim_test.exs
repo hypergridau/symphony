@@ -2,6 +2,12 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   def allocate_or_reconcile(_assignment, key, context) do
+    if is_binary(context[:claim_journal_path]) do
+      {:ok, journal} = Journal.load(context.claim_journal_path)
+      [reservation] = Map.values(journal.reservations)
+      send(context.test_pid, {:allocation_snapshot_observed, reservation.assignment_snapshot})
+    end
+
     send(context.test_pid, {:allocation_requested, key})
     Map.get(context, :allocation_result, {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}})
   end
@@ -148,6 +154,40 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:error, :provider_claim_invalid} =
              ClaimBinding.from_journal(%{claim.reservation | session_id: "foreign-session"}, assignment, input.runner_id)
 
+    assert :ok = WorkPackageClaim.record_assignment_snapshot(input, assignment)
+    assert :ok = WorkPackageClaim.record_assignment_snapshot(input, assignment)
+
+    changed_attrs =
+      assignment
+      |> Map.drop([:schema_version, :sha256, :environment])
+      |> Map.put(:objective, %{assignment.objective | content: "A different objective"})
+      |> Map.merge(%{
+        platform: assignment.environment.platform,
+        environment_classification: assignment.environment.classification,
+        environment_constraints: assignment.environment.constraints,
+        placement: assignment.environment.placement,
+        target_environment: assignment.environment.target_environment
+      })
+
+    assert {:ok, changed_assignment} = ManagedAssignmentBundle.build(changed_attrs)
+
+    assert {:error, :assignment_snapshot_changed} =
+             WorkPackageClaim.record_assignment_snapshot(input, changed_assignment)
+
+    assert {:ok, foreign_assignment} =
+             changed_attrs
+             |> Map.put(:lease, %{assignment.lease | session_id: "foreign-session"})
+             |> ManagedAssignmentBundle.build()
+
+    assert {:ok, foreign_snapshot} = ManagedAssignmentBundle.snapshot(foreign_assignment)
+    original_journal = File.read!(path)
+    original_payload = Jason.decode!(original_journal)
+    [reservation_key] = Map.keys(original_payload["reservations"])
+    foreign_payload = put_in(original_payload, ["reservations", reservation_key, "assignment_snapshot"], foreign_snapshot)
+    File.write!(path, Jason.encode!(foreign_payload))
+    assert {:error, {:invalid_journal, _reason}} = Journal.load(path)
+    File.write!(path, original_journal)
+
     context = %{
       adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
       claim_binding: binding,
@@ -168,8 +208,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
              SuspendedController.allocate(assignment, input, context)
 
     assert allocation_id == "rke2job:v1:fixture-allocation"
+    assert_receive {:allocation_snapshot_observed, snapshot}
+    assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(snapshot)
     assert_receive {:allocation_requested, allocation_key}
     assert allocation_key == assignment.sha256 <> ":allocation"
+
+    assert {:ok, journal} = Journal.load(path)
+    [retained] = Map.values(journal.reservations)
+    assert retained.assignment_snapshot == snapshot
+    assert retained.dispatch.allocation_id == allocation_id
 
     assert {:ok, %{phase: "allocation_suspended", allocation_id: ^allocation_id}} =
              WorkPackageClaim.handoff_allocation(input)
@@ -190,6 +237,12 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
     assert_receive {:root_witness, "spawn_intent", true}
     assert_receive {:activation_requested, ^allocation_id, ^activation_key, "spawn_started"}
+
+    payload = path |> File.read!() |> Jason.decode!()
+    [key] = Map.keys(payload["reservations"])
+    payload = put_in(payload, ["reservations", key, "assignment_snapshot"], Base.encode64("changed"))
+    File.write!(path, Jason.encode!(payload))
+    assert {:error, {:invalid_journal, :invalid_assignment_snapshot}} = Journal.load(path)
   end
 
   test "suspended controller rejects mismatched claim binding before allocation" do

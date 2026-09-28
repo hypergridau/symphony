@@ -9,10 +9,13 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
 
   @schema_version 1
 
+  alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.ManagedExecutor.ClaimBinding
   alias SymphonyElixir.WorkPackageClaim.Dispatch
 
   @type reservation :: %{
           optional(:dispatch) => map(),
+          optional(:assignment_snapshot) => String.t(),
           optional(:cleanup_receipts) => %{optional(String.t()) => map()},
           optional(:failed_worker_turns) => %{optional(String.t()) => map()},
           optional(:workspace_id) => String.t(),
@@ -311,12 +314,14 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
          true <- is_list(values.scope_keys) and values.scope_keys != [] and Enum.all?(values.scope_keys, &present_string?/1),
          {:ok, cleanup_receipts} <- decode_cleanup_receipts(Map.get(payload, "cleanup_receipts")),
          {:ok, failed_worker_turns} <- decode_failed_worker_turns(Map.get(payload, "failed_worker_turns")),
-         {:ok, dispatch} <- Dispatch.decode(Map.get(payload, "dispatch")) do
+         {:ok, dispatch} <- Dispatch.decode(Map.get(payload, "dispatch")),
+         {:ok, assignment_snapshot} <- decode_assignment_snapshot(Map.get(payload, "assignment_snapshot")) do
       {:ok,
        Map.merge(values, scope_ids)
        |> maybe_put_decoded(:cleanup_receipts, cleanup_receipts)
        |> maybe_put_decoded(:failed_worker_turns, failed_worker_turns)
-       |> maybe_put_decoded(:dispatch, dispatch)}
+       |> maybe_put_decoded(:dispatch, dispatch)
+       |> maybe_put_decoded(:assignment_snapshot, assignment_snapshot)}
     else
       false -> {:error, :invalid_reservation}
       error -> error
@@ -324,6 +329,17 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   end
 
   defp decode_reservation(_payload), do: {:error, :invalid_reservation}
+
+  defp decode_assignment_snapshot(nil), do: {:ok, nil}
+
+  defp decode_assignment_snapshot(snapshot) when is_binary(snapshot) do
+    case ManagedAssignmentBundle.from_snapshot(snapshot) do
+      {:ok, _bundle} -> {:ok, snapshot}
+      _ -> {:error, :invalid_assignment_snapshot}
+    end
+  end
+
+  defp decode_assignment_snapshot(_snapshot), do: {:error, :invalid_assignment_snapshot}
 
   defp optional_scope_ids(payload) do
     ids = [{:workspace_id, "workspace_id"}, {:company_id, "company_id"}]
@@ -468,12 +484,29 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       is_integer(reservation[:generation]) and reservation[:generation] > 0 and
       is_list(reservation[:scope_keys]) and reservation[:scope_keys] != [] and
       Enum.all?(reservation[:scope_keys], &present_string?/1) and
-      valid_cleanup_receipts?(Map.get(reservation, :cleanup_receipts, %{})) and
-      valid_failed_worker_turns?(Map.get(reservation, :failed_worker_turns, %{})) and
-      Dispatch.valid?(Map.get(reservation, :dispatch))
+      valid_reservation_metadata?(reservation)
   end
 
   defp valid_reservation?(_reservation), do: false
+
+  defp valid_reservation_metadata?(reservation) do
+    valid_cleanup_receipts?(Map.get(reservation, :cleanup_receipts, %{})) and
+      valid_failed_worker_turns?(Map.get(reservation, :failed_worker_turns, %{})) and
+      valid_assignment_snapshot?(reservation) and
+      Dispatch.valid?(Map.get(reservation, :dispatch))
+  end
+
+  defp valid_assignment_snapshot?(%{assignment_snapshot: snapshot} = reservation) do
+    with {:ok, bundle} <- ManagedAssignmentBundle.from_snapshot(snapshot),
+         %{environment: %{target_environment: :rke2}} <- bundle,
+         {:ok, _binding} <- ClaimBinding.from_journal(reservation, bundle, reservation.runner_id) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp valid_assignment_snapshot?(_reservation), do: true
 
   defp valid_required_strings?(reservation) do
     fields = [

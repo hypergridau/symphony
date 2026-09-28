@@ -8,6 +8,8 @@ defmodule SymphonyElixir.WorkPackageClaim do
   """
 
   alias SymphonyElixir.ExecutionFence
+  alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.ManagedExecutor.ClaimBinding
   alias SymphonyElixir.ResponsibilityGraph
   alias SymphonyElixir.WorkPackageClaim.{Dispatch, HostWitness}
   alias SymphonyElixir.WorkPackageClaim.Journal
@@ -220,6 +222,36 @@ defmodule SymphonyElixir.WorkPackageClaim do
   end
 
   def prepare_suspended_allocation(_input), do: {:error, :suspended_allocation_not_admissible}
+
+  @doc "Retains the exact validated RKE2 assignment before its suspended Job is created."
+  @spec record_assignment_snapshot(input(), map()) :: :ok | {:error, term()}
+  def record_assignment_snapshot(input, bundle) when is_map(input) and is_map(bundle) do
+    with :ok <- prepare_suspended_allocation(input),
+         :ok <- ManagedAssignmentBundle.validate_bundle(bundle),
+         %{environment: %{target_environment: :rke2}} <- bundle,
+         {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         {:ok, _binding} <- ClaimBinding.from_journal(reservation, bundle, input.runner_id),
+         {:ok, snapshot} <- ManagedAssignmentBundle.snapshot(bundle),
+         :ok <- unchanged_assignment_snapshot(reservation, snapshot),
+         {:ok, journal} <- Journal.put(journal, key, Map.put(reservation, :assignment_snapshot, snapshot)),
+         :ok <- Journal.save(input.journal_path, journal) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :assignment_snapshot_not_admissible}
+    end
+  end
+
+  def record_assignment_snapshot(_input, _bundle), do: {:error, :assignment_snapshot_not_admissible}
+
+  defp unchanged_assignment_snapshot(%{assignment_snapshot: snapshot}, snapshot), do: :ok
+  defp unchanged_assignment_snapshot(%{assignment_snapshot: _other}, _snapshot), do: {:error, :assignment_snapshot_changed}
+  defp unchanged_assignment_snapshot(_reservation, _snapshot), do: :ok
 
   @doc "Returns the exact recorded suspended allocation for controlled resumption."
   @spec suspended_allocation(input()) :: {:ok, String.t()} | {:error, term()}

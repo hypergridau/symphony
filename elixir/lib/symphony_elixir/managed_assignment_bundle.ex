@@ -7,6 +7,7 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   """
 
   @schema_version 2
+  @max_snapshot_bytes 65_536
   @supported_platforms ["linux-x86_64"]
   @type t :: %{
           schema_version: 2,
@@ -76,6 +77,39 @@ defmodule SymphonyElixir.ManagedAssignmentBundle do
   end
 
   def validate_bundle(_bundle), do: {:error, :invalid_assignment_bundle}
+
+  @doc "Encodes an exact validated assignment for private durable claim recovery."
+  @spec snapshot(t()) :: {:ok, String.t()} | {:error, term()}
+  def snapshot(bundle) when is_map(bundle) do
+    with :ok <- validate_bundle(bundle),
+         bytes = :erlang.term_to_binary(bundle, [:deterministic]),
+         true <- byte_size(bytes) <= @max_snapshot_bytes do
+      {:ok, Base.encode64(bytes)}
+    else
+      false -> {:error, :assignment_snapshot_too_large}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def snapshot(_bundle), do: {:error, :invalid_assignment_bundle}
+
+  @doc "Decodes only the canonical bounded snapshot of a valid non-secret assignment."
+  @spec from_snapshot(String.t()) :: {:ok, t()} | {:error, term()}
+  def from_snapshot(encoded) when is_binary(encoded) and byte_size(encoded) <= 90_000 do
+    with {:ok, bytes} <- Base.decode64(encoded),
+         true <- byte_size(bytes) <= @max_snapshot_bytes,
+         bundle <- :erlang.binary_to_term(bytes, [:safe]),
+         :ok <- validate_bundle(bundle),
+         true <- :erlang.term_to_binary(bundle, [:deterministic]) == bytes do
+      {:ok, bundle}
+    else
+      _ -> {:error, :invalid_assignment_snapshot}
+    end
+  rescue
+    _ -> {:error, :invalid_assignment_snapshot}
+  end
+
+  def from_snapshot(_encoded), do: {:error, :invalid_assignment_snapshot}
 
   defp bundle_attributes(%{environment: environment} = bundle) when map_size(environment) == 5 do
     %{
