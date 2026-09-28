@@ -83,6 +83,7 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      retained_claim_journal_ready?: true,
       retry_attempts: %{},
       execution_fence: ExecutionFence.new(),
       execution_fence_path: nil,
@@ -199,6 +200,7 @@ defmodule SymphonyElixir.Orchestrator do
     state = refresh_runtime_config(state)
     state = reconcile_review_handoffs(state)
     state = replay_persisted_cleanup_receipts(state)
+    state = restore_retained_disposable_claims(state)
     state = maybe_dispatch(state)
     state = schedule_tick(state, state.poll_interval_ms)
     state = %{state | poll_check_in_progress: false}
@@ -432,8 +434,8 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
       |> hold_review_handoff_claims()
 
-    if GlobalPause.paused?() do
-      Logger.debug("Global mutable admission is paused; skipping new worker dispatch")
+    if GlobalPause.paused?() or not state.retained_claim_journal_ready? do
+      Logger.debug("Mutable admission is held by the global pause or claim journal; skipping new worker dispatch")
       state
     else
       with :ok <- Config.validate!(),
@@ -709,6 +711,63 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  defp restore_retained_disposable_claims(%State{work_package_runtime: %{journal_path: path}} = state)
+       when is_binary(path) do
+    case Journal.load(path) do
+      {:ok, journal} ->
+        Enum.reduce(journal.reservations, %{state | retained_claim_journal_ready?: true}, fn {_key, reservation}, current ->
+          restore_retained_disposable_claim(current, reservation)
+        end)
+
+      :missing ->
+        if map_size(state.execution_fence.executions) > 0,
+          do: %{state | retained_claim_journal_ready?: false},
+          else: %{state | retained_claim_journal_ready?: true}
+
+      {:error, reason} ->
+        Logger.warning("Retained disposable claim journal is unavailable: #{inspect(reason)}")
+        %{state | retained_claim_journal_ready?: false}
+    end
+  end
+
+  defp restore_retained_disposable_claims(state), do: state
+
+  defp restore_retained_disposable_claim(state, %{issue_id: issue_id, generation: generation} = reservation)
+       when is_binary(issue_id) and is_integer(generation) do
+    dispatch = Map.get(reservation, :dispatch, %{})
+    execution = Map.get(state.execution_fence.executions, issue_id)
+
+    if dispatch[:phase] in ["allocation_suspended", "spawn_started"] do
+      if is_binary(dispatch[:allocation_id]) and
+           match?(%{generation: ^generation}, execution) and
+           reservation.runner_id == get_in(state.work_package_runtime, [:runner_id]) and
+           reservation.repository_ref == execution.repository do
+        restore_verified_retained_disposable_claim(state, issue_id, generation, dispatch.allocation_id)
+      else
+        %{state | retained_claim_journal_ready?: false}
+      end
+    else
+      state
+    end
+  end
+
+  defp restore_retained_disposable_claim(state, _reservation), do: state
+
+  defp restore_verified_retained_disposable_claim(state, issue_id, generation, allocation_id) do
+    if Map.has_key?(state.running, issue_id) or Map.has_key?(state.blocked, issue_id) do
+      state
+    else
+      issue = %Issue{id: issue_id, identifier: issue_id}
+      entry = %{issue: issue, identifier: issue_id, execution_token: %{issue_id: issue_id, generation: generation}}
+      block_issue_from_entry(state, issue_id, entry, "Retained disposable allocation requires reconciliation: #{allocation_id}")
+    end
+  end
+
+  @doc false
+  @spec restore_retained_disposable_claims_for_test(term()) :: term()
+  def restore_retained_disposable_claims_for_test(%State{} = state),
+    do: restore_retained_disposable_claims(state)
+
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
   def reconcile_issue_states_for_test(issues, %State{} = state) when is_list(issues) do
@@ -866,11 +925,16 @@ defmodule SymphonyElixir.Orchestrator do
   defp reconcile_blocked_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     cond do
       terminal_issue_state?(issue.state, terminal_states) ->
-        Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
-        blocked_entry = Map.get(state.blocked, issue.id, %{})
-        state = maybe_fence_terminal_execution(state, Map.put(blocked_entry, :issue, issue), true)
-        state = cleanup_fenced_workspace_or_legacy(state, issue, blocked_entry)
-        release_terminal_block_after_cleanup(state, issue, blocked_entry)
+        if retained_disposable_claim?(state, issue) do
+          Logger.info("Blocked issue is terminal with a retained disposable allocation: #{issue_context(issue)}; retaining cleanup authority")
+          refresh_blocked_issue_state(state, issue)
+        else
+          Logger.info("Blocked issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; releasing block")
+          blocked_entry = Map.get(state.blocked, issue.id, %{})
+          state = maybe_fence_terminal_execution(state, Map.put(blocked_entry, :issue, issue), true)
+          state = cleanup_fenced_workspace_or_legacy(state, issue, blocked_entry)
+          release_terminal_block_after_cleanup(state, issue, blocked_entry)
+        end
 
       !issue_routable?(issue) ->
         if retained_disposable_claim?(state, issue) do
@@ -898,7 +962,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
 
-  defp retained_disposable_claim?(%State{work_package_runtime: runtime} = state, issue)
+  defp retained_disposable_claim?(%State{work_package_runtime: runtime} = state, %Issue{} = issue)
        when is_map(runtime) do
     case WorkPackageClaim.handoff_allocation(claim_input(state, issue)) do
       {:ok, %{phase: phase, allocation_id: id}}
@@ -965,13 +1029,24 @@ defmodule SymphonyElixir.Orchestrator do
       if MapSet.member?(visible_issue_ids, issue_id) do
         state_acc
       else
-        Logger.info("Blocked issue no longer visible during state refresh: issue_id=#{issue_id}; releasing block")
-        release_issue_claim(state_acc, issue_id)
+        reconcile_missing_blocked_issue(state_acc, issue_id)
       end
     end)
   end
 
   defp reconcile_missing_blocked_issue_ids(state, _requested_issue_ids, _issues), do: state
+
+  defp reconcile_missing_blocked_issue(state, issue_id) do
+    issue = get_in(state.blocked, [issue_id, :issue])
+
+    if retained_disposable_claim?(state, issue) do
+      Logger.info("Blocked issue is not visible with a retained disposable allocation: issue_id=#{issue_id}; retaining cleanup authority")
+      state
+    else
+      Logger.info("Blocked issue no longer visible during state refresh: issue_id=#{issue_id}; releasing block")
+      release_issue_claim(state, issue_id)
+    end
+  end
 
   defp log_missing_running_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
@@ -1540,6 +1615,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp issue_created_at_sort_key(%Issue{}), do: 9_223_372_036_854_775_807
   defp issue_created_at_sort_key(_issue), do: 9_223_372_036_854_775_807
 
+  defp should_dispatch_issue?(_issue, %State{retained_claim_journal_ready?: false}, _active_states, _terminal_states),
+    do: false
+
   defp should_dispatch_issue?(
          %Issue{} = issue,
          %State{running: running, claimed: claimed, blocked: blocked} = state,
@@ -1684,7 +1762,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
-    if GlobalPause.paused?() do
+    if GlobalPause.paused?() or not state.retained_claim_journal_ready? do
       Logger.debug("Global mutable admission paused before execution-fence admission for #{issue_context(issue)}")
       state
     else
