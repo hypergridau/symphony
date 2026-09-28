@@ -12,11 +12,22 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
     Map.get(context, :allocation_result, {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}})
   end
 
-  def activate_owned(allocation, _assignment, key, context) do
-    {:ok, journal} = Journal.load(context.claim_journal_path)
-    [reservation] = Map.values(journal.reservations)
-    send(context.test_pid, {:activation_requested, allocation.id, key, reservation.dispatch.phase})
-    {:ok, %{status: :active}}
+  def activate_owned(allocation, assignment, key, context) do
+    authorization =
+      case Map.get(context, :activation_guard) do
+        nil -> :ok
+        guard -> guard.authorize(assignment, allocation, key, context.activation_guard_context)
+      end
+
+    with :ok <- authorization,
+         path when is_binary(path) <-
+           Map.get(context, :claim_journal_path) ||
+             get_in(context, [:activation_guard_context, :claim_input, :journal_path]),
+         {:ok, journal} <- Journal.load(path) do
+      [reservation] = Map.values(journal.reservations)
+      send(context.test_pid, {:activation_requested, allocation.id, key, reservation.dispatch.phase})
+      {:ok, %{status: :active}}
+    end
   end
 end
 
@@ -38,7 +49,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.ManagedExecutor.ClaimBinding
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, JobSpec, SuspendedController}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery}
 
@@ -285,6 +296,78 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     payload = put_in(payload, ["reservations", key, "assignment_snapshot"], Base.encode64("changed"))
     File.write!(path, Jason.encode!(payload))
     assert {:error, {:invalid_journal, :invalid_assignment_snapshot}} = Journal.load(path)
+  end
+
+  test "host activation guard requires the exact started claim and an open configured pause gate" do
+    path = temp_path()
+    pause_root = temp_path()
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    File.write!(pause_path, "running\n")
+    previous = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous),
+        do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous),
+        else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+
+      File.rm_rf(path)
+      File.rm_rf(pause_root)
+    end)
+
+    %{input: input, lease: lease} = authority_fixture(path)
+
+    input = %{
+      input
+      | host_witness_fun: fn request ->
+          {:ok,
+           %{
+             "ok" => true,
+             "receipt" => %{
+               "version" => 1,
+               "sequence" => 1,
+               "hash" => String.duplicate("a", 64),
+               "replayed" => request["replayOnly"] == true
+             }
+           }}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assignment = suspended_assignment(lease)
+    assert {:ok, binding} = ClaimBinding.from_claim(claim, assignment, input.runner_id)
+    assert :ok = WorkPackageClaim.record_assignment_snapshot(input, assignment)
+    allocation = %{id: "rke2job:v1:fixture-allocation", status: :ready}
+    assert :ok = WorkPackageClaim.record_suspended_allocation(input, allocation)
+    assert :ok = WorkPackageClaim.begin_suspended_spawn(input, allocation.id)
+
+    key = assignment.sha256 <> ":activate"
+    context = %{claim_input: input, claim_binding: binding}
+    assert :ok = HostActivationGuard.authorize(assignment, allocation, key, context)
+
+    assert {:held, :rke2_host_activation_unverified} =
+             HostActivationGuard.authorize(assignment, %{allocation | id: "rke2job:v1:other"}, key, context)
+
+    changed_context = %{context | claim_binding: %{binding | process_id: "other"}}
+
+    assert {:held, :rke2_host_activation_unverified} =
+             HostActivationGuard.authorize(assignment, allocation, key, changed_context)
+
+    File.write!(pause_path, "paused\n")
+
+    assert {:held, :rke2_host_activation_unverified} =
+             HostActivationGuard.authorize(assignment, allocation, key, context)
   end
 
   test "suspended controller rejects mismatched claim binding before allocation" do
@@ -1639,6 +1722,64 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert drift_blocked.blocked[@issue_id].error =~ "disposable_rke2_claim_not_admissible"
     refute_receive {:slot_reserved, _url}
     refute_receive {:allocation_requested, _key}
+
+    pause_root = temp_path()
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    File.write!(pause_path, "running\n")
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path),
+        do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path),
+        else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+
+      File.rm_rf(pause_root)
+    end)
+
+    started_path = temp_path()
+    on_exit(fn -> File.rm_rf(started_path) end)
+
+    witness = fn request ->
+      {:ok,
+       %{
+         "ok" => true,
+         "receipt" => %{
+           "version" => 1,
+           "sequence" => 1,
+           "hash" => String.duplicate("a", 64),
+           "replayed" => request["replayOnly"] == true
+         }
+       }}
+    end
+
+    {started, _runtime} =
+      post_claim_revalidation_failure(started_path, issue, issue,
+        disposable_rke2_host_config: config,
+        host_witness_fun: witness
+      )
+
+    assert_receive {:slot_reserved, _url}
+    assert_receive {:allocation_requested, _key}
+    assert_receive {:activation_requested, "rke2job:v1:fixture-allocation", _, "spawn_started"}
+    assert started.blocked[@issue_id].error =~ "disposable_rke2_started_retained"
+    assert {:ok, started_journal} = Journal.load(started_path)
+    [started_reservation] = Map.values(started_journal.reservations)
+    assert started_reservation.dispatch.phase == "spawn_started"
+    assert MapSet.member?(started.claimed, @issue_id)
+
+    denied_path = temp_path()
+    on_exit(fn -> File.rm_rf(denied_path) end)
+    {denied, _runtime} = post_claim_revalidation_failure(denied_path, issue, issue, disposable_rke2_host_config: config)
+    assert_receive {:slot_reserved, _url}
+    assert_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert denied.blocked[@issue_id].error =~ "disposable_rke2_activation_uncertain"
+    assert {:ok, denied_journal} = Journal.load(denied_path)
+    [denied_reservation] = Map.values(denied_journal.reservations)
+    assert denied_reservation.dispatch.phase == "spawn_started"
+    assert MapSet.member?(denied.claimed, @issue_id)
   end
 
   test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
@@ -2356,6 +2497,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       input
       |> Map.take([:base_url, :runner_token, :attestation_key, :runner_id, :managed_project_profile_id, :journal_path, :pool_key, :host_witness_fun, :managed_delegations])
       |> Map.merge(Map.new(Keyword.take(opts, [:disposable_rke2_context, :disposable_rke2_host_config])))
+      |> Map.put(:host_witness_fun, Keyword.get(opts, :host_witness_fun, input.host_witness_fun))
 
     fence_path = path <> ".fence"
     graph_path = path <> ".graph"
