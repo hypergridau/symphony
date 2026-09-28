@@ -1,8 +1,26 @@
+defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
+  alias SymphonyElixir.WorkPackageClaim.Journal
+
+  def allocate_or_reconcile(_assignment, key, context) do
+    send(context.test_pid, {:allocation_requested, key})
+    {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}}
+  end
+
+  def activate_owned(allocation, _assignment, key, context) do
+    {:ok, journal} = Journal.load(context.claim_journal_path)
+    [reservation] = Map.values(journal.reservations)
+    send(context.test_pid, {:activation_requested, allocation.id, key, reservation.dispatch.phase})
+    {:ok, %{status: :active}}
+  end
+end
+
 defmodule SymphonyElixir.WorkPackageClaimTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.Codex.ModelRouter
-  alias SymphonyElixir.{ExecutionFence, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
+  alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
+  alias SymphonyElixir.ManagedExecutor.ClaimBinding
+  alias SymphonyElixir.RKE2Job.SuspendedController
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery}
 
@@ -89,6 +107,96 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert_receive {:claim_witness, "claim_bound"}
     assert_receive {:claim_witness, "spawn_intent"}
     assert_receive {:claim_witness, "spawn_intent"}
+  end
+
+  test "suspended controller records allocation before intent, activates after root witness, and replays" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input, lease: lease} = authority_fixture(path)
+    parent = self()
+
+    input = %{
+      input
+      | host_witness_fun: fn request ->
+          send(parent, {:root_witness, request["operation"], request["replayOnly"] == true})
+
+          {:ok,
+           %{
+             "ok" => true,
+             "receipt" => %{
+               "version" => 1,
+               "sequence" => 1,
+               "hash" => String.duplicate("a", 64),
+               "replayed" => request["replayOnly"] == true
+             }
+           }}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, claim} =
+             WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+
+    assignment = suspended_assignment(lease)
+    assert {:ok, binding} = ClaimBinding.from_claim(claim, assignment, input.runner_id)
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      claim_binding: binding,
+      claim_journal_path: path,
+      test_pid: self()
+    }
+
+    assert {:error, :suspended_controller_claim_binding_invalid} =
+             SuspendedController.allocate(
+               assignment,
+               input,
+               %{context | claim_binding: %{binding | reservation_id: "other-reservation"}}
+             )
+
+    refute_receive {:allocation_requested, _key}
+
+    assert {:ok, %{id: allocation_id, status: :ready}} =
+             SuspendedController.allocate(assignment, input, context)
+
+    assert allocation_id == "rke2job:v1:fixture-allocation"
+    assert_receive {:allocation_requested, allocation_key}
+    assert allocation_key == assignment.sha256 <> ":allocation"
+
+    assert {:ok, %{phase: "allocation_suspended", allocation_id: ^allocation_id}} =
+             WorkPackageClaim.handoff_allocation(input)
+
+    assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
+    assert_receive {:root_witness, "spawn_intent", false}
+    assert_receive {:activation_requested, ^allocation_id, activation_key, "spawn_started"}
+    assert activation_key == assignment.sha256 <> ":activate"
+
+    assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
+    assert_receive {:root_witness, "spawn_intent", true}
+    assert_receive {:activation_requested, ^allocation_id, ^activation_key, "spawn_started"}
+  end
+
+  test "suspended controller rejects mismatched claim binding before allocation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input, lease: lease} = authority_fixture(path)
+    assignment = suspended_assignment(lease)
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      claim_binding: %{issue_id: "different-issue"},
+      test_pid: self()
+    }
+
+    assert {:error, :suspended_controller_claim_binding_invalid} =
+             SuspendedController.allocate(assignment, input, context)
+
+    refute_receive {:allocation_requested, _key}
+    assert :missing = Journal.load(path)
   end
 
   test "rejected suspended activation intent retains its allocation in recovery pending" do
@@ -1353,6 +1461,28 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         assert replay.reservation.generation == reservation.generation
       end
     end
+  end
+
+  defp suspended_assignment(lease) do
+    {:ok, assignment} =
+      ManagedAssignmentBundle.build(%{
+        objective: %{id: "objective-349", identity: "objective-349", content: "Run one bounded disposable assignment"},
+        repository_ref: @repository,
+        base_ref: "refs/remotes/origin/main",
+        branch: "codex/hgs349-disposable",
+        seat: "runner-349",
+        lease: lease,
+        intent_ancestry: ["owner", "delegation-349"],
+        acceptance: %{deliverable: "Disposable Job", evidence: "Exact claim and UID"},
+        context_secret_refs: [],
+        platform: "linux-x86_64",
+        environment_classification: "repository",
+        environment_constraints: ["repository", "no-production-workload"],
+        placement: :internal_beta,
+        target_environment: :rke2
+      })
+
+    assignment
   end
 
   defp authority_fixture(path) do
