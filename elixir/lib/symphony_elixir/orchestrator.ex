@@ -873,8 +873,13 @@ defmodule SymphonyElixir.Orchestrator do
         release_terminal_block_after_cleanup(state, issue, blocked_entry)
 
       !issue_routable?(issue) ->
-        Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
-        release_issue_claim(state, issue.id)
+        if retained_disposable_claim?(state, issue) do
+          Logger.info("Blocked issue ownership changed with a retained disposable allocation: #{issue_context(issue)}; retaining cleanup authority")
+          refresh_blocked_issue_state(state, issue)
+        else
+          Logger.info("Blocked issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; releasing block")
+          release_issue_claim(state, issue.id)
+        end
 
       active_issue_state?(issue.state, active_states) ->
         if verified_pre_spawn_claim_release?(state, issue) do
@@ -892,6 +897,26 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp retained_disposable_claim?(%State{work_package_runtime: runtime} = state, issue)
+       when is_map(runtime) do
+    case WorkPackageClaim.handoff_allocation(claim_input(state, issue)) do
+      {:ok, %{phase: phase, allocation_id: id}}
+      when phase in ["allocation_suspended", "spawn_started"] and is_binary(id) ->
+        true
+
+      {:error, :suspended_allocation_unavailable} ->
+        false
+
+      {:error, _reason} ->
+        true
+
+      _ ->
+        false
+    end
+  end
+
+  defp retained_disposable_claim?(_state, _issue), do: false
 
   defp verified_pre_spawn_claim_release?(%State{work_package_runtime: runtime} = state, issue)
        when is_map(runtime) do
