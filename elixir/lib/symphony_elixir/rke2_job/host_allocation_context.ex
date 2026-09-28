@@ -113,7 +113,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
 
   defp client_context(assignment, config) do
     provider = Map.get(config, :client_context_fun, &HostClientContext.client_context/4)
-    provider.(assignment, :allocate, assignment.sha256 <> ":allocate", config)
+    provider.(assignment, :allocate, assignment.sha256 <> ":allocation", config)
   end
 
   defp prepare_slot(assignment, config, guard_context) do

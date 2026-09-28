@@ -51,12 +51,16 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
          idempotency_key
        )
        when is_binary(digest) do
-    if Regex.match?(@digest, digest) and idempotency_key == digest <> ":" <> Atom.to_string(operation),
+    if Regex.match?(@digest, digest) and idempotency_key == digest <> ":" <> key_operation(operation),
       do: :ok,
       else: :error
   end
 
   defp exact_assignment(_assignment, _operation, _idempotency_key), do: :error
+
+  defp key_operation(:allocate), do: "allocation"
+  defp key_operation(operation) when operation in [:abort_prepare, :abort_confirm], do: "abort_unstarted"
+  defp key_operation(operation), do: Atom.to_string(operation)
 
   defp credential_root(%{credential_root: root}, owner_uid) when is_binary(root) do
     if Path.type(root) == :absolute and Path.expand(root) == root do

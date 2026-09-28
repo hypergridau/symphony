@@ -20,7 +20,7 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
       root: root,
       token_file: token_file,
       assignment: %{sha256: digest, environment: %{target_environment: :rke2}},
-      key: digest <> ":allocate",
+      key: digest <> ":allocation",
       config: %{
         credential_root: root,
         api_server: "https://10.0.14.10:6443",
@@ -57,6 +57,14 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
 
   test "holds an altered assignment or operation key before reading credentials", context do
     assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(
+               context.assignment,
+               :allocate,
+               context.assignment.sha256 <> ":allocate",
+               context.config
+             )
+
+    assert {:error, :rke2_host_client_context_unavailable} =
              HostClientContext.client_context(context.assignment, :activate, context.key, context.config)
 
     assert {:error, :rke2_host_client_context_unavailable} =
@@ -66,6 +74,44 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
                context.key,
                context.config
              )
+  end
+
+  test "uses the adapter's shared abort key for prepare and confirm", context do
+    key = context.assignment.sha256 <> ":abort_unstarted"
+    assert {:ok, _} = HostClientContext.client_context(context.assignment, :abort_prepare, key, context.config)
+    assert {:ok, _} = HostClientContext.client_context(context.assignment, :abort_confirm, key, context.config)
+
+    assert {:error, :rke2_host_client_context_unavailable} =
+             HostClientContext.client_context(
+               context.assignment,
+               :abort_prepare,
+               context.assignment.sha256 <> ":abort_prepare",
+               context.config
+             )
+  end
+
+  test "accepts each adapter operation key and rejects a different phase", context do
+    operations = [
+      allocate: "allocation",
+      activate: "activate",
+      delete: "delete",
+      abort_prepare: "abort_unstarted",
+      abort_confirm: "abort_unstarted",
+      finalize: "finalize"
+    ]
+
+    for {operation, suffix} <- operations do
+      key = context.assignment.sha256 <> ":" <> suffix
+      assert {:ok, _} = HostClientContext.client_context(context.assignment, operation, key, context.config)
+
+      assert {:error, :rke2_host_client_context_unavailable} =
+               HostClientContext.client_context(
+                 context.assignment,
+                 operation,
+                 context.assignment.sha256 <> ":wrong",
+                 context.config
+               )
+    end
   end
 
   test "holds unsafe token custody and malformed token bytes", context do

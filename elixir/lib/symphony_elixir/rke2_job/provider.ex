@@ -23,6 +23,39 @@ defmodule SymphonyElixir.RKE2Job.Provider do
 
   def ensure(_assignment, _opts), do: {:error, :invalid_rke2_job_request}
 
+  @doc "Reads an exact owned allocation without creating or changing a Job."
+  @spec inspect_owned(map(), String.t(), keyword()) :: result()
+  def inspect_owned(assignment, uid, opts)
+      when is_map(assignment) and is_binary(uid) and byte_size(uid) > 0 and is_list(opts) do
+    with {:ok, client, context} <- ports(opts),
+         {:ok, config} <- config(opts),
+         {:ok, expected} <- JobSpec.compile(assignment, config) do
+      inspect_job(client, expected, uid, context)
+    end
+  end
+
+  def inspect_owned(_assignment, _uid, _opts), do: {:error, :invalid_rke2_job_request}
+
+  defp inspect_job(client, expected, uid, context) do
+    namespace = get_in(expected, ["metadata", "namespace"])
+    name = get_in(expected, ["metadata", "name"])
+
+    case client.get_job(namespace, name, context) do
+      {:ok, job} -> verify_inspected_job(job, expected, uid)
+      {:error, :not_found} -> {:held, :job_not_found_for_reconciliation}
+      {:error, reason} -> {:held, {:job_read_failed, reason}}
+      _ -> {:held, :invalid_job_read_response}
+    end
+  end
+
+  defp verify_inspected_job(job, expected, uid) do
+    cond do
+      not JobSpec.owned_job_for_cleanup?(job, expected) -> {:held, :job_identity_or_spec_mismatch}
+      get_in(job, ["metadata", "uid"]) != uid -> {:held, :job_allocation_identity_mismatch}
+      true -> {:ok, job}
+    end
+  end
+
   @doc "Deletes only a previously read, exact matching Job using its Kubernetes UID."
   @spec delete(map(), keyword()) :: :ok | {:held, term()} | {:error, term()}
   def delete(assignment, opts) when is_map(assignment) and is_list(opts) do

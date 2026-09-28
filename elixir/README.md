@@ -319,6 +319,12 @@ reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bou
 configuration to the existing suspended controller. No production host has supplied this
 tuple or admitted a Job yet.
 
+The host Kubernetes context accepts the controller's exact `:allocation` and
+`:abort_unstarted` idempotency keys for allocation and both abort phases. An
+allocated Job can be inspected by its recorded UID without another create,
+registration, or OAuth slot reservation; production restart handoff still needs
+the controller recovery path and cannot yet activate a retained Job.
+
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
 has already been confirmed. This records a local `Failed attempt` outcome with

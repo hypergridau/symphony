@@ -78,7 +78,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert {:ok, context} = HostAllocationContext.prepare(assignment, binding, config)
     assert_receive {:kube_context_requested, digest, :allocate, key}
     assert digest == assignment.sha256
-    assert key == digest <> ":allocate"
+    assert key == digest <> ":allocation"
     assert_receive {:slot_post, url, %{assignmentDigest: ^digest, slotId: "slot-one", claimUid: "pvc-uid-one"}}
     assert String.ends_with?(url, "/reservation-one/codex-auth-slots/reserve")
     assert context.config.auth_slot.lease_id == @lease_id
