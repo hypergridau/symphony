@@ -1,8 +1,9 @@
 defmodule SymphonyElixir.Worker.CLI do
-  @moduledoc "Fixed command-line entrypoint for one suspended RKE2 Job assignment."
+  @moduledoc "Fixed command-line entrypoint for a disposable assignment or tokenless OAuth-cache check."
 
   alias SymphonyElixir.RKE2Job.JobSpec
   alias SymphonyElixir.Worker.Assignment, as: WorkerAssignment
+  alias SymphonyElixir.Worker.AuthCacheVerifier
   alias SymphonyElixir.Worker.OneShot
 
   @assignment_arg "--assignment-json"
@@ -21,8 +22,13 @@ defmodule SymphonyElixir.Worker.CLI do
   end
 
   @doc false
+  def run(args, env, deps \\ %{})
+
   @spec run([String.t()], map(), map()) :: outcome()
-  def run(args, env, deps \\ %{}) when is_list(args) and is_map(env) and is_map(deps) do
+  def run(["--verify-auth-cache"], env, deps) when is_map(env) and is_map(deps),
+    do: AuthCacheVerifier.run(env, deps)
+
+  def run(args, env, deps) when is_list(args) and is_map(env) and is_map(deps) do
     with [@assignment_arg, assignment_json] <- args,
          {:ok, decoded} <- decode_assignment(assignment_json, env),
          outcome <- run_mode(decoded, env, deps) do
