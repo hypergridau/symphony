@@ -11,7 +11,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
   alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
-  alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter}
+  alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter, ResultJournal}
 
   @namespace "frigga"
   @settings ~w(
@@ -95,6 +95,53 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
 
   def reattach(_assignment, _binding, _allocation_id, _config),
     do: {:held, :rke2_retained_allocation_unverified}
+
+  @doc "Rebuilds a terminal context from the durable result and slot binding after Job deletion."
+  @spec reattach_terminal(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
+  def reattach_terminal(assignment, binding, allocation_id, config)
+      when is_map(assignment) and is_map(binding) and is_binary(allocation_id) and is_map(config) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         true <- assignment.repository_ref == config.repository_ref,
+         true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
+         true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
+         {:ok, uid} <- terminal_allocation_uid(allocation_id, preflight_job),
+         {:ok, _observation, slot} <- ResultJournal.load_with_slot(assignment, uid, config.result_journal_root),
+         true <- is_map(slot) and slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
+         {:ok, kube_context} <- terminal_client_context(assignment, config),
+         guard_context = guard_context(config, binding, kube_context),
+         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context),
+         :ok <-
+           slot_guard(config).verify_bound(
+             slot,
+             assignment,
+             %{id: allocation_id, status: :ready},
+             guard_context
+           ) do
+      {:ok, build_context(config, binding, slot, guard_context)}
+    else
+      _ -> {:held, :rke2_terminal_allocation_unverified}
+    end
+  rescue
+    _ -> {:held, :rke2_terminal_allocation_unverified}
+  end
+
+  def reattach_terminal(_assignment, _binding, _allocation_id, _config),
+    do: {:held, :rke2_terminal_allocation_unverified}
+
+  defp terminal_allocation_uid("rke2job:v1:" <> encoded, expected) do
+    with {:ok, bytes} <- Base.url_decode64(encoded, padding: false),
+         {:ok, [1, @namespace, name, uid, digest]} <- Jason.decode(bytes),
+         true <- name == get_in(expected, ["metadata", "name"]),
+         true <- digest == get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-sha256"]),
+         true <- encoded_allocation_id(expected, %{"metadata" => %{"uid" => uid}}) == "rke2job:v1:" <> encoded do
+      {:ok, uid}
+    else
+      _ -> {:held, :rke2_terminal_allocation_unverified}
+    end
+  end
+
+  defp terminal_allocation_uid(_allocation_id, _expected), do: {:held, :rke2_terminal_allocation_unverified}
 
   defp build_context(config, binding, slot, guard_context) do
     %{
@@ -216,6 +263,11 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   defp client_context(assignment, config) do
     provider = Map.get(config, :client_context_fun, &HostClientContext.client_context/4)
     provider.(assignment, :allocate, assignment.sha256 <> ":allocation", config)
+  end
+
+  defp terminal_client_context(assignment, config) do
+    provider = Map.get(config, :client_context_fun, &HostClientContext.client_context/4)
+    provider.(assignment, :finalize, assignment.sha256 <> ":finalize", config)
   end
 
   defp prepare_slot(assignment, config, guard_context) do

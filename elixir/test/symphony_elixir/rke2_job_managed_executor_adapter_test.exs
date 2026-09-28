@@ -255,6 +255,20 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     uid = elem(allocation_uid(allocation), 1)
     assert {:ok, _observation} = ResultJournal.load(assignment, uid, context.root)
+    assert {:ok, _observation, slot} = ResultJournal.load_with_slot(assignment, uid, context.root)
+    assert slot == opts.config.auth_slot
+    assert Agent.get(context.client, & &1.deletes) == [uid]
+
+    changed_slot = put_in(opts, [:config, :auth_slot, :lease_id], "different-lease")
+
+    assert {:held, :job_result_slot_binding_mismatch} =
+             ManagedExecutorAdapter.finalize_terminal_owned(
+               allocation,
+               assignment,
+               key(assignment, :finalize),
+               changed_slot
+             )
+
     assert Agent.get(context.client, & &1.deletes) == [uid]
 
     Agent.update(context.slot_lease, &Map.put(&1, :denied, nil))

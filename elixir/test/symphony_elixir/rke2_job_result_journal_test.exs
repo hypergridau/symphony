@@ -25,6 +25,31 @@ defmodule SymphonyElixir.RKE2JobResultJournalTest do
     assert loaded["result"]["assignment_digest"] == assignment.sha256
   end
 
+  test "retains the exact non-secret OAuth slot binding with the terminal result", %{root: root} do
+    assignment = assignment()
+    observation = observation(assignment)
+
+    slot = %{
+      slot_id: "slot-one",
+      claim_name: "codex-oauth-slot-1",
+      claim_uid: "pvc-uid-one",
+      lease_id: "12345678-1234-4123-8123-123456789abc",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    assert {:ok, path} = ResultJournal.record(assignment, observation, root, slot)
+    assert {:ok, loaded, ^slot} = ResultJournal.load_with_slot(assignment, observation.job_uid, root)
+    assert loaded["job_uid"] == observation.job_uid
+    assert {:ok, ^path} = ResultJournal.record(assignment, observation, root, slot)
+
+    assert {:held, :job_result_journal_conflict} =
+             ResultJournal.record(assignment, observation, root, %{slot | lease_id: "different-lease"})
+
+    refute File.read!(path) =~ "token"
+    refute File.read!(path) =~ "secret"
+  end
+
   test "holds a conflicting observation for the same Job UID", %{root: root} do
     assignment = assignment()
     observation = observation(assignment)
@@ -191,7 +216,7 @@ defmodule SymphonyElixir.RKE2JobResultJournalTest do
     assert {:held, :job_result_journal_read_unavailable} = ResultJournal.load(assignment, observation.job_uid, root)
     :ok = File.rmdir(path)
 
-    :ok = File.write(path, Jason.encode!(%{"schema_version" => 2, "observation" => %{}}))
+    :ok = File.write(path, Jason.encode!(%{"schema_version" => 3, "observation" => %{}}))
     if match?({:unix, _}, :os.type()), do: :ok = File.chmod(path, 0o600)
     assert {:held, :job_result_journal_invalid} = ResultJournal.load(assignment, observation.job_uid, root)
 

@@ -321,7 +321,12 @@ token, verifies the exact Bound PVC UID,
 reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
 configuration to the existing suspended controller. At terminal cleanup, the host
 reads a fresh Kubernetes token for the verifier Job and retains the result and
-cleanup receipts under that private root. No production host has supplied this
+cleanup receipts under that private root. The terminal result record also retains
+the exact non-secret OAuth slot binding before the Job is deleted. After a host
+restart, `HostAllocationContext.reattach_terminal/4` can rebuild the finalization
+context from that record, the exact allocation ID, fresh Kubernetes identity,
+the PVC UID, and Dahlia's still-bound lease without recreating the Job or slot.
+Missing or conflicting records hold cleanup. No production host has supplied this
 tuple or admitted a Job yet.
 
 The host Kubernetes context accepts the controller's exact `:allocation` and
