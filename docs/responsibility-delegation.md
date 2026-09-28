@@ -205,9 +205,13 @@ in journal error messages.
 `ManagedExecutor.AbortResultPublisher` implements the publisher callback over
 this journal. It requires the caller to supply `abort_result_journal_root` in
 the adapter context and to pass the assignment-derived abort-result key; it
-has no default root or fallback. It validates the assignment, allocation and
-typed blocked result before serializing and recording them. A byte-equal retry
-returns the same local reference; a changed allocation under that key holds.
+has no default root or fallback. `ManagedExecutor` passes its previously
+validated provider claim binding into this callback. The publisher validates
+that binding against the assignment, then records the verifier's exact blocked
+JSON fields: status, reference, projection and reservation IDs, issue and
+runner IDs, generation, assignment digest, allocation ID, and abort reason.
+A byte-equal retry returns the same local reference; a changed allocation or
+claim binding under that key holds.
 The callback is not yet composed into a production ManagedExecutor adapter, so
 it does not publish to Dahlia or release capacity. Runtime use still requires
 host configuration, adapter composition and filesystem qualification.

@@ -20,12 +20,12 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     result = blocked_result(assignment)
     key = assignment.sha256 <> ":abort-result"
     reference = reference(key)
-    context = %{abort_result_journal_root: root}
+    context = context(root, assignment)
 
     assert {:ok, ^reference} =
              AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, context)
 
-    expected_bytes = Jason.encode!(result)
+    expected_bytes = blocked_wire_bytes(assignment, allocation, result, reference)
     expected_digest = sha256(expected_bytes)
     binding = binding(assignment, allocation)
 
@@ -43,7 +43,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     key = assignment.sha256 <> ":abort-result"
     original = %{id: "allocation-8", status: :ready}
     changed = %{id: "allocation-9", status: :ready}
-    context = %{abort_result_journal_root: root}
+    context = context(root, assignment)
     reference = reference(key)
 
     assert {:ok, ^reference} =
@@ -52,7 +52,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     assert {:error, :abort_result_journal_conflict} =
              AbortResultPublisher.publish_or_reconcile_abort_result(changed, assignment, result, key, context)
 
-    bytes = Jason.encode!(result)
+    bytes = blocked_wire_bytes(assignment, original, result, reference)
     assert {:ok, ^bytes} = AbortResultJournal.load(root, reference, binding(assignment, original), sha256(bytes))
   end
 
@@ -64,7 +64,13 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     reference = reference(key)
 
     assert {:error, :abort_result_journal_root_unavailable} =
-             AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, %{})
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               result,
+               key,
+               %{claim_binding: claim_binding(assignment)}
+             )
 
     assert {:error, :invalid_abort_result_journal_root} =
              AbortResultPublisher.publish_or_reconcile_abort_result(
@@ -72,11 +78,16 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
                assignment,
                result,
                key,
-               %{abort_result_journal_root: "relative-root"}
+               context("relative-root", assignment)
              )
 
     assert :missing =
-             AbortResultJournal.load(root, reference, binding(assignment, allocation), sha256(Jason.encode!(result)))
+             AbortResultJournal.load(
+               root,
+               reference,
+               binding(assignment, allocation),
+               sha256(blocked_wire_bytes(assignment, allocation, result, reference))
+             )
   end
 
   test "rejects mismatched key, assignment, allocation and typed result before writing", %{root: root} do
@@ -84,7 +95,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     allocation = %{id: "allocation-8", status: :ready}
     result = blocked_result(assignment)
     key = assignment.sha256 <> ":abort-result"
-    context = %{abort_result_journal_root: root}
+    context = context(root, assignment)
 
     assert {:error, :abort_result_idempotency_key_mismatch} =
              AbortResultPublisher.publish_or_reconcile_abort_result(
@@ -93,6 +104,37 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
                result,
                "wrong-key",
                context
+             )
+
+    assert {:error, :abort_result_claim_binding_unavailable} =
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               result,
+               key,
+               %{abort_result_journal_root: root}
+             )
+
+    wrong_claim = put_in(context, [:claim_binding, :reservation_id], "")
+
+    assert {:error, :abort_result_claim_binding_invalid} =
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               result,
+               key,
+               wrong_claim
+             )
+
+    wrong_runner = put_in(context, [:claim_binding, :runner_id], "other-runner")
+
+    assert {:error, :abort_result_claim_binding_invalid} =
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               result,
+               key,
+               wrong_runner
              )
 
     assert {:error, :pre_execution_result_invalid} =
@@ -129,7 +171,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
                root,
                reference(key),
                binding(assignment, allocation),
-               sha256(Jason.encode!(result))
+               sha256(blocked_wire_bytes(assignment, allocation, result, reference(key)))
              )
   end
 
@@ -178,6 +220,37 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
       generation: assignment.lease.generation,
       allocation_id: allocation.id
     }
+  end
+
+  defp context(root, assignment),
+    do: %{abort_result_journal_root: root, claim_binding: claim_binding(assignment)}
+
+  defp claim_binding(assignment) do
+    %{
+      projection_id: "projection-8",
+      reservation_id: "reservation-8",
+      runner_id: "runner-fixture",
+      issue_id: assignment.lease.issue_id,
+      generation: assignment.lease.generation,
+      repository_ref: assignment.repository_ref
+    }
+  end
+
+  defp blocked_wire_bytes(assignment, allocation, result, reference) do
+    claim = claim_binding(assignment)
+
+    Jason.encode!(%{
+      "status" => "blocked",
+      "reference" => reference,
+      "projectionId" => claim.projection_id,
+      "reservationId" => claim.reservation_id,
+      "issueId" => claim.issue_id,
+      "runnerId" => claim.runner_id,
+      "generation" => claim.generation,
+      "assignmentDigest" => assignment.sha256,
+      "allocationId" => allocation.id,
+      "abortReason" => Atom.to_string(result.abort_reason)
+    })
   end
 
   defp reference(key) do

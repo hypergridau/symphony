@@ -4,10 +4,11 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
   `AbortResultJournal`.
 
   The callback accepts only a complete validated assignment, its ready
-  allocation, the assignment-derived idempotency key, an exact blocked-result
-  map, and an explicitly supplied private journal root. It stores the
-  deterministic JSON bytes and returns their stable local reference. It does
-  not contact a provider or attest cleanup release.
+  allocation, the assignment-derived idempotency key, a validated claim
+  binding, an exact blocked-result map, and an explicitly supplied private
+  journal root. It stores the Dahlia verifier's exact blocked-result JSON
+  shape and returns its stable local reference. It does not contact a provider
+  or attest cleanup release.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
@@ -22,10 +23,11 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
          :ok <- Record.validate_allocation(allocation),
          :ok <- validate_idempotency_key(idempotency_key, assignment),
          :ok <- validate_result(result, assignment),
+         {:ok, claim} <- claim_binding(context, assignment),
          {:ok, root} <- journal_root(context),
-         {:ok, result_bytes} <- Jason.encode(result),
          binding = binding(assignment, allocation),
          reference = result_reference(idempotency_key),
+         {:ok, result_bytes} <- Jason.encode(blocked_result(claim, assignment, allocation, result, reference)),
          {:ok, %{reference: ^reference}} <- AbortResultJournal.record(root, reference, binding, result_bytes) do
       {:ok, reference}
     else
@@ -48,6 +50,23 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
 
   defp validate_result(_result, _assignment), do: {:error, :pre_execution_result_invalid}
 
+  defp claim_binding(%{claim_binding: claim}, assignment) when is_map(claim) do
+    required = [:projection_id, :reservation_id, :runner_id, :issue_id, :generation, :repository_ref]
+
+    if Enum.all?(required -- [:generation], fn key -> is_binary(Map.get(claim, key)) and Map.get(claim, key) != "" end) and
+         is_integer(Map.get(claim, :generation)) and Map.get(claim, :generation) > 0 and
+         Map.get(claim, :issue_id) == assignment.lease.issue_id and
+         Map.get(claim, :generation) == assignment.lease.generation and
+         Map.get(claim, :runner_id) == assignment.seat and
+         Map.get(claim, :repository_ref) == assignment.repository_ref do
+      {:ok, claim}
+    else
+      {:error, :abort_result_claim_binding_invalid}
+    end
+  end
+
+  defp claim_binding(_context, _assignment), do: {:error, :abort_result_claim_binding_unavailable}
+
   defp journal_root(%{abort_result_journal_root: root}) when is_binary(root) do
     if Path.type(root) == :absolute,
       do: {:ok, root},
@@ -62,6 +81,21 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
       issue_uuid: assignment.lease.issue_id,
       generation: assignment.lease.generation,
       allocation_id: allocation.id
+    }
+  end
+
+  defp blocked_result(claim, assignment, allocation, result, reference) do
+    %{
+      "status" => "blocked",
+      "reference" => reference,
+      "projectionId" => claim.projection_id,
+      "reservationId" => claim.reservation_id,
+      "issueId" => claim.issue_id,
+      "runnerId" => claim.runner_id,
+      "generation" => claim.generation,
+      "assignmentDigest" => assignment.sha256,
+      "allocationId" => allocation.id,
+      "abortReason" => Atom.to_string(result.abort_reason)
     }
   end
 
