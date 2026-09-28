@@ -191,6 +191,70 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     end
   end
 
+  @doc "Durably records activation intent for the exact suspended allocation; same-ID replay preserves it."
+  @spec begin_suspended_spawn(map(), String.t(), map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def begin_suspended_spawn(journal, key, input, allocation_id)
+      when is_map(input) and is_binary(allocation_id) do
+    case journal.reservations[key] do
+      %{dispatch: dispatch} = reservation ->
+        begin_suspended_dispatch(journal, key, reservation, dispatch, input, allocation_id)
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def begin_suspended_spawn(_journal, _key, _input, _allocation_id),
+    do: {:error, :suspended_allocation_identity_invalid}
+
+  defp begin_suspended_dispatch(
+         journal,
+         key,
+         reservation,
+         %{phase: "allocation_suspended", allocation_id: allocation_id} = dispatch,
+         input,
+         allocation_id
+       ) do
+    cond do
+      not valid_allocation_id?(allocation_id) -> {:error, :suspended_allocation_identity_invalid}
+      dispatch.authority_digest != authority_digest(input) -> {:error, :claim_authority_changed}
+      true -> Journal.put(journal, key, %{reservation | dispatch: Map.put(dispatch, :phase, "spawn_started")})
+    end
+  end
+
+  defp begin_suspended_dispatch(
+         journal,
+         _key,
+         _reservation,
+         %{phase: "spawn_started", allocation_id: allocation_id} = dispatch,
+         input,
+         allocation_id
+       ) do
+    if dispatch.authority_digest == authority_digest(input),
+      do: {:ok, journal},
+      else: {:error, :claim_authority_changed}
+  end
+
+  defp begin_suspended_dispatch(
+         _journal,
+         _key,
+         _reservation,
+         %{phase: "allocation_suspended"},
+         _input,
+         _allocation_id
+       ),
+       do: {:error, :suspended_allocation_identity_changed}
+
+  defp begin_suspended_dispatch(
+         _journal,
+         _key,
+         _reservation,
+         _dispatch,
+         _input,
+         _allocation_id
+       ),
+       do: {:error, :invalid_claim_dispatch_transition}
+
   @doc "Reads an already started exact dispatch for root-only spawn-intent recovery."
   @spec replay_spawn(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def replay_spawn(journal, key, input) do
@@ -256,6 +320,12 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   defp valid_phase?("allocation_suspended", %{allocation_id: allocation_id} = value) do
     map_size(value) == 5 and is_binary(allocation_id) and valid_allocation_id?(allocation_id)
   end
+
+  defp valid_phase?("spawn_started", %{allocation_id: allocation_id} = value) when is_binary(allocation_id),
+    do: map_size(value) == 5 and valid_allocation_id?(allocation_id)
+
+  defp valid_phase?("recovery_pending", %{allocation_id: allocation_id} = value) when is_binary(allocation_id),
+    do: map_size(value) == 5 and valid_allocation_id?(allocation_id)
 
   defp valid_phase?(phase, value) when phase in @phases and phase != "allocation_suspended" do
     (map_size(value) == 4 and not Map.has_key?(value, :allocation_id)) or
