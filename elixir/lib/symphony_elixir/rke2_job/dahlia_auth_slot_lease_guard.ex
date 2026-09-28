@@ -52,6 +52,18 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   def prepare_slot(_assignment, _slot_id, _catalog, _context),
     do: {:held, :codex_auth_slot_reservation_unverified}
 
+  @doc "Reads the bound PVC identity for a retained slot without reserving or changing its lease."
+  @spec verify_claim_uid(map(), term()) :: :ok | {:held, atom()}
+  def verify_claim_uid(%{claim_name: name, claim_uid: uid}, context)
+      when is_binary(name) and is_binary(uid) do
+    case read_claim_uid(context, name) do
+      {:ok, ^uid} -> :ok
+      _ -> {:held, :codex_auth_slot_claim_identity_unverified}
+    end
+  end
+
+  def verify_claim_uid(_slot, _context), do: {:held, :codex_auth_slot_claim_identity_unverified}
+
   @impl true
   def reserve(slot, assignment, context) do
     with :ok <- matching_assignment?(slot, assignment),

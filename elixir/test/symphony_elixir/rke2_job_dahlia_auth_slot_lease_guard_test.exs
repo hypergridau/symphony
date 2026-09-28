@@ -409,6 +409,20 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
              DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, deleting)
   end
 
+  test "retained slot claim UID is checked with a PVC read only" do
+    context = %{pvc_namespace: "frigga", pvc_read_fun: &read_pvc/3}
+
+    assert :ok = DahliaAuthSlotLeaseGuard.verify_claim_uid(@slot, context)
+
+    assert {:held, :codex_auth_slot_claim_identity_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_claim_uid(%{@slot | claim_uid: "replaced-uid"}, context)
+
+    missing_pvc = %{context | pvc_read_fun: fn _, _, _ -> {:error, :not_found} end}
+
+    assert {:held, :codex_auth_slot_claim_identity_unverified} =
+             DahliaAuthSlotLeaseGuard.verify_claim_uid(@slot, missing_pvc)
+  end
+
   defp read_pvc("frigga", "codex-home-one", _context) do
     metadata = %{"namespace" => "frigga", "name" => "codex-home-one", "uid" => @pvc_uid}
 
