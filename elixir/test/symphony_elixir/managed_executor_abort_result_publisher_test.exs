@@ -56,6 +56,38 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     assert {:ok, ^bytes} = AbortResultJournal.load(root, reference, binding(assignment, original), sha256(bytes))
   end
 
+  test "rejects an unsupported abort reason before creating a journal record", %{root: root} do
+    assignment = assignment()
+    allocation = %{id: "allocation-8", status: :ready}
+    key = assignment.sha256 <> ":abort-result"
+    reference = reference(key)
+
+    result = %{
+      assignment_digest: assignment.sha256,
+      abort_reason: :other,
+      outcome: :blocked,
+      summary: "Assignment was blocked before execution.",
+      evidence_ref: "managed-executor:#{assignment.sha256}:other"
+    }
+
+    assert {:error, :pre_execution_result_invalid} =
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               result,
+               key,
+               context(root, assignment)
+             )
+
+    assert :missing =
+             AbortResultJournal.load(
+               root,
+               reference,
+               binding(assignment, allocation),
+               sha256(blocked_wire_bytes(assignment, allocation, result, reference))
+             )
+  end
+
   test "missing and relative roots fail closed without creating records", %{root: root} do
     assignment = assignment()
     allocation = %{id: "allocation-8", status: :ready}
