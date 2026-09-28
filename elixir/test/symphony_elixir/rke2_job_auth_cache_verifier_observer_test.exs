@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RKE2JobAuthCacheVerifierObserverTest do
   use ExUnit.Case, async: true
 
-  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierJobSpec, AuthCacheVerifierObserver}
+  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierJobSpec, AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
 
   @digest String.duplicate("a", 64)
   @image "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("b", 64)
@@ -319,5 +319,31 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierObserverTest do
              AuthCacheVerifierObserver.observe(@slot, @assignment, %{id: "wrong", status: :ready}, context)
 
     assert %{creates: 0, deletes: 0} = Agent.get(agent, & &1)
+  end
+
+  test "release guard invokes the host observer and replays its saved receipt", %{agent: agent, context: context, root: root} do
+    post_fun = fn _url, opts ->
+      send(self(), {:provider_release, Keyword.fetch!(opts, :json)})
+      {:ok, %Req.Response{status: 200, body: %{"data" => %{"released" => true}}}}
+    end
+
+    guard_context = %{
+      base_url: "https://provider.invalid",
+      runner_token: "synthetic-host-token",
+      reservation_id: "reservation-1",
+      result_journal_root: root,
+      auth_cache_verifier_context: context,
+      post_fun: post_fun
+    }
+
+    assert :ok = DahliaAuthSlotLeaseGuard.release(@slot, @assignment, @allocation, guard_context)
+    assert_receive {:provider_release, first}
+    assert first.allocationId == @allocation.id
+    assert first.receipt["authCacheStatus"] == "codex_login_status_authenticated"
+    assert %{creates: 1, deletes: 1} = Agent.get(agent, & &1)
+
+    assert :ok = DahliaAuthSlotLeaseGuard.release(@slot, @assignment, @allocation, guard_context)
+    assert_receive {:provider_release, ^first}
+    assert %{creates: 1, deletes: 1} = Agent.get(agent, & &1)
   end
 end

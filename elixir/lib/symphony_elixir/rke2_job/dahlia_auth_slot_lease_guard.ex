@@ -11,7 +11,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @behaviour SymphonyElixir.RKE2Job.AuthSlotLeaseGuard
 
-  alias SymphonyElixir.RKE2Job.{AuthSlotSpec, HTTPClient, ResultJournal}
+  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, AuthSlotSpec, HTTPClient, ResultJournal}
 
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
@@ -150,7 +150,11 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   end
 
   defp observe_and_record(context, slot, assignment, allocation, namespace, uid, version) do
-    observer = Map.get(context, :cleanup_receipt_fun)
+    observer =
+      Map.get(context, :cleanup_receipt_fun, fn slot, assignment, allocation ->
+        AuthCacheVerifierObserver.observe(slot, assignment, allocation, Map.get(context, :auth_cache_verifier_context))
+      end)
+
     root = Map.get(context, :result_journal_root)
 
     with true <- is_function(observer, 3),
