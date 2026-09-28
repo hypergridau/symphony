@@ -302,10 +302,13 @@ reset provider state, or fabricate a terminal head/cleanup receipt.
 
 The managed spawn path retains the exact claim returned after provider and root-witness
 acknowledgement. It rebuilds the current assignment bundle and rejects a missing or mismatched
-claim before dispatch. A signed RKE2 assignment enters retained claim recovery while the
-disposable controller lacks Job result and cleanup ownership; it cannot fall through to the
-persistent local `AgentRunner`. The source-only `SuspendedController` is not yet wired into
-production dispatch, and no disposable runner has been qualified.
+claim before dispatch. A signed RKE2 assignment cannot fall through to the persistent local
+`AgentRunner`. When the trusted host supplies a disposable RKE2 context and the pause gate is
+open, the serialized dispatcher calls `SuspendedController.allocate/3` to create or reconcile
+one suspended Job and durably bind its exact allocation to the claim. Replay of a journaled
+allocation skips another adapter call. An uncertain allocation keeps the provider claim and
+local lease held. Activation remains unavailable until Job result and cleanup ownership are
+wired into the controller; no disposable runner has been qualified.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination

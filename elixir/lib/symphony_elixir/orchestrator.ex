@@ -38,6 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
+  alias SymphonyElixir.RKE2Job.SuspendedController
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -1714,7 +1715,7 @@ defmodule SymphonyElixir.Orchestrator do
                  dispatch.session_id,
                  dispatch.delegation_id
                ),
-             {:ok, _binding} <-
+             {:ok, binding} <-
                ClaimBinding.from_claim(
                  Map.get(dispatch, :provider_claim),
                  bundle,
@@ -1723,7 +1724,9 @@ defmodule SymphonyElixir.Orchestrator do
           spawn_fenced_issue_with_bundle(
             state,
             refreshed_issue,
-            Map.put(dispatch, :assignment_bundle, bundle)
+            dispatch
+            |> Map.put(:assignment_bundle, bundle)
+            |> Map.put(:claim_binding, binding)
           )
         else
           {:error, reason} ->
@@ -1837,22 +1840,17 @@ defmodule SymphonyElixir.Orchestrator do
          issue,
          %{assignment_bundle: %{environment: %{target_environment: :rke2}}} = dispatch
        ) do
-    reason = if GlobalPause.paused?(), do: :global_pause, else: :disposable_rke2_controller_unavailable
+    context = get_in(state.work_package_runtime || %{}, [:disposable_rke2_context])
 
-    # A signed disposable assignment must never enter the persistent local
-    # AgentRunner path. An existing Job may already be suspended or active
-    # after replay; preserve its exact allocation and local lease for recovery.
-    case WorkPackageClaim.handoff_allocation(claim_input(state, issue)) do
-      {:ok, %{phase: phase, allocation_id: allocation_id}} ->
-        block_claim_recovery(state, issue, {reason, {:suspended_job_retained, phase, allocation_id}})
+    cond do
+      GlobalPause.paused?() ->
+        retain_disposable_claim(state, issue, dispatch, :global_pause)
 
-      {:error, :suspended_allocation_unavailable} ->
-        if reason == :global_pause,
-          do: handle_paused_claim_spawn(state, issue, dispatch),
-          else: recover_post_claim_spawn_failure(state, issue, dispatch, reason)
+      not is_map(context) or not is_map(Map.get(dispatch, :claim_binding)) ->
+        retain_disposable_claim(state, issue, dispatch, :disposable_rke2_controller_unavailable)
 
-      {:error, handoff_reason} ->
-        block_claim_recovery(state, issue, {reason, {:suspended_job_state_uncertain, handoff_reason}})
+      true ->
+        allocate_disposable_job(state, issue, dispatch, Map.put(context, :claim_binding, dispatch.claim_binding))
     end
   end
 
@@ -1875,6 +1873,59 @@ defmodule SymphonyElixir.Orchestrator do
     else
       result = start_claimed_agent(state, issue, dispatch, assignment_bundle, supervisor_identity, runtime)
       handle_claimed_spawn_result(state, issue, dispatch, result)
+    end
+  end
+
+  defp allocate_disposable_job(state, issue, dispatch, context) do
+    input = claim_input(state, issue)
+
+    case WorkPackageClaim.handoff_allocation(input) do
+      {:ok, %{phase: phase, allocation_id: allocation_id}} ->
+        block_claim_recovery(state, issue, {
+          :disposable_rke2_activation_unavailable,
+          {:suspended_job_retained, phase, allocation_id}
+        })
+
+      {:error, :suspended_allocation_unavailable} ->
+        create_disposable_allocation(state, issue, dispatch, context, input)
+
+      {:error, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_allocation_state_uncertain, reason})
+    end
+  end
+
+  defp create_disposable_allocation(state, issue, dispatch, context, input) do
+    case SuspendedController.allocate(dispatch.assignment_bundle, input, context) do
+      {:ok, %{id: allocation_id}} ->
+        # Allocation is durably bound to the claim, but activation remains
+        # gated until the host owns terminal result and cleanup reconciliation.
+        block_claim_recovery(state, issue, {
+          :disposable_rke2_activation_unavailable,
+          {:suspended_job_retained, :allocation_suspended, allocation_id}
+        })
+
+      {:held, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
+
+      {:error, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
+    end
+  end
+
+  defp retain_disposable_claim(state, issue, dispatch, reason) do
+    # A signed disposable assignment must never enter the persistent local
+    # AgentRunner path. Preserve any suspended allocation and its local lease.
+    case WorkPackageClaim.handoff_allocation(claim_input(state, issue)) do
+      {:ok, %{phase: phase, allocation_id: allocation_id}} ->
+        block_claim_recovery(state, issue, {reason, {:suspended_job_retained, phase, allocation_id}})
+
+      {:error, :suspended_allocation_unavailable} ->
+        if reason == :global_pause,
+          do: handle_paused_claim_spawn(state, issue, dispatch),
+          else: recover_post_claim_spawn_failure(state, issue, dispatch, reason)
+
+      {:error, handoff_reason} ->
+        block_claim_recovery(state, issue, {reason, {:suspended_job_state_uncertain, handoff_reason}})
     end
   end
 
