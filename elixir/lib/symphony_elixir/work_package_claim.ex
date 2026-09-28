@@ -170,6 +170,43 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
+  @doc "Durably binds a ready, still-suspended allocation to the confirmed claim for recovery."
+  @spec record_suspended_allocation(input(), %{id: String.t(), status: :ready}) :: :ok | {:error, term()}
+  def record_suspended_allocation(input, %{id: allocation_id, status: :ready} = allocation)
+      when is_map(input) and map_size(allocation) == 2 and is_binary(allocation_id) do
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         {:ok, journal} <- Dispatch.record_suspended_allocation(journal, key, input, allocation_id),
+         :ok <- Journal.save(input.journal_path, journal) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      nil -> {:error, :claim_recovery_journal_missing}
+      error -> error
+    end
+  end
+
+  def record_suspended_allocation(_input, _allocation), do: {:error, :suspended_allocation_identity_invalid}
+
+  @doc "Returns the exact recorded suspended allocation for controlled resumption."
+  @spec suspended_allocation(input()) :: {:ok, String.t()} | {:error, term()}
+  def suspended_allocation(input) when is_map(input) do
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         {:ok, reservation} <- Dispatch.find(journal, authority.issue_id, input.managed_project_profile_id, authority.repository_ref, authority.generation),
+         :ok <- reservation_matches_authority(reservation, authority),
+         %{phase: "allocation_suspended", allocation_id: allocation_id} <- reservation.dispatch do
+      {:ok, allocation_id}
+    else
+      :missing -> {:error, :claim_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :suspended_allocation_unavailable}
+    end
+  end
+
   @doc "Builds the provider HMAC canonical JSON in wire-field order."
   @spec canonical_json(map()) :: {:ok, String.t()} | {:error, term()}
   def canonical_json(attestation) when is_map(attestation) do

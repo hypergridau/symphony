@@ -106,6 +106,87 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
     assert {:ok, ^pending} = Journal.load(path)
   end
 
+  test "a suspended allocation survives pause and restart but cannot enter the local spawn path", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+    allocation_id = "rke2job:v1:exact-allocation"
+    {:ok, allocated} = Dispatch.record_suspended_allocation(confirmed, key, @input, allocation_id)
+    assert {:ok, replayed} = Dispatch.record_suspended_allocation(allocated, key, @input, allocation_id)
+    assert replayed.reservations[key].dispatch.allocation_id == allocation_id
+
+    reservation = allocated.reservations[key]
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == allocation_id
+    refute Dispatch.ready?(reservation, DateTime.to_unix(@now, :millisecond) + 999_999)
+    assert {:error, :suspended_allocation_controller_required} = Dispatch.begin_spawn(allocated, key, @input)
+
+    assert {:error, :suspended_allocation_controller_required} =
+             Dispatch.submit(allocated, key, @input, DateTime.add(@now, 60, :second))
+
+    {:ok, paused} = Dispatch.begin_recovery(allocated, key, @input)
+    assert paused.reservations[key].dispatch == reservation.dispatch
+    assert {:ok, persisted} = round_trip(paused)
+    assert {:ok, ^reservation} = Dispatch.find(persisted, "issue", "profile", "repo", 1)
+
+    assert {:error, :suspended_allocation_controller_required} =
+             Dispatch.retry_status(persisted.reservations[key], DateTime.to_unix(@now, :millisecond) + 999_999)
+  end
+
+  test "a suspended allocation cannot be rebound to another allocation", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+    {:ok, allocated} = Dispatch.record_suspended_allocation(confirmed, key, @input, "rke2job:v1:first")
+
+    assert {:error, :suspended_allocation_identity_changed} =
+             Dispatch.record_suspended_allocation(allocated, key, @input, "rke2job:v1:second")
+  end
+
+  test "a suspended phase without an allocation identity is invalid" do
+    assert {:error, :invalid_dispatch_journal} =
+             Dispatch.decode(%{
+               "phase" => "allocation_suspended",
+               "attempts" => 1,
+               "retry_at_ms" => 1,
+               "authority_digest" => String.duplicate("a", 64),
+               "allocation_id" => nil
+             })
+  end
+
+  test "legacy dispatch rows decode with no allocation handoff" do
+    assert {:ok, %{phase: "confirmed", allocation_id: nil}} =
+             Dispatch.decode(%{
+               "phase" => "confirmed",
+               "attempts" => 1,
+               "retry_at_ms" => 1,
+               "authority_digest" => String.duplicate("a", 64)
+             })
+  end
+
+  test "legacy in-memory spawn markers remain valid journal rows", %{journal: journal, key: key} do
+    reservation =
+      Map.put(journal.reservations[key], :dispatch, %{
+        phase: "spawn_started",
+        attempts: 1,
+        retry_at_ms: 0,
+        authority_digest: String.duplicate("a", 64)
+      })
+
+    legacy = %{journal | reservations: Map.put(journal.reservations, key, reservation)}
+    path = Path.join(System.tmp_dir!(), "claim-legacy-spawn-marker-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+
+    assert :ok = Journal.save(path, legacy)
+    assert {:ok, loaded} = Journal.load(path)
+    assert loaded.reservations[key].dispatch.phase == "spawn_started"
+    assert loaded.reservations[key].dispatch.allocation_id == nil
+  end
+
+  defp round_trip(journal) do
+    path = Path.join(System.tmp_dir!(), "claim-suspended-allocation-#{System.unique_integer([:positive])}.json")
+    on_exit(fn -> File.rm(path) end)
+    with :ok <- Journal.save(path, journal), do: Journal.load(path)
+  end
+
   test "a lost provider acknowledgement can be fenced without a second claim", %{journal: journal, key: key} do
     {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
     {:ok, pending} = Dispatch.begin_recovery(submitted, key, @input)

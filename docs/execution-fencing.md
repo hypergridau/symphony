@@ -77,3 +77,11 @@ execution fence, and responsibility graph unchanged. No worker task starts. This
 is a fail-closed hold, not a durable blocked marker: restart recovery or resumption
 from this exact paused-claim state is not yet qualified. Do not infer that the
 provider claim was released or safe to replay from the in-memory block alone.
+
+The claim journal also defines a source-only suspended-allocation handoff. A
+caller may persist the exact ID returned by a ready RKE2 allocation as
+`allocation_suspended`; pause recovery preserves that phase and ID, and the local
+`begin_spawn` path rejects it until a managed controller owns resumption. This
+contract is not wired into the orchestrator: production does not yet persist,
+reconcile, activate, or clean up RKE2 allocations through this path, and restart
+resumption remains unqualified.

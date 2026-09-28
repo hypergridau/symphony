@@ -48,6 +48,43 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "submitted"
   end
 
+  test "paused managed claim retains its exact suspended allocation for controller recovery" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    parent = self()
+
+    input = %{
+      input
+      | host_witness_fun: fn request ->
+          send(parent, {:claim_witness, request["operation"]})
+          {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
+
+    allocation_id = "rke2job:v1:fixture-allocation"
+    assert :ok = WorkPackageClaim.record_suspended_allocation(input, %{id: allocation_id, status: :ready})
+    assert :ok = WorkPackageClaim.begin_paused_recovery(input)
+    assert {:ok, ^allocation_id} = WorkPackageClaim.suspended_allocation(input)
+    assert {:error, :suspended_allocation_controller_required} = WorkPackageClaim.begin_spawn(input)
+
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == allocation_id
+    assert_receive {:claim_witness, "claim_intent"}
+    assert_receive {:claim_witness, "claim_bound"}
+    refute_receive {:claim_witness, "spawn_intent"}
+  end
+
   test "expired graph authority cannot submit a new provider claim" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
