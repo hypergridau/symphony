@@ -11,9 +11,10 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   import Bitwise, only: [band: 2]
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.ResultReader
+  alias SymphonyElixir.RKE2Job.{AuthSlotSpec, ResultReader}
 
-  @schema_version 1
+  @result_schema_version 2
+  @cleanup_schema_version 1
   @max_cleanup_receipts 8
   @max_bytes 8_192
   @uid ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\z/
@@ -22,8 +23,12 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   @observation_keys ~w(job_uid job_resource_version pod_uid pod_resource_version pod_list_resource_version exit_code result)
 
   @spec record(map(), map(), Path.t()) :: {:ok, Path.t()} | {:held, atom()} | {:error, atom()}
-  def record(assignment, observation, root) do
-    with {:ok, payload} <- payload(assignment, observation),
+  def record(assignment, observation, root), do: record(assignment, observation, root, nil)
+
+  @doc "Persists the terminal result and non-secret OAuth slot binding in one immutable record before Job deletion."
+  @spec record(map(), map(), Path.t(), map() | nil) :: {:ok, Path.t()} | {:held, atom()} | {:error, atom()}
+  def record(assignment, observation, root, slot) do
+    with {:ok, payload} <- payload(assignment, observation, slot),
          {:ok, path} <- path(root, assignment.sha256, payload["observation"]["job_uid"]),
          {:ok, bytes} <- Jason.encode(payload),
          true <- byte_size(bytes) <= @max_bytes do
@@ -42,6 +47,16 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
 
   @spec load(map(), String.t(), Path.t()) :: {:ok, map()} | :missing | {:held, atom()} | {:error, atom()}
   def load(assignment, uid, root) do
+    case load_with_slot(assignment, uid, root) do
+      {:ok, observation, _slot} -> {:ok, observation}
+      other -> other
+    end
+  end
+
+  @doc "Returns a journaled result with its exact slot binding for terminal replay after Job deletion."
+  @spec load_with_slot(map(), String.t(), Path.t()) ::
+          {:ok, map(), map() | nil} | :missing | {:held, atom()} | {:error, atom()}
+  def load_with_slot(assignment, uid, root) do
     with :ok <- valid_assignment?(assignment),
          true <- valid_uid?(uid),
          {:ok, path} <- path(root, assignment.sha256, uid) do
@@ -144,7 +159,13 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   defp cleanup_payload(assignment, uid, receipt) do
     with :ok <- valid_digest_assignment?(assignment),
          true <- valid_uid?(uid) and is_map(receipt) and receipt["jobUid"] == uid do
-      {:ok, %{"schema_version" => @schema_version, "assignment_digest" => assignment.sha256, "job_uid" => uid, "receipt" => receipt}}
+      {:ok,
+       %{
+         "schema_version" => @cleanup_schema_version,
+         "assignment_digest" => assignment.sha256,
+         "job_uid" => uid,
+         "receipt" => receipt
+       }}
     else
       _ -> {:error, :invalid_job_cleanup_receipt}
     end
@@ -205,11 +226,13 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   end
 
   defp decode_existing(bytes, assignment, uid) when byte_size(bytes) <= @max_bytes do
-    with {:ok, %{"schema_version" => @schema_version, "observation" => observation} = payload} <- Jason.decode(bytes),
-         true <- Map.keys(payload) |> Enum.sort() |> Kernel.==(Enum.sort(~w(schema_version observation))),
-         {:ok, expected} <- payload(assignment, observation),
+    with {:ok, payload} <- Jason.decode(bytes),
+         %{"schema_version" => @result_schema_version, "observation" => observation, "auth_slot" => slot} <- payload,
+         true <- Map.keys(payload) |> Enum.sort() |> Kernel.==(Enum.sort(~w(schema_version observation auth_slot))),
+         {:ok, normalized_slot} <- normalize_slot(assignment, slot),
+         {:ok, expected} <- payload(assignment, observation, normalized_slot),
          true <- observation["job_uid"] == uid and expected == payload do
-      {:ok, observation}
+      {:ok, observation, normalized_slot}
     else
       _ -> {:held, :job_result_journal_invalid}
     end
@@ -217,15 +240,50 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
 
   defp decode_existing(_bytes, _assignment, _uid), do: {:held, :job_result_journal_invalid}
 
-  defp payload(assignment, observation) do
+  defp payload(assignment, observation, slot) do
     with :ok <- valid_assignment?(assignment),
          {:ok, normalized} <- normalize_observation(observation),
+         {:ok, normalized_slot} <- normalize_slot(assignment, slot),
          true <- valid_observation?(normalized, assignment) do
-      {:ok, %{"schema_version" => @schema_version, "observation" => normalized}}
+      {:ok,
+       %{
+         "schema_version" => @result_schema_version,
+         "observation" => normalized,
+         "auth_slot" => slot_payload(normalized_slot)
+       }}
     else
       _ -> {:error, :invalid_job_result_journal_record}
     end
   end
+
+  defp normalize_slot(_assignment, nil), do: {:ok, nil}
+
+  defp normalize_slot(assignment, slot) when is_map(slot) do
+    keys = ~w(slot_id claim_name claim_uid lease_id assignment_sha256 seat)a
+
+    normalized =
+      if Enum.all?(Map.keys(slot), &is_atom/1),
+        do: slot,
+        else: Map.new(keys, fn key -> {key, Map.get(slot, Atom.to_string(key))} end)
+
+    if map_size(slot) == length(keys) and
+         Enum.sort(Map.keys(normalized)) == Enum.sort(keys) and
+         match?(
+           {:ok, _},
+           AuthSlotSpec.compile(assignment, normalized, %{normalized.slot_id => normalized.claim_name})
+         ) do
+      {:ok, normalized}
+    else
+      {:error, :invalid_job_result_journal_record}
+    end
+  rescue
+    _ -> {:error, :invalid_job_result_journal_record}
+  end
+
+  defp normalize_slot(_assignment, _slot), do: {:error, :invalid_job_result_journal_record}
+
+  defp slot_payload(nil), do: nil
+  defp slot_payload(slot), do: Map.new(slot, fn {key, value} -> {Atom.to_string(key), value} end)
 
   defp normalize_observation(observation) when is_map(observation) do
     if Enum.all?(Map.keys(observation), &is_atom/1) do

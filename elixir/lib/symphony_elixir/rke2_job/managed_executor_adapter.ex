@@ -213,23 +213,26 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
 
   defp terminal_checkpoint(assignment, uid, ports, client_context, context) do
     root = if is_map(context), do: Map.get(context, :result_journal_root), else: nil
+    slot = Map.get(ports.config, :auth_slot)
 
-    case ResultJournal.load(assignment, uid, root) do
-      {:ok, observation} -> {:ok, observation}
-      :missing -> read_and_journal_terminal(assignment, uid, ports, client_context, root)
+    case ResultJournal.load_with_slot(assignment, uid, root) do
+      {:ok, observation, ^slot} -> {:ok, observation}
+      {:ok, _observation, _other_slot} -> {:held, :job_result_slot_binding_mismatch}
+      :missing -> read_and_journal_terminal(assignment, uid, ports, client_context, root, slot)
       other -> other
     end
   end
 
-  defp read_and_journal_terminal(assignment, uid, ports, client_context, root) do
+  defp read_and_journal_terminal(assignment, uid, ports, client_context, root, slot) do
     with {:ok, observation} <-
            ResultReader.read(assignment, uid,
              client: ports.client,
              client_context: client_context,
              config: ports.config
            ),
-         {:ok, _path} <- ResultJournal.record(assignment, observation, root) do
-      ResultJournal.load(assignment, uid, root)
+         {:ok, _path} <- ResultJournal.record(assignment, observation, root, slot),
+         {:ok, recorded, ^slot} <- ResultJournal.load_with_slot(assignment, uid, root) do
+      {:ok, recorded}
     end
   end
 

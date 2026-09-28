@@ -2,7 +2,8 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec}
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, ResultJournal}
+  alias SymphonyElixir.Worker.CLI
 
   defmodule ReadOnlySlotGuard do
     def verify_claim_uid(_slot, _context) do
@@ -197,6 +198,87 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
 
     assert {:held, :rke2_retained_allocation_unverified} =
              HostAllocationContext.reattach(assignment, binding, allocation_id, config)
+
+    refute_receive :claim_uid_verified
+    refute_receive :lease_binding_verified
+  end
+
+  test "reattaches terminal cleanup after Job deletion from the durable result and slot" do
+    assignment = assignment()
+    binding = claim_binding(assignment)
+    {:ok, base} = HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
+    root = Path.join(System.tmp_dir!(), "symphony-terminal-reattach-#{System.unique_integer([:positive])}")
+    :ok = File.mkdir_p(root)
+    if match?({:unix, _}, :os.type()), do: :ok = File.chmod(root, 0o700)
+    if match?({:win32, _}, :os.type()), do: Process.put(:result_journal_windows_test_only, true)
+    on_exit(fn -> File.rm_rf(root) end)
+
+    slot = %{
+      slot_id: base.slot_id,
+      claim_name: base.claim_name,
+      claim_uid: "pvc-uid-one",
+      lease_id: @lease_id,
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    result =
+      CLI.base_result(
+        %{
+          subject: %{
+            assignmentDigest: assignment.sha256,
+            issueUuid: assignment.lease.issue_id,
+            generation: assignment.lease.generation,
+            repositoryRef: assignment.repository_ref,
+            branchRef: "refs/heads/" <> assignment.branch
+          }
+        },
+        "preflight_passed",
+        "auth_slot_required"
+      )
+      |> Map.new(fn {key, value} -> {Atom.to_string(key), value} end)
+
+    observation = %{
+      job_uid: "job-uid-one",
+      job_resource_version: "job-rv-one",
+      pod_uid: "pod-uid-one",
+      pod_resource_version: "pod-rv-one",
+      pod_list_resource_version: "list-rv-one",
+      exit_code: 0,
+      result: result
+    }
+
+    assert {:ok, _path} = ResultJournal.record(assignment, observation, root, slot)
+    {:ok, expected} = JobSpec.compile(assignment, %{namespace: "frigga", image: base.image, repository_id: base.repository_id})
+
+    allocation_id =
+      "rke2job:v1:" <>
+        Base.url_encode64(Jason.encode!([1, "frigga", expected["metadata"]["name"], observation.job_uid, assignment.sha256]), padding: false)
+
+    caller = self()
+
+    config =
+      base
+      |> Map.put(:result_journal_root, root)
+      |> Map.put(:slot_guard, ReadOnlySlotGuard)
+      |> Map.put(:client_context_fun, fn _assignment, :finalize, key, _config ->
+        send(caller, {:finalize_context, key})
+        {:ok, %{synthetic: true}}
+      end)
+      |> Map.put(:job_read_fun, fn _, _, _ -> flunk("terminal replay must not require the deleted Job") end)
+
+    assert {:ok, context} = HostAllocationContext.reattach_terminal(assignment, binding, allocation_id, config)
+    assert context.config.auth_slot == slot
+    assert context.result_journal_root == root
+    assert_receive {:finalize_context, finalize_key}
+    assert finalize_key == assignment.sha256 <> ":finalize"
+    assert_receive :claim_uid_verified
+    assert_receive :lease_binding_verified
+
+    altered_id = String.replace(allocation_id, "rke2job:v1:", "rke2job:v2:")
+
+    assert {:held, :rke2_terminal_allocation_unverified} =
+             HostAllocationContext.reattach_terminal(assignment, binding, altered_id, config)
 
     refute_receive :claim_uid_verified
     refute_receive :lease_binding_verified
