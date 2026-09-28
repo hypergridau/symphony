@@ -202,9 +202,15 @@ ancestors writable by another owner hold the operation in place. Reads require
 canonical JSON and recheck the opened path's file identity after reading, so
 duplicate keys and observed path swaps are rejected. Result bytes never appear
 in journal error messages.
-This module is not wired into the adapter publisher or the production executor;
-its filesystem durability and host permissions require deployment qualification
-before runtime use.
+`ManagedExecutor.AbortResultPublisher` implements the publisher callback over
+this journal. It requires the caller to supply `abort_result_journal_root` in
+the adapter context and to pass the assignment-derived abort-result key; it
+has no default root or fallback. It validates the assignment, allocation and
+typed blocked result before serializing and recording them. A byte-equal retry
+returns the same local reference; a changed allocation under that key holds.
+The callback is not yet composed into a production ManagedExecutor adapter, so
+it does not publish to Dahlia or release capacity. Runtime use still requires
+host configuration, adapter composition and filesystem qualification.
 
 The slotted suspended-Job abort source path is split into
 prepare_abort_unstarted_owned/4 and confirm_abort_unstarted_owned/6. The first
