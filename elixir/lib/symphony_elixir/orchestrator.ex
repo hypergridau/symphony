@@ -1835,6 +1835,30 @@ defmodule SymphonyElixir.Orchestrator do
   defp spawn_fenced_issue_with_bundle(
          %State{} = state,
          issue,
+         %{assignment_bundle: %{environment: %{target_environment: :rke2}}} = dispatch
+       ) do
+    reason = if GlobalPause.paused?(), do: :global_pause, else: :disposable_rke2_controller_unavailable
+
+    # A signed disposable assignment must never enter the persistent local
+    # AgentRunner path. An existing Job may already be suspended or active
+    # after replay; preserve its exact allocation and local lease for recovery.
+    case WorkPackageClaim.handoff_allocation(claim_input(state, issue)) do
+      {:ok, %{phase: phase, allocation_id: allocation_id}} ->
+        block_claim_recovery(state, issue, {reason, {:suspended_job_retained, phase, allocation_id}})
+
+      {:error, :suspended_allocation_unavailable} ->
+        if reason == :global_pause,
+          do: handle_paused_claim_spawn(state, issue, dispatch),
+          else: recover_post_claim_spawn_failure(state, issue, dispatch, reason)
+
+      {:error, handoff_reason} ->
+        block_claim_recovery(state, issue, {reason, {:suspended_job_state_uncertain, handoff_reason}})
+    end
+  end
+
+  defp spawn_fenced_issue_with_bundle(
+         %State{} = state,
+         issue,
          %{
            worker_host: worker_host,
            token: token,

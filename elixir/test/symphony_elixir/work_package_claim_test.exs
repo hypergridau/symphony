@@ -481,10 +481,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "submitted"
   end
 
-  test "managed final pause read precedes the durable spawn marker" do
+  test "local claimed worker final pause read precedes the durable spawn marker" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
-    %{input: input, token: token, lease: lease} = authority_fixture(path)
+    %{input: input} = authority_fixture(path)
     input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Spawn order"})
 
     previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
@@ -539,9 +539,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     :erlang.trace_pattern(spawn_pattern, true, [:local])
     :erlang.trace(self(), true, [:call, {:tracer, tracer}])
 
-    after_spawn =
+    start_result =
       try do
-        Orchestrator.spawn_fenced_issue_for_test(state, issue, token, lease.session_id, "delegation-349", lease)
+        Orchestrator.start_claimed_worker_for_test(state, issue, fn -> :ok end)
       after
         :erlang.trace(self(), false, [:call])
         :erlang.trace_pattern(pause_pattern, false, [:local])
@@ -564,21 +564,21 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     final_gate = {SymphonyElixir.GlobalPause, :paused?}
     durable_marker = {WorkPackageClaim, :begin_spawn}
     marker_index = Enum.find_index(calls, &(&1 == durable_marker))
-    assert is_integer(marker_index), inspect({calls, after_spawn.blocked})
+    assert is_integer(marker_index), inspect({calls, start_result})
     assert final_gate in Enum.take(calls, marker_index)
     refute final_gate in Enum.drop(calls, marker_index + 1)
 
-    assert after_spawn.running == %{}
+    assert match?({:error, _reason}, start_result)
     assert Task.Supervisor.children(task_supervisor) == []
     assert {:ok, journal_after_spawn} = Journal.load(path)
     [{_key, reservation_after_spawn}] = Map.to_list(journal_after_spawn.reservations)
     assert reservation_after_spawn.dispatch.phase == "spawn_started"
   end
 
-  test "real orchestrator snapshot waits for a managed spawn already past its final gate" do
+  test "real orchestrator snapshot waits for a local claimed spawn already past its final gate" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
-    %{input: input, token: token, lease: lease} = authority_fixture(path)
+    %{input: input} = authority_fixture(path)
     input = with_assignment_manifest(input, %Issue{id: @issue_id, identifier: "HGS-349", title: "Managed barrier"})
 
     previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
@@ -667,10 +667,14 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       }
     end)
 
+    parent = self()
+
     dispatch =
       Task.async(fn ->
         :sys.replace_state(orchestrator, fn state ->
-          Orchestrator.spawn_fenced_issue_for_test(state, issue, token, lease.session_id, "delegation-349", lease)
+          start_result = Orchestrator.start_claimed_worker_for_test(state, issue, fn -> :ok end)
+          send(parent, {:managed_start_result, start_result})
+          state
         end)
       end)
 
@@ -717,9 +721,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assert Task.yield(snapshot, 0) == nil
     assert :ok = :sys.resume(held_supervisor)
-    assert %Orchestrator.State{running: running_state, blocked: blocked_state} = Task.await(dispatch, 5_000)
+    assert_receive {:managed_start_result, {:error, _reason}}, 5_000
+    assert %Orchestrator.State{running: running_state} = Task.await(dispatch, 5_000)
     assert running_state == %{}
-    assert Map.has_key?(blocked_state, @issue_id)
     assert %{pause_gate: gate, running: running} = Task.await(snapshot, 5_000)
     assert gate.transition_epoch == epoch
     assert gate.paused?
@@ -1089,6 +1093,87 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
   end
 
+  test "signed RKE2 assignment retains its claim without starting a persistent local worker" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Disposable assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    {blocked, runtime} = post_claim_revalidation_failure(path, issue, issue)
+
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "disposable_rke2_controller_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, [retained]} = Recovery.unstarted_claims(runtime, blocked.execution_fence)
+    assert retained.dispatch.phase == "recovery_pending"
+    assert retained.dispatch.allocation_id == nil
+    assert retained.reservation_id == "reservation-349"
+    assert retained.reservation_nonce == "nonce-349"
+  end
+
+  test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
+    path = temp_path()
+    pause_root = temp_path()
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    File.write!(pause_path, "running\n")
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path),
+        do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path),
+        else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+
+      File.rm_rf(path)
+      File.rm_rf(pause_root)
+    end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Suspended assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    allocation_id = "rke2job:v1:fixture-allocation"
+
+    before_dispatch = fn input ->
+      assert :ok = WorkPackageClaim.record_suspended_allocation(input, %{id: allocation_id, status: :ready})
+      File.write!(pause_path, "paused\n")
+    end
+
+    {blocked, runtime} =
+      post_claim_revalidation_failure(path, issue, issue, before_dispatch_fun: before_dispatch)
+
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "suspended_job_retained"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, journal} = Journal.load(path)
+    [retained] = Map.values(journal.reservations)
+    assert retained.dispatch.phase == "allocation_suspended"
+    assert retained.dispatch.allocation_id == allocation_id
+    assert retained.reservation_id == "reservation-349"
+
+    assert {:ok, restarted_fence} =
+             ExecutionFence.mark_unreconciled_after_restart(blocked.execution_fence)
+
+    assert {:ok, restarted_graph} =
+             ResponsibilityGraph.mark_unreconciled_after_restart(blocked.responsibility_graph)
+
+    assert {:error, :suspended_allocation_controller_required} =
+             Recovery.prepare(runtime, restarted_fence, restarted_graph, issue, nil, System.system_time(:millisecond))
+  end
+
   test "managed spawn rejects a claim for another issue before starting a worker" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1165,23 +1250,53 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
   end
 
-  test "expiry after spawn_started releases the local lease only after pre-witness fencing" do
+  test "expiry after local spawn_started fences the claim before a root witness" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
-    issue = %Issue{id: @issue_id, identifier: "HGS-349", title: "Signed objective", state: "Todo", assignee_id: "owner", dispatchable: true}
+    %{input: input} = authority_fixture(path)
+    expiry = input.responsibility_graph.delegations["delegation-349"].expires_at_ms
+    parent = self()
 
-    {after_preflight, _runtime} =
-      post_claim_revalidation_failure(path, issue, issue, spawn_expiry_boundary: true)
+    input = %{
+      input
+      | host_witness_fun: fn request ->
+          send(parent, {:root_witness, request["operation"]})
 
-    assert Map.has_key?(after_preflight.blocked, @issue_id)
-    assert after_preflight.running == %{}
-    assert after_preflight.blocked[@issue_id].error =~ "pre_spawn_authority_expired"
-    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
-    assert after_preflight.execution_fence.executions[@issue_id].leases["worker-349"].release_reason == :spawn_failed
-    assert after_preflight.responsibility_graph.delegations["delegation-349"].runtime_lease == nil
+          {:ok,
+           %{
+             "ok" => true,
+             "receipt" => %{
+               "version" => 1,
+               "sequence" => 1,
+               "hash" => String.duplicate("a", 64),
+               "replayed" => false
+             }
+           }}
+        end
+    }
+
+    request_fun = fn url, _options ->
+      payload =
+        if String.ends_with?(url, "/reservations/by-issue"),
+          do: reservation_payload(),
+          else: claim_result_payload()
+
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assert {:error, {:pre_spawn_recovery_pending, _reason}} =
+             WorkPackageClaim.begin_spawn(input, now_fun: spawn_expiry_clock(expiry))
+
     assert {:ok, journal} = Journal.load(path)
     [{_key, reservation}] = Map.to_list(journal.reservations)
     assert reservation.dispatch.phase == "recovery_pending"
+    refute_receive {:root_witness, "spawn_intent"}
   end
 
   test "root pause denial after spawn_started starts no child and releases the local lease" do
@@ -1733,11 +1848,11 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     assert {:ok, claim} = WorkPackageClaim.claim(input, request_fun: request_fun, now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end)
 
+    if before_dispatch = Keyword.get(opts, :before_dispatch_fun), do: before_dispatch.(input)
+
     state = maybe_reject_spawn_witness(state, opts)
 
     state = expire_runtime_delegations(state, graph_path, Keyword.get(opts, :graph_expiry_ms))
-
-    state = maybe_add_spawn_expiry_clock(state, input, opts)
 
     provider_claim =
       case Keyword.get(opts, :provider_claim_override, claim) do
@@ -1757,26 +1872,19 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     }
 
     after_preflight =
-      cond do
-        Keyword.get(opts, :spawn_expiry_boundary, false) ->
-          Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
-            {:ok, [refreshed_issue]}
-          end)
-
-        Keyword.get(opts, :spawn_directly, false) ->
-          Orchestrator.spawn_fenced_issue_for_test(
-            state,
-            issue,
-            token,
-            lease.session_id,
-            "delegation-349",
-            lease
-          )
-
-        true ->
-          Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
-            {:ok, [refreshed_issue]}
-          end)
+      if Keyword.get(opts, :spawn_directly, false) do
+        Orchestrator.spawn_fenced_issue_for_test(
+          state,
+          issue,
+          token,
+          lease.session_id,
+          "delegation-349",
+          lease
+        )
+      else
+        Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
+          {:ok, [refreshed_issue]}
+        end)
       end
 
     {after_preflight, runtime}
@@ -1812,16 +1920,6 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
       _ ->
         state
-    end
-  end
-
-  defp maybe_add_spawn_expiry_clock(state, input, opts) do
-    if Keyword.get(opts, :spawn_expiry_boundary, false) do
-      expiry = input.responsibility_graph.delegations["delegation-349"].expires_at_ms
-      now_fun = spawn_expiry_clock(expiry)
-      %{state | work_package_runtime: Map.put(state.work_package_runtime, :now_fun, now_fun)}
-    else
-      state
     end
   end
 
