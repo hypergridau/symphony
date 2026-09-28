@@ -58,7 +58,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       input
       | host_witness_fun: fn request ->
           send(parent, {:claim_witness, request["operation"]})
-          {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => false}}}
+          replayed = request["replayOnly"] == true
+          {:ok, %{"ok" => true, "receipt" => %{"version" => 1, "sequence" => 1, "hash" => String.duplicate("a", 64), "replayed" => replayed}}}
         end
     }
 
@@ -75,14 +76,63 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert :ok = WorkPackageClaim.begin_paused_recovery(input)
     assert {:ok, ^allocation_id} = WorkPackageClaim.suspended_allocation(input)
     assert {:error, :suspended_allocation_controller_required} = WorkPackageClaim.begin_spawn(input)
+    assert {:ok, %{phase: "allocation_suspended", allocation_id: ^allocation_id}} = WorkPackageClaim.handoff_allocation(input)
+    assert :ok = WorkPackageClaim.begin_suspended_spawn(input, allocation_id)
+    assert {:ok, %{phase: "spawn_started", allocation_id: ^allocation_id}} = WorkPackageClaim.handoff_allocation(input)
+    assert :ok = WorkPackageClaim.replay_spawn_intent(input)
 
     assert {:ok, journal} = Journal.load(path)
     [reservation] = Map.values(journal.reservations)
-    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.phase == "spawn_started"
     assert reservation.dispatch.allocation_id == allocation_id
     assert_receive {:claim_witness, "claim_intent"}
     assert_receive {:claim_witness, "claim_bound"}
-    refute_receive {:claim_witness, "spawn_intent"}
+    assert_receive {:claim_witness, "spawn_intent"}
+    assert_receive {:claim_witness, "spawn_intent"}
+  end
+
+  test "rejected suspended activation intent retains its allocation in recovery pending" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      if String.ends_with?(url, "/reservations/by-issue"),
+        do: {:ok, response(%{"data" => reservation_payload()})},
+        else: {:ok, response(%{"data" => claim_result_payload()})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    allocation_id = "rke2job:v1:fixture-allocation"
+    assert :ok = WorkPackageClaim.record_suspended_allocation(input, %{id: allocation_id, status: :ready})
+    denied = %{input | host_witness_fun: fn _request -> {:error, :root_witness_unavailable} end}
+
+    assert {:error, :root_witness_unavailable} = WorkPackageClaim.begin_suspended_spawn(denied, allocation_id)
+
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "spawn_started"
+    assert reservation.dispatch.allocation_id == allocation_id
+    assert {:ok, %{phase: "spawn_started", allocation_id: ^allocation_id}} = WorkPackageClaim.handoff_allocation(input)
+  end
+
+  test "suspended handoff reads and writes fail closed when the claim journal or row is missing" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+    allocation_id = "rke2job:v1:missing-row"
+
+    assert {:error, :claim_journal_missing} = WorkPackageClaim.handoff_allocation(input)
+    assert {:error, :claim_journal_missing} = WorkPackageClaim.begin_suspended_spawn(input, allocation_id)
+
+    assert :ok = Journal.save(path, Journal.new())
+    assert {:error, :claim_recovery_journal_missing} = WorkPackageClaim.handoff_allocation(input)
+    assert {:error, :claim_recovery_journal_missing} = WorkPackageClaim.begin_suspended_spawn(input, allocation_id)
   end
 
   test "expired graph authority cannot submit a new provider claim" do

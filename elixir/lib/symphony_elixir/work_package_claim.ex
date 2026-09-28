@@ -207,6 +207,49 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
+  @doc "Returns the exact suspended allocation and whether its root activation intent is already durable."
+  @spec handoff_allocation(input()) :: {:ok, %{phase: String.t(), allocation_id: String.t()}} | {:error, term()}
+  def handoff_allocation(input) when is_map(input) do
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, journal_key(authority)),
+         :ok <- reservation_matches_authority(reservation, authority),
+         %{phase: phase, allocation_id: allocation_id} <- reservation.dispatch,
+         true <- phase in ["allocation_suspended", "spawn_started"],
+         true <- is_binary(allocation_id) do
+      {:ok, %{phase: phase, allocation_id: allocation_id}}
+    else
+      :missing -> {:error, :claim_journal_missing}
+      nil -> {:error, :claim_recovery_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :suspended_allocation_unavailable}
+    end
+  end
+
+  @doc "Persists root activation intent for the exact suspended allocation; same-ID replay is idempotent."
+  @spec begin_suspended_spawn(input(), String.t()) :: :ok | {:error, term()}
+  def begin_suspended_spawn(input, allocation_id) when is_map(input) and is_binary(allocation_id) do
+    now_fun = &DateTime.utc_now/0
+
+    with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         {:ok, journal} <- Dispatch.begin_suspended_spawn(journal, key, input, allocation_id),
+         :ok <- Journal.save(input.journal_path, journal),
+         :ok <- revalidate_spawn_authority(input, now_fun, journal.reservations[key]) do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      nil -> {:error, :claim_recovery_journal_missing}
+      error -> error
+    end
+  end
+
+  def begin_suspended_spawn(_input, _allocation_id),
+    do: {:error, :suspended_allocation_identity_invalid}
+
   @doc "Builds the provider HMAC canonical JSON in wire-field order."
   @spec canonical_json(map()) :: {:ok, String.t()} | {:error, term()}
   def canonical_json(attestation) when is_map(attestation) do

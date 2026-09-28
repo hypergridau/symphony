@@ -85,3 +85,16 @@ caller may persist the exact ID returned by a ready RKE2 allocation as
 contract is not wired into the orchestrator: production does not yet persist,
 reconcile, activate, or clean up RKE2 allocations through this path, and restart
 resumption remains unqualified.
+
+`WorkPackageClaim.Handoff` defines the source-only order for that future owner:
+the fresh path must establish durable claim activation intent before activation;
+after a restart from `spawn_started`, the controller must reconcile the same
+exact allocation and intent before activation. Missing, malformed, denied, or
+raising ports fail closed. Callers must run the operation synchronously inside
+the serialized orchestrator admission callback so the final pause decision and
+claim journal intent are linearized before activation. This is a protocol contract only;
+no production controller is configured, and the existing local runner path is
+unchanged. A real controller still needs durable allocation identity through
+intent and restart, idempotent activation observation, worker/result ownership,
+pre-execution abort authorization, scoped credential issue/revoke, and signed
+terminal cleanup before it can be wired or admitted.

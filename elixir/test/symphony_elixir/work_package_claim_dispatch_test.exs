@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
   use ExUnit.Case, async: true
   alias SymphonyElixir.WorkPackageClaim.{Dispatch, Journal}
+  alias SymphonyElixir.WorkPackageClaim.Handoff
 
   @now ~U[2026-09-09 00:00:00Z]
   @input %{runner_id: "runner", managed_project_profile_id: "profile", repository_ref: "repo", managed_delegations: %{authority: "operator"}}
@@ -139,6 +140,68 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
 
     assert {:error, :suspended_allocation_identity_changed} =
              Dispatch.record_suspended_allocation(allocated, key, @input, "rke2job:v1:second")
+  end
+
+  test "a managed activation intent preserves only the exact allocation and authority", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+    allocation_id = "rke2job:v1:exact-allocation"
+    {:ok, suspended} = Dispatch.record_suspended_allocation(confirmed, key, @input, allocation_id)
+
+    assert {:error, :suspended_allocation_identity_changed} =
+             Dispatch.begin_suspended_spawn(suspended, key, @input, "rke2job:v1:other-allocation")
+
+    assert {:error, :claim_authority_changed} =
+             Dispatch.begin_suspended_spawn(suspended, key, %{@input | runner_id: "other"}, allocation_id)
+
+    assert {:ok, started} = Dispatch.begin_suspended_spawn(suspended, key, @input, allocation_id)
+    assert started.reservations[key].dispatch.phase == "spawn_started"
+    assert started.reservations[key].dispatch.allocation_id == allocation_id
+    assert {:ok, ^started} = Dispatch.begin_suspended_spawn(started, key, @input, allocation_id)
+
+    assert {:ok, pending} = Dispatch.begin_pre_witness_recovery(started, key, @input)
+    assert pending.reservations[key].dispatch.phase == "recovery_pending"
+    assert pending.reservations[key].dispatch.allocation_id == allocation_id
+    assert {:ok, persisted} = round_trip(pending)
+    assert persisted.reservations[key].dispatch.allocation_id == allocation_id
+  end
+
+  test "handoff activation follows durable intent and resumes the same allocation after restart", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+    allocation_id = "rke2job:v1:exact-allocation"
+    {:ok, suspended} = Dispatch.record_suspended_allocation(confirmed, key, @input, allocation_id)
+
+    ports = %{
+      begin_intent: fn ^allocation_id ->
+        {:ok, intent} = Dispatch.begin_suspended_spawn(suspended, key, @input, allocation_id)
+        Process.put(:handoff_intent, intent)
+        :ok
+      end,
+      reconcile_intent: fn ^allocation_id ->
+        intent = Process.get(:handoff_intent)
+        assert is_map(intent)
+        path = Path.join(System.tmp_dir!(), "claim-handoff-#{System.unique_integer([:positive])}.json")
+        on_exit(fn -> File.rm(path) end)
+        assert :ok = Journal.save(path, intent)
+        assert {:ok, restarted} = Journal.load(path)
+        assert {:ok, replayed} = Dispatch.replay_spawn(restarted, key, @input)
+        assert replayed.dispatch.phase == "spawn_started"
+        assert replayed.dispatch.allocation_id == allocation_id
+        :ok
+      end,
+      activate: fn ^allocation_id ->
+        assert is_map(Process.get(:handoff_intent))
+        {:held, :activation_ack_lost}
+      end
+    }
+
+    assert {:held, :activation_ack_lost} = Handoff.resume(suspended.reservations[key].dispatch, ports)
+
+    assert {:held, :activation_ack_lost} =
+             Handoff.resume(%{phase: "spawn_started", allocation_id: allocation_id}, ports)
+
+    Process.delete(:handoff_intent)
   end
 
   test "a suspended phase without an allocation identity is invalid" do
