@@ -13,7 +13,9 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierResult do
 
   @type evidence :: %{
           job_uid: String.t(),
+          job_resource_version: String.t(),
           pod_uid: String.t(),
+          pod_resource_version: String.t(),
           pod_list_resource_version: String.t(),
           auth_cache_status: String.t(),
           auth_cache_bytes: pos_integer()
@@ -34,7 +36,9 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierResult do
       {:ok,
        %{
          job_uid: job_uid,
+         job_resource_version: get_in(job, ["metadata", "resourceVersion"]),
          pod_uid: get_in(pod, ["metadata", "uid"]),
+         pod_resource_version: get_in(pod, ["metadata", "resourceVersion"]),
          pod_list_resource_version: version,
          auth_cache_status: result["authCacheStatus"],
          auth_cache_bytes: result["authCacheBytes"]

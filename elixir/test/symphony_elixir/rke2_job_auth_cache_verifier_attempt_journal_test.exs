@@ -15,6 +15,15 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierAttemptJournalTest do
     seat: "builder"
   }
   @job_uid "assignment-job-uid"
+  @evidence %{
+    job_uid: "verifier-job-uid",
+    job_resource_version: "job-rv-1",
+    pod_uid: "verifier-pod-uid",
+    pod_resource_version: "pod-rv-1",
+    pod_list_resource_version: "list-rv-1",
+    auth_cache_status: "codex_login_status_authenticated",
+    auth_cache_bytes: 12_345
+  }
 
   setup do
     root = Path.join(System.tmp_dir!(), "symphony-verifier-attempt-" <> Ecto.UUID.generate())
@@ -169,5 +178,40 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierAttemptJournalTest do
     assert accepted != []
     assert Enum.uniq(accepted) |> length() |> Kernel.==(1)
     assert {:ok, hd(accepted)} == AuthCacheVerifierAttemptJournal.ensure(@assignment, @job_uid, @slot, @image, root)
+  end
+
+  test "checkpoints an exact result and replays it after verifier Job deletion", %{root: root} do
+    assert {:ok, intent} = AuthCacheVerifierAttemptJournal.ensure(@assignment, @job_uid, @slot, @image, root)
+    assert :missing = AuthCacheVerifierAttemptJournal.load_result(intent, root)
+    assert {:ok, result} = AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
+    assert result["job_uid"] == @evidence.job_uid
+    assert {:ok, ^result} = AuthCacheVerifierAttemptJournal.load_result(intent, root)
+    assert {:ok, ^result} = AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
+
+    assert {:held, :auth_cache_verifier_result_conflict} =
+             AuthCacheVerifierAttemptJournal.record_result(intent, %{@evidence | pod_uid: "different-pod"}, root)
+
+    [path] = Path.wildcard(Path.join(root, "*.auth-verifier-result.json"))
+    assert File.stat!(path).mode |> Bitwise.band(0o077) |> Kernel.==(0)
+  end
+
+  test "holds missing or changed intent and corrupt result", %{root: root} do
+    assert {:ok, intent} = AuthCacheVerifierAttemptJournal.ensure(@assignment, @job_uid, @slot, @image, root)
+
+    assert {:held, :auth_cache_verifier_attempt_unverified} =
+             AuthCacheVerifierAttemptJournal.record_result(Map.put(intent, "attemptId", Ecto.UUID.generate()), @evidence, root)
+
+    assert {:error, :invalid_auth_cache_verifier_result_checkpoint} =
+             AuthCacheVerifierAttemptJournal.record_result(intent, %{@evidence | auth_cache_bytes: 0}, root)
+
+    assert {:ok, _} = AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
+    [path] = Path.wildcard(Path.join(root, "*.auth-verifier-result.json"))
+    File.write!(path, "{")
+
+    assert {:held, :auth_cache_verifier_result_checkpoint_invalid} =
+             AuthCacheVerifierAttemptJournal.load_result(intent, root)
+
+    assert {:held, :auth_cache_verifier_result_conflict} =
+             AuthCacheVerifierAttemptJournal.record_result(intent, @evidence, root)
   end
 end
