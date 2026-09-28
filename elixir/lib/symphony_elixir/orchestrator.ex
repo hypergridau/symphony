@@ -2230,6 +2230,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_claim_spawn_failure(state, issue, _attempt, :global_pause, entry),
     do: state |> release_execution_lease(entry, :spawn_failed) |> block_claim_recovery(issue, :global_pause)
 
+  defp handle_claim_spawn_failure(state, issue, _attempt, {:claim_recovery_pending, {:global_pause, _}} = reason, entry),
+    do: state |> release_execution_lease(entry, :spawn_failed) |> block_claim_recovery(issue, reason)
+
   defp handle_claim_spawn_failure(state, issue, _attempt, reason, _entry),
     do: block_claim_recovery(state, issue, reason)
 
