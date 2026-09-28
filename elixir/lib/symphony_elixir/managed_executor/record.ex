@@ -247,9 +247,10 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
       evidence_ref: "managed-executor:#{assignment.sha256}:#{abort_reason}"
     }
 
-    if MapSet.new(Map.keys(result)) == MapSet.new(Map.keys(expected)) and result == expected,
-      do: :ok,
-      else: {:error, :pre_execution_result_invalid}
+    if abort_reason in @abort_reasons and
+         MapSet.new(Map.keys(result)) == MapSet.new(Map.keys(expected)) and result == expected,
+       do: :ok,
+       else: {:error, :pre_execution_result_invalid}
   end
 
   def validate_pre_execution_result(_result, _assignment, _abort_reason),
