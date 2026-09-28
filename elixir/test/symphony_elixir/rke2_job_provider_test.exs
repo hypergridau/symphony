@@ -167,6 +167,32 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     assert Agent.get(client, & &1.creates) == 1
   end
 
+  test "inspection reattaches only to the exact Job UID without creation", %{client: client} do
+    assignment = assignment()
+    options = opts(client)
+
+    assert {:held, :job_not_found_for_reconciliation} = Provider.inspect_owned(assignment, "job-uid-one", options)
+    assert Agent.get(client, & &1.creates) == 0
+
+    assert {:ok, job} = Provider.ensure(assignment, options)
+    uid = get_in(job, ["metadata", "uid"])
+    creates = Agent.get(client, & &1.creates)
+
+    assert {:ok, ^job} = Provider.inspect_owned(assignment, uid, options)
+    assert Agent.get(client, & &1.creates) == creates
+    assert {:held, :job_allocation_identity_mismatch} = Provider.inspect_owned(assignment, "replacement-uid", options)
+    assert Agent.get(client, & &1.creates) == creates
+
+    key = {config().namespace, get_in(job, ["metadata", "name"])}
+
+    Agent.update(client, fn state ->
+      put_in(state, [:jobs, key, "spec", "template", "spec", "containers", Access.at(0), "command"], ["/bin/sh"])
+    end)
+
+    assert {:held, :job_identity_or_spec_mismatch} = Provider.inspect_owned(assignment, uid, options)
+    assert Agent.get(client, & &1.creates) == creates
+  end
+
   test "reconciles a create timeout by reading the defaulted Job", %{client: client} do
     Agent.update(client, &%{&1 | create_error: :timeout})
 

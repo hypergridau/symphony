@@ -45,6 +45,19 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     end
   end
 
+  @doc "Reattaches to the exact journaled Job using only a Kubernetes read."
+  @spec inspect_owned(map(), map(), String.t(), term()) :: result()
+  def inspect_owned(allocation, assignment, idempotency_key, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :allocation),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, uid} <- allocation_uid(allocation, expected),
+         {:ok, client_context} <- client_context(ports, assignment, :allocate, idempotency_key) do
+      Provider.inspect_owned(assignment, uid, provider_opts(ports, client_context))
+    end
+  end
+
   @doc "Activates only the exact allocated UID after caller-owned admission and credential checks."
   @spec activate_owned(allocation(), map(), String.t(), term()) :: {:ok, map()} | {:held, term()} | {:error, term()}
   def activate_owned(allocation, assignment, idempotency_key, context) do

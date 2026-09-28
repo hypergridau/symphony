@@ -862,6 +862,45 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert allocation_id == allocation.id
   end
 
+  test "reconciles a journaled allocation by read only exact UID", context do
+    assignment = assignment()
+    opts = adapter_context(context)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    creates = Agent.get(context.client, & &1.creates)
+    registrations = Agent.get(context.registration, & &1.events)
+
+    assert {:ok, job} =
+             ManagedExecutorAdapter.inspect_owned(allocation, assignment, key(assignment, :allocation), opts)
+
+    assert get_in(job, ["metadata", "uid"]) == elem(allocation_uid(allocation), 1)
+    assert Agent.get(context.client, & &1.creates) == creates
+    assert Agent.get(context.registration, & &1.events) == registrations
+
+    [version, namespace, name, _uid, digest] = allocation_payload(allocation)
+    replacement = encode_allocation([version, namespace, name, "replacement-uid", digest])
+
+    assert {:held, :job_allocation_identity_mismatch} =
+             ManagedExecutorAdapter.inspect_owned(replacement, assignment, key(assignment, :allocation), opts)
+
+    assert {:error, :job_allocation_identity_mismatch} =
+             ManagedExecutorAdapter.inspect_owned(
+               %{id: "rke2job:v1:%%%", status: :ready},
+               assignment,
+               key(assignment, :allocation),
+               opts
+             )
+
+    Agent.update(context.client, &%{&1 | jobs: %{}})
+
+    assert {:held, :job_not_found_for_reconciliation} =
+             ManagedExecutorAdapter.inspect_owned(allocation, assignment, key(assignment, :allocation), opts)
+
+    assert Agent.get(context.client, & &1.creates) == creates
+  end
+
   test "holds a suspended Job until Dahlia confirms its exact UID", context do
     Agent.update(context.registration, &%{&1 | result: {:held, :job_allocation_registration_unverified}})
     assignment = assignment()
