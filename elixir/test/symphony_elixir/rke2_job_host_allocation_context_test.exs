@@ -2,7 +2,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, ResultJournal}
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, ResultJournal, TerminalOwner}
   alias SymphonyElixir.Worker.CLI
 
   defmodule ReadOnlySlotGuard do
@@ -14,6 +14,13 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     def verify_bound(_slot, _assignment, _allocation, _context) do
       send(self(), :lease_binding_verified)
       :ok
+    end
+  end
+
+  defmodule TerminalAdapter do
+    def finalize_terminal_owned(allocation, assignment, key, context) do
+      send(self(), {:terminal_finalization, allocation.id, assignment.sha256, key, context.config.auth_slot})
+      {:held, :terminal_result_pending}
     end
   end
 
@@ -169,6 +176,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     config =
       base
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
+      |> Map.put(:adapter, TerminalAdapter)
       |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
       |> Map.put(:job_read_fun, fn "frigga", name, %{synthetic: true} ->
         send(caller, {:job_read, name})
@@ -209,6 +217,13 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert_receive :claim_uid_verified
     assert_receive :lease_binding_verified
 
+    assert {:held, :terminal_result_pending} = TerminalOwner.reconcile(assignment, binding, allocation_id, config)
+    assert_receive {:terminal_finalization, ^allocation_id, assignment_sha256, finalize_key, ^slot}
+    assert assignment_sha256 == assignment.sha256
+    assert finalize_key == assignment.sha256 <> ":finalize"
+    assert_receive :claim_uid_verified
+    assert_receive :lease_binding_verified
+
     Process.put(:retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
 
     assert {:held, :rke2_retained_allocation_unverified} =
@@ -216,6 +231,11 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
 
     refute_receive :claim_uid_verified
     refute_receive :lease_binding_verified
+
+    assert {:held, :rke2_terminal_allocation_unverified} =
+             TerminalOwner.reconcile(assignment, binding, allocation_id, config)
+
+    refute_receive {:terminal_finalization, _, _, _, _}
   end
 
   test "reattaches terminal cleanup after Job deletion and OAuth lease release" do
@@ -276,6 +296,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       base
       |> Map.put(:result_journal_root, root)
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
+      |> Map.put(:adapter, TerminalAdapter)
       |> Map.put(:client_context_fun, fn _assignment, :finalize, key, _config ->
         send(caller, {:finalize_context, key})
         {:ok, %{synthetic: true}}
@@ -286,6 +307,13 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert context.config.auth_slot == slot
     assert context.result_journal_root == root
     assert_receive {:finalize_context, finalize_key}
+    assert finalize_key == assignment.sha256 <> ":finalize"
+    assert_receive :claim_uid_verified
+    refute_receive :lease_binding_verified
+
+    assert {:held, :terminal_result_pending} = TerminalOwner.reconcile(assignment, binding, allocation_id, config)
+    assert_receive {:terminal_finalization, ^allocation_id, assignment_sha256, finalize_key, ^slot}
+    assert assignment_sha256 == assignment.sha256
     assert finalize_key == assignment.sha256 <> ":finalize"
     assert_receive :claim_uid_verified
     refute_receive :lease_binding_verified

@@ -38,7 +38,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -742,7 +742,9 @@ defmodule SymphonyElixir.Orchestrator do
            match?(%{generation: ^generation}, execution) and
            reservation.runner_id == get_in(state.work_package_runtime, [:runner_id]) and
            reservation.repository_ref == execution.repository do
-        restore_verified_retained_disposable_claim(state, issue_id, generation, dispatch.allocation_id)
+        state
+        |> restore_verified_retained_disposable_claim(issue_id, generation, dispatch.allocation_id)
+        |> reconcile_retained_disposable_terminal(reservation)
       else
         %{state | retained_claim_journal_ready?: false}
       end
@@ -752,6 +754,32 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp restore_retained_disposable_claim(state, _reservation), do: state
+
+  defp reconcile_retained_disposable_terminal(state, %{dispatch: %{phase: "spawn_started", allocation_id: allocation_id}} = reservation) do
+    runtime = state.work_package_runtime || %{}
+
+    with %{disposable_rke2_host_config: host_config, runner_id: runner_id} when is_map(host_config) <- runtime,
+         {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(reservation.assignment_snapshot),
+         %{environment: %{target_environment: :rke2}} <- assignment,
+         {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id) do
+      case TerminalOwner.reconcile(assignment, binding, allocation_id, host_config) do
+        {:ok, _observation} ->
+          Logger.debug("Retained disposable Job terminal cleanup reconciled for issue_id=#{reservation.issue_id}")
+          state
+
+        {:held, _reason} ->
+          state
+
+        {:error, reason} ->
+          Logger.warning("Retained disposable Job terminal cleanup failed for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+          state
+      end
+    else
+      _ -> state
+    end
+  end
+
+  defp reconcile_retained_disposable_terminal(state, _reservation), do: state
 
   defp restore_verified_retained_disposable_claim(state, issue_id, generation, allocation_id) do
     if Map.has_key?(state.running, issue_id) or Map.has_key?(state.blocked, issue_id) do

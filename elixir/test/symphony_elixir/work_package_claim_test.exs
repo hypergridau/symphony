@@ -20,13 +20,25 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
   end
 end
 
+defmodule SymphonyElixir.RKE2Job.PollTerminalAdapter do
+  def finalize_terminal_owned(allocation, assignment, key, context) do
+    send(context.test_pid, {:poll_terminal_finalization, allocation.id, assignment.sha256, key})
+    {:held, :terminal_result_pending}
+  end
+end
+
+defmodule SymphonyElixir.RKE2Job.PollSlotGuard do
+  def verify_claim_uid(_slot, _context), do: :ok
+  def verify_bound(_slot, _assignment, _allocation, _context), do: :ok
+end
+
 defmodule SymphonyElixir.WorkPackageClaimTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.ManagedExecutor.ClaimBinding
-  alias SymphonyElixir.RKE2Job.{HostAllocationContext, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, SuspendedController}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery}
 
@@ -1346,6 +1358,120 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert MapSet.member?(terminal_held.claimed, @issue_id)
     assert terminal_held.blocked[@issue_id].issue.state == "Done"
     refute_receive {:activation_requested, _, _, _}
+  end
+
+  test "poll owns terminal reconciliation only for the exact started disposable Job" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Started disposable assignment",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      claim_journal_path: path
+    }
+
+    {blocked, _runtime} = post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+
+    {:ok, journal} = Journal.load(path)
+    [{key, reservation}] = Map.to_list(journal.reservations)
+    {:ok, assignment} = ManagedAssignmentBundle.from_snapshot(reservation.assignment_snapshot)
+
+    env = %{
+      "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
+      "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
+      "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
+      "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+    }
+
+    {:ok, base} =
+      HostAllocationContext.configuration(
+        env,
+        %{repository_ref: assignment.repository_ref},
+        "https://provider.example",
+        "host-token"
+      )
+
+    slot = %{
+      slot_id: base.slot_id,
+      claim_name: base.claim_name,
+      claim_uid: "pvc-uid-one",
+      lease_id: "12345678-1234-4123-8123-123456789abc",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    {:ok, expected} =
+      JobSpec.compile(assignment, %{
+        namespace: "frigga",
+        image: base.image,
+        repository_id: base.repository_id,
+        auth_slot: slot,
+        auth_slot_catalog: %{base.slot_id => base.claim_name}
+      })
+
+    name = expected["metadata"]["name"]
+    uid = "job-uid-one"
+    labels = %{"batch.kubernetes.io/controller-uid" => uid, "batch.kubernetes.io/job-name" => name}
+
+    job =
+      expected
+      |> put_in(["metadata", "uid"], uid)
+      |> put_in(["metadata", "labels"], Map.merge(expected["metadata"]["labels"], labels))
+      |> put_in(["spec", "selector"], %{"matchLabels" => %{"batch.kubernetes.io/controller-uid" => uid}})
+      |> put_in(
+        ["spec", "template", "metadata", "labels"],
+        Map.merge(expected["spec"]["template"]["metadata"]["labels"], labels)
+      )
+      |> put_in(["spec", "suspend"], false)
+
+    allocation_id =
+      "rke2job:v1:" <>
+        Base.url_encode64(Jason.encode!([1, "frigga", name, uid, assignment.sha256]), padding: false)
+
+    reservation = %{
+      reservation
+      | dispatch: %{reservation.dispatch | phase: "spawn_started", allocation_id: allocation_id}
+    }
+
+    {:ok, journal} = Journal.put(journal, key, reservation)
+    :ok = Journal.save(path, journal)
+
+    host_config =
+      base
+      |> Map.put(:slot_guard, SymphonyElixir.RKE2Job.PollSlotGuard)
+      |> Map.put(:adapter, SymphonyElixir.RKE2Job.PollTerminalAdapter)
+      |> Map.put(:test_pid, self())
+      |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:job_read_fun, fn "frigga", ^name, %{synthetic: true} -> {:ok, Process.get(:poll_retained_job)} end)
+
+    Process.put(:poll_retained_job, job)
+
+    state = %{
+      blocked
+      | work_package_runtime: Map.put(blocked.work_package_runtime, :disposable_rke2_host_config, host_config)
+    }
+
+    restored = Orchestrator.restore_retained_disposable_claims_for_test(state)
+    assert_receive {:poll_terminal_finalization, ^allocation_id, assignment_sha256, finalize_key}
+    assert assignment_sha256 == assignment.sha256
+    assert finalize_key == assignment.sha256 <> ":finalize"
+    assert MapSet.member?(restored.claimed, @issue_id)
+
+    Process.put(:poll_retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
+    assert MapSet.member?(Orchestrator.restore_retained_disposable_claims_for_test(restored).claimed, @issue_id)
+    refute_receive {:poll_terminal_finalization, _, _, _}
   end
 
   test "uncertain RKE2 allocation keeps the local lease and provider claim" do
