@@ -77,6 +77,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   def resume(assignment, claim_input, context)
       when is_map(assignment) and is_map(claim_input) and is_map(context) do
     with :ok <- validate_inputs(assignment, claim_input, context),
+         :ok <- journal_assignment_snapshot(claim_input, assignment),
          {:ok, adapter} <- adapter(context),
          {:ok, dispatch} <- WorkPackageClaim.handoff_allocation(claim_input) do
       Handoff.resume(dispatch, %{
@@ -167,6 +168,30 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
 
   defp journal_claim_binding(_claim_input, _binding),
     do: {:error, :suspended_controller_claim_binding_invalid}
+
+  defp journal_assignment_snapshot(
+         %{
+           journal_path: path,
+           issue_id: issue_id,
+           managed_project_profile_id: profile_id,
+           repository_ref: repository_ref
+         },
+         %{lease: %{generation: generation}} = assignment
+       )
+       when is_binary(path) and is_integer(generation) and generation > 0 do
+    key = Journal.reservation_key(issue_id, profile_id, repository_ref, generation)
+
+    with {:ok, journal} <- Journal.load(path),
+         %{assignment_snapshot: snapshot} <- Map.get(journal.reservations, key),
+         {:ok, ^assignment} <- ManagedAssignmentBundle.from_snapshot(snapshot) do
+      :ok
+    else
+      _ -> {:error, :suspended_controller_assignment_snapshot_changed}
+    end
+  end
+
+  defp journal_assignment_snapshot(_claim_input, _assignment),
+    do: {:error, :suspended_controller_assignment_snapshot_changed}
 
   defp adapter(context) do
     candidate = Map.get(context, :adapter, ManagedExecutorAdapter)

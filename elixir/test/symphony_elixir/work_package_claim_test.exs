@@ -217,6 +217,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     [retained] = Map.values(journal.reservations)
     assert retained.assignment_snapshot == snapshot
     assert retained.dispatch.allocation_id == allocation_id
+    allocated_journal = File.read!(path)
+    allocated_payload = Jason.decode!(allocated_journal)
 
     assert {:ok, %{phase: "allocation_suspended", allocation_id: ^allocation_id}} =
              WorkPackageClaim.handoff_allocation(input)
@@ -229,10 +231,38 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     refute_receive {:allocation_requested, _key}
 
+    assert {:error, :suspended_controller_assignment_snapshot_changed} =
+             SuspendedController.resume(changed_assignment, input, context)
+
+    refute_receive {:root_witness, "spawn_intent", _replay}
+    refute_receive {:activation_requested, _allocation_id, _key, _phase}
+
+    missing_snapshot_payload = update_in(allocated_payload, ["reservations", reservation_key], &Map.delete(&1, "assignment_snapshot"))
+    File.write!(path, Jason.encode!(missing_snapshot_payload))
+
+    assert {:error, :suspended_controller_assignment_snapshot_changed} =
+             SuspendedController.resume(assignment, input, context)
+
+    refute_receive {:root_witness, "spawn_intent", _replay}
+    File.write!(path, allocated_journal)
+
     assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
     assert_receive {:root_witness, "spawn_intent", false}
     assert_receive {:activation_requested, ^allocation_id, activation_key, "spawn_started"}
     assert activation_key == assignment.sha256 <> ":activate"
+
+    assert {:ok, changed_snapshot} = ManagedAssignmentBundle.snapshot(changed_assignment)
+    started_journal = File.read!(path)
+    started_payload = Jason.decode!(started_journal)
+    changed_payload = put_in(started_payload, ["reservations", reservation_key, "assignment_snapshot"], changed_snapshot)
+    File.write!(path, Jason.encode!(changed_payload))
+
+    assert {:error, :suspended_controller_assignment_snapshot_changed} =
+             SuspendedController.resume(assignment, input, context)
+
+    refute_receive {:root_witness, "spawn_intent", _replay}
+    refute_receive {:activation_requested, _allocation_id, _key, _phase}
+    File.write!(path, started_journal)
 
     assert {:ok, %{status: :active}} = SuspendedController.resume(assignment, input, context)
     assert_receive {:root_witness, "spawn_intent", true}

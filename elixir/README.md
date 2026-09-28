@@ -315,8 +315,10 @@ assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the
 journaled claim and Job identity, so changes to the current Linear issue or
 delegation manifest cannot substitute a new assignment during cleanup. A
-missing or altered snapshot holds recovery; the source still does not own
-terminal cleanup.
+missing or altered snapshot holds recovery. Suspended Job activation and intent
+replay also require the supplied assignment to equal this snapshot before a root
+spawn witness or Job activation request; the source still does not own terminal
+cleanup.
 
 The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SERVER`,
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
