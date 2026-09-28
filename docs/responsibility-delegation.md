@@ -191,6 +191,21 @@ object identifiers. The adapter return shapes are deliberately narrow so
 workspace paths, command strings, credential values and raw process output are
 not lifecycle fields.
 
+`ManagedExecutor.AbortResultJournal` is a private durable source component for
+the blocked result bytes used by that flow. It stores the exact result payload
+with a SHA-256, opaque result reference, assignment digest, issue UUID,
+generation, and allocation ID. Records are exclusive and immutable; writes
+sync the file and containing directory, then read back the exact bytes.
+Byte-equal retries return the existing reference and hash. Changed bytes,
+changed authority, malformed or partial files, unsafe paths, symlinks, or
+ancestors writable by another owner hold the operation in place. Reads require
+canonical JSON and recheck the opened path's file identity after reading, so
+duplicate keys and observed path swaps are rejected. Result bytes never appear
+in journal error messages.
+This module is not wired into the adapter publisher or the production executor;
+its filesystem durability and host permissions require deployment qualification
+before runtime use.
+
 The slotted suspended-Job abort source path is split into
 prepare_abort_unstarted_owned/4 and confirm_abort_unstarted_owned/6. The first
 returns a credential-free immutable-input observation of the compiled identity,
