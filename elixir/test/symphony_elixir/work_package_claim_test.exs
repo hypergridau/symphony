@@ -1780,6 +1780,53 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     [denied_reservation] = Map.values(denied_journal.reservations)
     assert denied_reservation.dispatch.phase == "spawn_started"
     assert MapSet.member?(denied.claimed, @issue_id)
+
+    File.write!(pause_path, "running\n")
+    race_path = temp_path()
+    on_exit(fn -> File.rm_rf(race_path) end)
+    parent = self()
+
+    pause_after_witness = fn request ->
+      if request["operation"] == "spawn_intent" and request["replayOnly"] != true do
+        File.write!(pause_path, "paused\n")
+        send(parent, :pause_after_spawn_witness)
+      end
+
+      {:ok,
+       %{
+         "ok" => true,
+         "receipt" => %{
+           "version" => 1,
+           "sequence" => 1,
+           "hash" => String.duplicate("a", 64),
+           "replayed" => request["replayOnly"] == true
+         }
+       }}
+    end
+
+    {race_blocked, _runtime} =
+      post_claim_revalidation_failure(race_path, issue, issue,
+        disposable_rke2_host_config: config,
+        host_witness_fun: pause_after_witness
+      )
+
+    assert_receive :pause_after_spawn_witness
+    assert_receive {:slot_reserved, _url}
+    assert_receive {:allocation_requested, _key}
+    assert %{paused?: true} = SymphonyElixir.GlobalPause.snapshot()
+    refute_receive {:activation_requested, _, _, _}
+    assert race_blocked.blocked[@issue_id].error =~ "disposable_rke2_activation_uncertain"
+    assert MapSet.member?(race_blocked.claimed, @issue_id)
+    assert race_blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
+    assert {:ok, race_journal} = Journal.load(race_path)
+    [race_reservation] = Map.values(race_journal.reservations)
+    assert race_reservation.dispatch.phase == "spawn_started"
+    assert race_reservation.dispatch.allocation_id == "rke2job:v1:fixture-allocation"
+
+    File.write!(pause_path, "running\n")
+    retained = Orchestrator.reconcile_blocked_issue_states_for_test([issue], race_blocked)
+    assert MapSet.member?(retained.claimed, @issue_id)
+    refute_receive {:activation_requested, _, _, _}
   end
 
   test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
