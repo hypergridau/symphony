@@ -123,6 +123,56 @@ defmodule SymphonyElixir.OrchestratorReviewHandoffTest do
     refute_received {:receipt, _}
   end
 
+  test "Review to Done retains the claim after local cleanup while provider receipts are unacknowledged", c do
+    runtime =
+      c.state.work_package_runtime
+      |> Map.put(:cleanup_prepare_fun, fn _state, _token, _head, _entry -> {:ok, "sha256:review-archive"} end)
+      |> Map.put(:cleanup_evidence_fun, fn _state, _token, _head -> {:ok, "sha256:review-archive"} end)
+
+    state = %{c.state | work_package_runtime: runtime, claimed: MapSet.new([@id])}
+    done = Orchestrator.reconcile_review_handoff_issues_for_test(state, [%{c.issue | state: "Done"}])
+
+    assert done.execution_fence.executions[@id].cleanup == :cleaned
+    assert MapSet.member?(done.claimed, @id)
+    {:ok, journal} = Journal.load(c.journal_path)
+    key = Journal.reservation_key(@id, "profile", @repo, 1)
+    assert :missing = Journal.cleanup_receipt_ack(journal, key, "termination_confirmed")
+    assert :missing = Journal.cleanup_receipt_ack(journal, key, "repository_cleanup_verified")
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [])
+
+    assert {:noreply, recovered} =
+             Orchestrator.handle_info(:run_poll_cycle, %{done | claimed: MapSet.new()})
+
+    assert MapSet.member?(recovered.claimed, @id)
+
+    acknowledged =
+      Enum.reduce(["termination_confirmed", "repository_cleanup_verified"], journal, fn kind, current ->
+        {:ok, receipt} = Journal.cleanup_receipt(current, key, kind)
+
+        ack = %{
+          projection_id: "projection",
+          reservation_id: "reservation",
+          receipt_id: receipt.receipt_id,
+          receipt_kind: kind,
+          execution_capacity_state: "released",
+          scope_state: "released",
+          reservation_state: "released",
+          generation: 1,
+          evidence_ref: receipt.evidence_ref,
+          accepted_head: c.head,
+          replayed: false
+        }
+
+        {:ok, next} = Journal.put_cleanup_receipt_ack(current, key, kind, ack)
+        next
+      end)
+
+    :ok = Journal.save(c.journal_path, acknowledged)
+    assert {:noreply, released} = Orchestrator.handle_info(:run_poll_cycle, recovered)
+    refute MapSet.member?(released.claimed, @id)
+  end
+
   test "merge evidence cannot replace execution identity", c do
     observer = fn _ ->
       {:ok,

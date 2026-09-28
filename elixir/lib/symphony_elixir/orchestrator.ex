@@ -509,8 +509,23 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp hold_review_handoff_claims(state) do
     ids = ReviewHandoff.pending_executions(state.execution_fence, Map.keys(state.running)) |> Enum.map(&elem(&1, 0))
-    %{state | claimed: MapSet.union(state.claimed, MapSet.new(ids))}
+    %{state | claimed: MapSet.union(state.claimed, MapSet.new(ids ++ pending_cleaned_review_claim_ids(state)))}
   end
+
+  defp pending_cleaned_review_claim_ids(state) do
+    # A cleaned review generation no longer appears in ReviewHandoff.pending_executions.
+    # Rebuild its local claim after restart until both provider receipts are durable.
+    for {issue_id, execution} <- state.execution_fence.executions,
+        cleaned_review_execution?(execution),
+        token = %{issue_id: issue_id, generation: execution.generation, repository_ref: execution.repository},
+        not cleanup_receipts_accepted?(state, token),
+        do: issue_id
+  end
+
+  defp cleaned_review_execution?(%{cleanup: :cleaned, terminal: %{merge_identity: merge}}) when is_binary(merge),
+    do: true
+
+  defp cleaned_review_execution?(_execution), do: false
 
   @doc false
   @spec reconcile_review_handoff_issues_for_test(map(), [Issue.t()]) :: map()
@@ -630,15 +645,15 @@ defmodule SymphonyElixir.Orchestrator do
     if status == :completed and ready == :ok do
       state = maybe_confirm_execution_supervisor(state, entry)
       state = cleanup_fenced_workspace_or_legacy(state, entry.issue, entry)
-      release_cleaned_review_claim(state, entry.issue.id)
+      release_cleaned_review_claim(state, entry.execution_token)
     else
       state
     end
   end
 
-  defp release_cleaned_review_claim(state, issue_id) do
-    if get_in(state.execution_fence, [:executions, issue_id, :cleanup]) == :cleaned do
-      release_issue_claim(state, issue_id)
+  defp release_cleaned_review_claim(state, token) do
+    if cleanup_receipts_accepted?(state, token) do
+      release_issue_claim(state, token.issue_id)
     else
       state
     end
@@ -968,23 +983,27 @@ defmodule SymphonyElixir.Orchestrator do
     do: release_issue_claim(state, issue.id)
 
   defp release_terminal_block_after_cleanup(%State{} = state, issue, %{execution_token: token}) do
-    execution = get_in(state.execution_fence, [:executions, token.issue_id])
-
-    receipts_accepted? =
-      is_map(execution) and execution.generation == token.generation and execution.cleanup == :cleaned and
-        not cleanup_receipt_pending?(state.work_package_runtime, token, "repository_cleanup_verified") and
-        Enum.all?(execution.leases, fn {_session_id, lease} ->
-          is_integer(Map.get(lease, :termination_confirmed_at_ms))
-        end) and
-        not cleanup_receipt_pending?(state.work_package_runtime, token, "termination_confirmed")
-
-    if receipts_accepted?,
+    if cleanup_receipts_accepted?(state, token),
       do: release_issue_claim(state, issue.id),
       else: refresh_blocked_issue_state(state, issue)
   end
 
   defp release_terminal_block_after_cleanup(%State{} = state, issue, _entry),
     do: release_issue_claim(state, issue.id)
+
+  defp cleanup_receipts_accepted?(%State{work_package_runtime: nil} = state, token),
+    do: get_in(state.execution_fence, [:executions, token.issue_id, :cleanup]) == :cleaned
+
+  defp cleanup_receipts_accepted?(%State{} = state, token) do
+    execution = get_in(state.execution_fence, [:executions, token.issue_id])
+
+    is_map(execution) and execution.generation == token.generation and execution.cleanup == :cleaned and
+      not cleanup_receipt_pending?(state.work_package_runtime, token, "repository_cleanup_verified") and
+      Enum.all?(execution.leases, fn {_session_id, lease} ->
+        is_integer(Map.get(lease, :termination_confirmed_at_ms))
+      end) and
+      not cleanup_receipt_pending?(state.work_package_runtime, token, "termination_confirmed")
+  end
 
   defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
     case Map.get(state.running, issue_id) do
@@ -3355,6 +3374,7 @@ defmodule SymphonyElixir.Orchestrator do
       {:repository, token, head, outcome}, current_state ->
         submit_repository_cleanup_receipt(current_state, token, head, outcome)
     end)
+    |> release_acknowledged_review_claims()
   rescue
     error ->
       Logger.warning("Persisted cleanup receipt replay failed: #{inspect(error)}")
@@ -3362,6 +3382,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp replay_persisted_cleanup_receipts(state), do: state
+
+  defp release_acknowledged_review_claims(state) do
+    Enum.reduce(state.execution_fence.executions, state, fn {issue_id, execution}, current ->
+      token = %{issue_id: issue_id, generation: execution.generation, repository_ref: execution.repository}
+
+      if MapSet.member?(current.claimed, issue_id) and cleaned_review_execution?(execution) and
+           cleanup_receipts_accepted?(current, token) do
+        release_issue_claim(current, issue_id)
+      else
+        current
+      end
+    end)
+  end
 
   defp cleanup_receipt_quarantined?(%State{} = state, action) do
     case cleanup_receipt_replay_key(action) do
