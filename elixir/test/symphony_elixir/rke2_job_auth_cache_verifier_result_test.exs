@@ -69,6 +69,20 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierResultTest do
     assert {:ok, _} = verifier.(job, %{snapshot | items: [allowed_owner]})
   end
 
+  test "checks admitted Job identity while the verifier is still running" do
+    {expected, completed, _snapshot} = fixture()
+    running = Map.delete(completed, "status")
+
+    assert AuthCacheVerifierResult.owned_job?(expected, "verifier-job-uid", running)
+    refute AuthCacheVerifierResult.owned_job?(expected, "replacement-job-uid", running)
+
+    refute AuthCacheVerifierResult.owned_job?(
+             expected,
+             "verifier-job-uid",
+             put_in(running, ["spec", "template", "spec", "hostNetwork"], true)
+           )
+  end
+
   defp fixture do
     {:ok, expected} = AuthCacheVerifierJobSpec.compile(@assignment, @slot, @config)
     name = expected["metadata"]["name"]
