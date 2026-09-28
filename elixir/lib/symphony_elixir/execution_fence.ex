@@ -108,6 +108,15 @@ defmodule SymphonyElixir.ExecutionFence do
 
   def reconcile_suspended_claim(_state, _reservation), do: {:error, :unstarted_claim_not_reconcilable}
 
+  @doc "Builds an in-memory candidate for a verified exact disposable Job after activation intent."
+  @spec reconcile_disposable_spawn_claim(state(), map()) :: {:ok, state()} | {:error, term()}
+  def reconcile_disposable_spawn_claim(state, %{dispatch: %{phase: "spawn_started", allocation_id: id}} = reservation)
+      when is_binary(id) and byte_size(id) > 0 do
+    reconcile_unobserved_claim(state, reservation, ["spawn_started"])
+  end
+
+  def reconcile_disposable_spawn_claim(_state, _reservation), do: {:error, :unstarted_claim_not_reconcilable}
+
   defp reconcile_unobserved_claim(state, reservation, phases) do
     with :ok <- validate_state(state),
          %{dispatch: %{phase: phase}} <- reservation,

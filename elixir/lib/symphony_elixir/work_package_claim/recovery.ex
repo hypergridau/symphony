@@ -280,7 +280,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
   end
 
   defp recover_reservation(runtime, fence, graph, issue, attempt, now_ms, reservation, opts) do
-    retained = reservation.dispatch.phase == "allocation_suspended"
+    retained =
+      reservation.dispatch.phase in ["allocation_suspended", "spawn_started"] and
+        is_binary(reservation.dispatch.allocation_id)
 
     with :ok <- retry_gate(reservation, now_ms, retained),
          input = Map.merge(runtime, %{repository_ref: reservation.repository_ref}),
@@ -310,7 +312,12 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
   defp retry_gate(_reservation, _now_ms, true), do: :ok
   defp retry_gate(reservation, now_ms, false), do: Dispatch.retry_status(reservation, now_ms)
 
-  defp reconcile_fence(fence, reservation, true), do: ExecutionFence.reconcile_suspended_claim(fence, reservation)
+  defp reconcile_fence(fence, %{dispatch: %{phase: "allocation_suspended"}} = reservation, true),
+    do: ExecutionFence.reconcile_suspended_claim(fence, reservation)
+
+  defp reconcile_fence(fence, %{dispatch: %{phase: "spawn_started"}} = reservation, true),
+    do: ExecutionFence.reconcile_disposable_spawn_claim(fence, reservation)
+
   defp reconcile_fence(fence, reservation, false), do: ExecutionFence.reconcile_unstarted_claim(fence, reservation)
 
   defp verify_retained(_reservation, _fence, _graph, false, _opts), do: :ok

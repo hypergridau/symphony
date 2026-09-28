@@ -62,8 +62,16 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
 
   @doc "Rebuilds a retained suspended Job context from exact readback without reserving another OAuth lease."
   @spec reattach(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
-  def reattach(assignment, binding, allocation_id, config)
-      when is_map(assignment) and is_map(binding) and is_binary(allocation_id) and is_map(config) do
+  def reattach(assignment, binding, allocation_id, config),
+    do: reattach_existing(assignment, binding, allocation_id, config, true)
+
+  @doc "Rebuilds the context for an activated exact Job without issuing another OAuth lease."
+  @spec reattach_started(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
+  def reattach_started(assignment, binding, allocation_id, config),
+    do: reattach_existing(assignment, binding, allocation_id, config, false)
+
+  defp reattach_existing(assignment, binding, allocation_id, config, suspended)
+       when is_map(assignment) and is_map(binding) and is_binary(allocation_id) and is_map(config) do
     with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
@@ -74,7 +82,8 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          {:ok, job} <- job_reader(config).(@namespace, name, kube_context),
          {:ok, slot} <- retained_slot(job, assignment, config),
          {:ok, expected} <- JobSpec.compile(assignment, job_config(config, slot)),
-         true <- JobSpec.owned_job?(job, expected),
+         true <- JobSpec.owned_job_for_cleanup?(job, expected),
+         true <- get_in(job, ["spec", "suspend"]) == suspended,
          true <- allocation_id == encoded_allocation_id(expected, job),
          guard_context = guard_context(config, binding, kube_context),
          :ok <- slot_guard(config).verify_claim_uid(slot, guard_context),
@@ -93,7 +102,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     _ -> {:held, :rke2_retained_allocation_unverified}
   end
 
-  def reattach(_assignment, _binding, _allocation_id, _config),
+  defp reattach_existing(_assignment, _binding, _allocation_id, _config, _suspended),
     do: {:held, :rke2_retained_allocation_unverified}
 
   @doc "Rebuilds a terminal context from the durable result and slot binding after Job deletion."
