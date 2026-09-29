@@ -55,8 +55,15 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
     assert {:ok, journal} = WorkPackageClaim.Journal.load(runtime.journal_path)
     key = WorkPackageClaim.Journal.reservation_key(@issue, "profile-1", @repository, 1)
 
-    {:ok, local_journal} =
-      WorkPackageClaim.Journal.put(journal, key, Map.delete(journal.reservations[key], :assignment_snapshot))
+    no_snapshot = Map.delete(journal.reservations[key], :assignment_snapshot)
+    {:ok, ambiguous_journal} = WorkPackageClaim.Journal.put(journal, key, no_snapshot)
+    assert :ok = WorkPackageClaim.Journal.save(runtime.journal_path, ambiguous_journal)
+
+    assert {:error, :disposable_cleanup_assignment_missing} =
+             DisposableCleanupEvidence.reservation(runtime, token)
+
+    local = put_in(no_snapshot, [:dispatch, :allocation_id], nil)
+    {:ok, local_journal} = WorkPackageClaim.Journal.put(ambiguous_journal, key, local)
 
     assert :ok = WorkPackageClaim.Journal.save(runtime.journal_path, local_journal)
     assert :local = DisposableCleanupEvidence.reservation(runtime, token)

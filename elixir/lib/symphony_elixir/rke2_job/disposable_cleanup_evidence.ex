@@ -44,10 +44,16 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
     end
   end
 
+  defp classify_snapshot(%{dispatch: %{allocation_id: "rke2job:v1:" <> _}}),
+    do: {:error, :disposable_cleanup_assignment_missing}
+
   defp classify_snapshot(_saved), do: :local
 
   defp classify_suspended_snapshot(%{assignment_snapshot: snapshot}) when is_binary(snapshot),
     do: {:error, :disposable_cleanup_not_started}
+
+  defp classify_suspended_snapshot(%{dispatch: %{allocation_id: "rke2job:v1:" <> _}}),
+    do: {:error, :disposable_cleanup_assignment_missing}
 
   defp classify_suspended_snapshot(_saved), do: :local
 
