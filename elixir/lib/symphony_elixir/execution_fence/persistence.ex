@@ -445,6 +445,11 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
   defp termination_field("remaining_processes"), do: :remaining_processes
   defp termination_field("observed_at_ms"), do: :observed_at_ms
   defp termination_field("evidence_ref"), do: :evidence_ref
+  defp termination_field("job_uid"), do: :job_uid
+  defp termination_field("pod_uid"), do: :pod_uid
+  defp termination_field("assignment_digest"), do: :assignment_digest
+  defp termination_field("terminal_status"), do: :terminal_status
+  defp termination_field("exit_code"), do: :exit_code
   defp termination_field(_key), do: nil
 
   defp encode_optional_atom(nil), do: nil
