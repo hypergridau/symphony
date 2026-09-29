@@ -203,7 +203,9 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, client_context} <- client_context(ports, assignment, :finalize, idempotency_key),
          {:ok, observation} <- terminal_checkpoint(assignment, uid, ports, client_context, context),
          :ok <- Provider.delete_owned(assignment, uid, provider_opts(ports, client_context)),
-         :ok <- auth_slot_guard(context, ports.config, :release, [ports.config[:auth_slot], assignment, allocation]) do
+         :ok <- auth_slot_guard(context, ports.config, :release, [ports.config[:auth_slot], assignment, allocation]),
+         {:ok, _finalization_path} <-
+           ResultJournal.record_finalization(assignment, uid, Map.get(context, :result_journal_root)) do
       {:ok, observation}
     else
       {:held, reason} -> {:held, reason}

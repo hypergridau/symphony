@@ -18,7 +18,12 @@ defmodule SymphonyElixir.RKE2Job.TerminalLeaseTest do
     refute execution.termination_unconfirmed
     assert evidence.job_uid == "job-uid-1"
     assert evidence.pod_uid == "pod-uid-1"
-    assert evidence.evidence_ref == "rke2-job-result:#{assignment.sha256}:job-uid-1"
+
+    expected_ref =
+      :crypto.hash(:sha256, assignment.sha256 <> "\0job-uid-1")
+      |> Base.encode16(case: :lower)
+
+    assert evidence.evidence_ref == "sha256:#{expected_ref}"
 
     assert {:ok, ^confirmed, _} = TerminalLease.confirm(confirmed, reservation, assignment, observation, 101)
 

@@ -99,9 +99,11 @@ defmodule SymphonyElixir.DisposableReviewCompletionTest do
       session_id: session,
       process_id: process,
       process_tree: :terminated,
-      evidence_ref: "rke2-job-result:#{String.duplicate("c", 64)}:job-uid-1",
+      evidence_ref: "sha256:#{String.duplicate("c", 64)}",
       observed_at_ms: 100,
-      job_uid: "job-uid-1"
+      job_uid: "job-uid-1",
+      pod_uid: "pod-uid-1",
+      assignment_digest: String.duplicate("c", 64)
     }
 
     {:ok, confirmed, :confirmed} = ExecutionFence.confirm_termination(released, token, session, termination, 100)

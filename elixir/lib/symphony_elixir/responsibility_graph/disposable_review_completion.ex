@@ -51,8 +51,10 @@ defmodule SymphonyElixir.ResponsibilityGraph.DisposableReviewCompletion do
   defp lease_identity?(lease, expected) do
     Map.take(lease, @identity) == expected and lease.role == :worker and
       lease.status in [:released, :expired] and
-      String.starts_with?(lease[:termination_evidence_ref] || "", "rke2-job-result:") and
-      is_map(lease[:termination_evidence]) and is_binary(lease.termination_evidence[:job_uid])
+      String.starts_with?(lease[:termination_evidence_ref] || "", "sha256:") and
+      is_map(lease[:termination_evidence]) and is_binary(lease.termination_evidence[:job_uid]) and
+      is_binary(lease.termination_evidence[:pod_uid]) and
+      is_binary(lease.termination_evidence[:assignment_digest])
   end
 
   defp delegation_identity?(delegation, reservation, execution, entry, expected) do

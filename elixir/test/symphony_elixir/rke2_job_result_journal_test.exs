@@ -25,6 +25,30 @@ defmodule SymphonyElixir.RKE2JobResultJournalTest do
     assert loaded["result"]["assignment_digest"] == assignment.sha256
   end
 
+  test "holds a missing or altered post-finalization fact while preserving the result", %{root: root} do
+    assignment = assignment()
+    observation = observation(assignment)
+    uid = observation.job_uid
+
+    assert :missing = ResultJournal.load_finalization(assignment, uid, root)
+    assert {:ok, _} = ResultJournal.record(assignment, observation, root)
+    assert :missing = ResultJournal.load_finalization(assignment, uid, root)
+
+    assert {:ok, path} = ResultJournal.record_finalization(assignment, uid, root)
+    assert {:ok, ^path} = ResultJournal.record_finalization(assignment, uid, root)
+    assert {:ok, marker} = ResultJournal.load_finalization(assignment, uid, root)
+    assert marker["phase"] == "job_and_pods_absent_auth_slot_released"
+    assert marker["assignment_digest"] == assignment.sha256
+    assert marker["pod_uid"] == observation.pod_uid
+
+    original = File.read!(path)
+    tampered = Jason.decode!(original) |> Map.put("pod_uid", "other-pod")
+    :ok = File.write(path, Jason.encode!(tampered))
+    assert {:held, :job_finalization_journal_invalid} = ResultJournal.load_finalization(assignment, uid, root)
+    assert {:held, :job_result_journal_conflict} = ResultJournal.record_finalization(assignment, uid, root)
+    assert {:ok, _} = ResultJournal.load(assignment, uid, root)
+  end
+
   test "retains the exact non-secret OAuth slot binding with the terminal result", %{root: root} do
     assignment = assignment()
     observation = observation(assignment)

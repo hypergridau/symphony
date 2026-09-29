@@ -107,11 +107,13 @@ defmodule SymphonyElixir.RKE2Job.TerminalLease do
   defp replay_identity_matches?(_lease, _evidence), do: true
 
   defp evidence(reservation, assignment, job_uid, pod_uid, status, exit_code, now_ms) do
+    result_id = :crypto.hash(:sha256, assignment.sha256 <> "\0" <> job_uid) |> Base.encode16(case: :lower)
+
     %{
       session_id: reservation.session_id,
       process_id: reservation.process_id,
       process_tree: :terminated,
-      evidence_ref: "rke2-job-result:#{assignment.sha256}:#{job_uid}",
+      evidence_ref: "sha256:#{result_id}",
       observed_at_ms: now_ms,
       job_uid: job_uid,
       pod_uid: pod_uid,
