@@ -918,6 +918,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp persist_disposable_cleanup(state, token, head, evidence_ref, outcome) do
     execution = get_in(state.execution_fence, [:executions, token.issue_id])
+    fence_token = %{issue_id: token.issue_id, generation: token.generation}
 
     if execution.cleanup == :cleaned do
       {:ok, state}
@@ -925,12 +926,12 @@ defmodule SymphonyElixir.Orchestrator do
       now_ms = execution_fence_now_ms()
 
       with {:ok, prepared, _} <-
-             ExecutionFence.prepare_cleanup(state.execution_fence, token, head, now_ms, outcome),
+             ExecutionFence.prepare_cleanup(state.execution_fence, fence_token, head, now_ms, outcome),
            {:ok, state} <- persist_execution_fence(state, prepared),
            {:ok, evidenced} <-
-             ExecutionFence.record_cleanup_evidence(state.execution_fence, token, head, evidence_ref, now_ms),
+             ExecutionFence.record_cleanup_evidence(state.execution_fence, fence_token, head, evidence_ref, now_ms),
            {:ok, state} <- persist_execution_fence(state, evidenced),
-           {:ok, cleaned, _} <- ExecutionFence.cleanup(state.execution_fence, token, head, now_ms) do
+           {:ok, cleaned, _} <- ExecutionFence.cleanup(state.execution_fence, fence_token, head, now_ms) do
         persist_execution_fence(state, cleaned)
       end
     end
