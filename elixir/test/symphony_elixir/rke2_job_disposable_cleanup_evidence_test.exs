@@ -5,6 +5,7 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
   alias SymphonyElixir.ExecutionFence.Persistence
   alias SymphonyElixir.RKE2Job.{DisposableCleanupEvidence, ResultJournal, TerminalLease}
   alias SymphonyElixir.Worker.CLI
+  alias SymphonyElixir.WorkPackageStartedNoCheckoutReceipt
 
   @issue "issue-1"
   @repository "hypergridau/symphony"
@@ -229,10 +230,94 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
              DisposableCleanupEvidence.verify_no_checkout_failure(runtime, fence, token)
   end
 
+  test "started no-checkout receipt survives a rejected provider request and replays its exact tuple", %{root: root} do
+    {runtime, fence, token, assignment, _observation} = fixture(root, :no_checkout_failure)
+    assert {:ok, _} = ResultJournal.record_finalization(assignment, "job-uid-1", root)
+    runtime = Map.merge(runtime, %{base_url: "http://provider.test", runner_token: "runner-token", attestation_key: "attestation-key", runner_id: "runner-17"})
+    parent = self()
+
+    denied = fn _url, options ->
+      send(parent, {:denied_receipt, Keyword.fetch!(options, :json)})
+      {:ok, %Req.Response{status: 409, body: %{}}}
+    end
+
+    assert {:error, {:started_no_checkout_provider_status, 409}} =
+             WorkPackageStartedNoCheckoutReceipt.submit(runtime, fence, token,
+               request_fun: denied,
+               now_fun: fn -> ~U[2026-09-29 05:00:00.000Z] end
+             )
+
+    assert_receive {:denied_receipt, first}
+    assert first["jobUid"] == "job-uid-1"
+    assert first["podUid"] == "pod-uid-1"
+    assert first["jobNamespace"] == "symphony-workers"
+    assert first["jobName"] == "hgs736-test"
+    assert first["checkoutAccepted"] == false
+    assert first["executionStarted"] == true
+    refute Map.has_key?(first, "acceptedHead")
+
+    assert {:ok, journal} = WorkPackageClaim.Journal.load(runtime.journal_path)
+    key = WorkPackageClaim.Journal.reservation_key(@issue, "profile-1", @repository, 1)
+    assert {:ok, saved} = WorkPackageClaim.Journal.cleanup_receipt(journal, key, "started_no_checkout_cleanup_verified")
+    assert :missing = WorkPackageClaim.Journal.cleanup_receipt_ack(journal, key, "started_no_checkout_cleanup_verified")
+
+    accepted = fn url, options ->
+      payload = Keyword.fetch!(options, :json)
+      send(parent, {:accepted_receipt, url, payload})
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "data" => %{
+             "projectionId" => "projection-1",
+             "reservationId" => payload["reservationId"],
+             "receiptId" => payload["receiptId"],
+             "receiptKind" => payload["receiptKind"],
+             "executionCapacityState" => "released",
+             "scopeState" => "released",
+             "reservationState" => "released",
+             "generation" => 1,
+             "evidenceRef" => payload["evidenceRef"],
+             "replayed" => false
+           }
+         }
+       }}
+    end
+
+    assert {:ok, %{scope_state: "released"}} =
+             WorkPackageStartedNoCheckoutReceipt.submit(runtime, fence, token, request_fun: accepted, now_fun: fn -> ~U[2026-09-29 05:15:00.000Z] end)
+
+    assert_receive {:accepted_receipt, url, second}
+    assert url == "http://provider.test/runner/v1/work-packages/projection-1/started-no-checkout-receipt"
+    assert second["receiptId"] == first["receiptId"]
+    assert second["observedAt"] == first["observedAt"]
+    assert second["attestedAt"] != first["attestedAt"]
+    assert second["signature"] != first["signature"]
+    assert saved.receipt_id == second["receiptId"]
+
+    assert {:ok, %{scope_state: "released"}} =
+             WorkPackageStartedNoCheckoutReceipt.submit(runtime, fence, token, request_fun: fn _, _ -> flunk("acknowledged receipt must not POST again") end)
+  end
+
   defp fixture(root, outcome \\ :completed) do
     {:ok, assignment} = assignment()
     {:ok, snapshot} = ManagedAssignmentBundle.snapshot(assignment)
     reservation = reservation(snapshot)
+
+    reservation =
+      if outcome == :no_checkout_failure do
+        id =
+          "rke2job:v1:" <>
+            Base.url_encode64(Jason.encode!([1, "symphony-workers", "hgs736-test", "job-uid-1", assignment.sha256]),
+              padding: false
+            )
+
+        put_in(reservation, [:dispatch, :allocation_id], id)
+      else
+        reservation
+      end
+
     key = WorkPackageClaim.Journal.reservation_key(@issue, "profile-1", @repository, 1)
     {:ok, journal} = WorkPackageClaim.Journal.put(WorkPackageClaim.Journal.new(), key, reservation)
     journal_path = Path.join(root, "claims.json")
@@ -245,7 +330,20 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
     }
 
     observation = observation(assignment, outcome)
-    {:ok, _} = ResultJournal.record(assignment, observation, root)
+
+    slot =
+      if outcome == :no_checkout_failure do
+        %{
+          slot_id: "slot-one",
+          claim_name: "codex-oauth-slot-1",
+          claim_uid: "pvc-uid-one",
+          lease_id: "12345678-1234-4123-8123-123456789abc",
+          assignment_sha256: assignment.sha256,
+          seat: assignment.seat
+        }
+      end
+
+    {:ok, _} = ResultJournal.record(assignment, observation, root, slot)
 
     {:ok, admitted, token} =
       ExecutionFence.admit(

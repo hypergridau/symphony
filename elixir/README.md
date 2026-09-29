@@ -393,6 +393,17 @@ uncertain provider acknowledgements retain the claim for replay. This is source
 and synthetic-test behavior; installed runtime, a real Luna assignment and
 accepted live provider release require separate qualification.
 
+For a started Job whose durable failed result has no accepted Git head, the
+same terminal reconciliation verifies the exact signed claim, failed worker
+receipt, result journal, Job/Pod finalization marker, and released fence lease.
+It journals a separate signed `started_no_checkout_cleanup_verified` receipt
+before posting it to Dahlia. A rejected or lost provider response retains the
+same receipt ID and observation for retry with a fresh signature; an accepted
+acknowledgement is saved before later polls can skip the POST. Dahlia verifies
+its own Job allocation, OAuth slot cleanup, and terminal credential leases
+before releasing capacity and scope. This path does not invent an accepted head
+or use the successful PR cleanup receipts. Live qualification remains pending.
+
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
 has already been confirmed. This records a local `Failed attempt` outcome with
