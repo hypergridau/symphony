@@ -321,8 +321,8 @@ journaled claim and Job identity, so changes to the current Linear issue or
 delegation manifest cannot substitute a new assignment during cleanup. A
 missing or altered snapshot holds recovery. Suspended Job activation and intent
 replay also require the supplied assignment to equal this snapshot before a root
-spawn witness or Job activation request; the source still does not own terminal
-cleanup.
+spawn witness or Job activation request. The retained-claim poll owns terminal
+cleanup after activation.
 
 The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SERVER`,
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
@@ -335,7 +335,7 @@ token, verifies the exact Bound PVC UID,
 reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
 configuration to the existing suspended controller. At terminal cleanup, the host
 reads a fresh Kubernetes token for the verifier Job and retains the result and
-cleanup receipts under that private root. The terminal result record also retains
+OAuth slot cleanup receipts under that private root. The terminal result record also retains
 the exact non-secret OAuth slot binding before the Job is deleted. After a host
 restart, `HostAllocationContext.reattach_terminal/4` can rebuild the finalization
 context from that record, the exact allocation ID, fresh Kubernetes identity,
@@ -344,8 +344,8 @@ is valid for terminal replay: Dahlia binds its stored cleanup receipt to the
 exact lease, assignment, Job UID, and PVC UID, so replay cannot release a later
 lease for the same slot. Active and suspended Job reattachment still requires
 the lease to be bound.
-Missing or conflicting records hold cleanup. No production host has supplied this
-tuple or admitted a Job yet.
+Missing or conflicting records hold cleanup. A configured host context alone
+does not prove this source is installed or that a Job has run.
 
 The host Kubernetes context accepts the controller's exact `:allocation` and
 `:abort_unstarted` idempotency keys for allocation and both abort phases. An
@@ -369,9 +369,18 @@ The same confirmation replays after restart. A remote merge reader binds the
 completed result's PR number, branch and worker head to GitHub's merged PR
 without requiring a local worktree. The poll owner then rechecks the native
 terminal Linear state before fencing that exact head and completing the matching
-responsible delegation. This path does not yet submit HGS350 cleanup receipts,
-release the provider reservation, or enable Job activation; those transitions
-remain gated.
+responsible delegation. The trusted finalizer writes a separate immutable fact
+after exact Job and Pod absence and OAuth slot release. The fence persists the
+Job, Pod, assignment and result identities needed to replay this fact after a
+restart. Once the exact signed claim, result, finalization fact, accepted head
+and terminal fence agree, the poll submits the existing HGS350
+`termination_confirmed` receipt. Its durable acknowledgement precedes fence
+cleanup and `repository_cleanup_verified`. The disposable Job's ephemeral
+checkout is gone with the Job, so this path verifies that deletion and does not
+fabricate a local workspace archive. Missing or contradictory evidence and
+uncertain provider acknowledgements retain the claim for replay. This is source
+and synthetic-test behavior; installed runtime, a real Luna assignment and
+accepted live provider release require separate qualification.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination
