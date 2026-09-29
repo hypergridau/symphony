@@ -381,7 +381,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   defp decode_cleanup_receipts(receipts) when is_map(receipts) do
     Enum.reduce_while(receipts, {:ok, %{}}, fn
       {kind, receipt}, {:ok, acc}
-      when kind in ["termination_confirmed", "repository_cleanup_verified"] and is_map(receipt) ->
+      when kind in ["termination_confirmed", "repository_cleanup_verified", "started_no_checkout_cleanup_verified"] and is_map(receipt) ->
         case decode_cleanup_receipt(receipt) do
           {:ok, decoded} -> {:cont, {:ok, Map.put(acc, kind, decoded)}}
           {:error, reason} -> {:halt, {:error, reason}}
@@ -403,6 +403,19 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       :observed_at,
       :evidence_ref,
       :accepted_head,
+      :assignment_digest,
+      :job_namespace,
+      :job_name,
+      :job_uid,
+      :pod_uid,
+      :slot_lease_id,
+      :checkout_lease_id,
+      :result_sha256,
+      :execution_started,
+      :checkout_accepted,
+      :job_and_pods_absent,
+      :oauth_slot_released,
+      :credential_leases_terminal,
       :runner_id,
       :managed_project_profile_id,
       :reservation_id,
@@ -535,7 +548,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
 
   defp valid_cleanup_receipts?(receipts) when is_map(receipts) do
     Enum.all?(receipts, fn {kind, receipt} ->
-      is_binary(kind) and kind in ["termination_confirmed", "repository_cleanup_verified"] and
+      is_binary(kind) and kind in ["termination_confirmed", "repository_cleanup_verified", "started_no_checkout_cleanup_verified"] and
         is_map(receipt)
     end)
   end

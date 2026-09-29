@@ -26,6 +26,7 @@ defmodule SymphonyElixir.Orchestrator do
     WorkPackageClaim,
     WorkPackageCleanupReceipt,
     WorkPackageRuntime,
+    WorkPackageStartedNoCheckoutReceipt,
     Workspace
   }
 
@@ -40,7 +41,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
   alias SymphonyElixir.RKE2Job.{DisposableCleanupEvidence, HostActivationGuard, HostAllocationContext}
-  alias SymphonyElixir.RKE2Job.{MergedResultEvidence, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{MergedResultEvidence, ResultReader, SuspendedController}
   alias SymphonyElixir.RKE2Job.{TerminalLease, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
@@ -796,11 +797,40 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, fence_state, _evidence} ->
         state
         |> persist_finalized_disposable_lease(reservation, fence_state)
+        |> reconcile_disposable_no_checkout_failure(reservation, assignment, observation)
         |> reconcile_disposable_remote_review(reservation, assignment, observation)
 
       {:error, reason} ->
         Logger.warning("Disposable terminal lease proof was rejected for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
         state
+    end
+  end
+
+  defp reconcile_disposable_no_checkout_failure(state, reservation, assignment, observation) do
+    runtime = state.work_package_runtime || %{}
+    result = Map.get(observation, "result") || Map.get(observation, :result)
+    exit_code = Map.get(observation, "exit_code") || Map.get(observation, :exit_code)
+
+    if is_map(runtime) and is_map(result) and
+         ResultReader.no_checkout_failure?(result, exit_code) do
+      token = %{
+        issue_id: reservation.issue_id,
+        generation: reservation.generation,
+        repository_ref: assignment.repository_ref
+      }
+
+      opts = [] |> maybe_claim_option(runtime, :request_fun) |> maybe_claim_option(runtime, :now_fun)
+
+      case WorkPackageStartedNoCheckoutReceipt.submit(runtime, state.execution_fence, token, opts) do
+        {:ok, _ack} ->
+          state
+
+        {:error, reason} ->
+          Logger.warning("Started disposable no-checkout receipt was not accepted for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+          state
+      end
+    else
+      state
     end
   end
 
