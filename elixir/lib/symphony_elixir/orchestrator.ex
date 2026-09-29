@@ -38,7 +38,8 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, SuspendedController, TerminalOwner}
+  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{TerminalLease, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -763,9 +764,8 @@ defmodule SymphonyElixir.Orchestrator do
          %{environment: %{target_environment: :rke2}} <- assignment,
          {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id) do
       case TerminalOwner.reconcile(assignment, binding, allocation_id, host_config) do
-        {:ok, _observation} ->
-          Logger.debug("Retained disposable Job terminal cleanup reconciled for issue_id=#{reservation.issue_id}")
-          state
+        {:ok, observation} ->
+          reconcile_finalized_disposable_lease(state, reservation, assignment, observation)
 
         {:held, _reason} ->
           state
@@ -780,6 +780,57 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_retained_disposable_terminal(state, _reservation), do: state
+
+  defp reconcile_finalized_disposable_lease(state, reservation, assignment, observation) do
+    now_ms = execution_fence_now_ms()
+
+    case TerminalLease.confirm(
+           state.execution_fence,
+           reservation,
+           assignment,
+           observation,
+           now_ms
+         ) do
+      {:ok, fence_state, _evidence} ->
+        persist_finalized_disposable_lease(state, reservation, fence_state)
+
+      {:error, reason} ->
+        Logger.warning("Disposable terminal lease proof was rejected for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp persist_finalized_disposable_lease(state, reservation, fence_state) do
+    case persist_execution_fence(state, fence_state) do
+      {:ok, persisted} ->
+        Logger.debug("Retained disposable Job terminal lease confirmed for issue_id=#{reservation.issue_id}")
+        release_matching_disposable_responsibility_lease(persisted, reservation)
+
+      {:error, reason} ->
+        Logger.warning("Disposable terminal lease proof was not persisted for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp release_matching_disposable_responsibility_lease(state, reservation) do
+    delegation = get_in(state.responsibility_graph, [:delegations, reservation.responsible_delegation_id])
+    lease = if is_map(delegation), do: Map.get(delegation, :runtime_lease)
+
+    expected = %{
+      issue_id: reservation.issue_id,
+      repository: reservation.repository_ref,
+      generation: reservation.generation,
+      session_id: reservation.session_id,
+      process_id: reservation.process_id
+    }
+
+    entry = %{
+      responsibility_delegation_id: reservation.responsible_delegation_id,
+      responsibility_runtime_lease: if(is_map(lease) and Map.take(lease, Map.keys(expected)) == expected, do: lease)
+    }
+
+    release_responsibility_lease(state, entry)
+  end
 
   defp restore_verified_retained_disposable_claim(state, issue_id, generation, allocation_id) do
     if Map.has_key?(state.running, issue_id) or Map.has_key?(state.blocked, issue_id) do
