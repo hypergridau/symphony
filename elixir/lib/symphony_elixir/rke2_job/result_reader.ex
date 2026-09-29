@@ -223,6 +223,25 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
           &(not is_nil(result[&1]))
         )
 
+  defp valid_status?(status, "codex", %{"checkout_lease_id" => nil} = result)
+       when status in ["failed", "held"] do
+    Map.take(
+      result,
+      ~w(checkout_revocation broker_lease_id revocation codex_exit_code head_oid branch_head_oid base_oid changed_files pull_request_number pull_request_url)
+    ) == %{
+      "checkout_revocation" => "not_started",
+      "broker_lease_id" => nil,
+      "revocation" => "not_started",
+      "codex_exit_code" => nil,
+      "head_oid" => nil,
+      "branch_head_oid" => nil,
+      "base_oid" => nil,
+      "changed_files" => nil,
+      "pull_request_number" => nil,
+      "pull_request_url" => nil
+    }
+  end
+
   defp valid_status?(status, "codex", _result) when status in ["failed", "held"], do: true
   defp valid_status?(_status, _mode, _result), do: false
 

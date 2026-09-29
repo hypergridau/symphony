@@ -157,12 +157,39 @@ defmodule SymphonyElixir.RKE2JobResultReaderTest do
     assert {:ok, observation} = read(assignment, config, failed_job, [held_pod], uid)
     assert observation.exit_code == 2
 
+    held_with_head =
+      put_in(
+        held_pod,
+        ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"],
+        Jason.encode!(%{result | head_oid: String.duplicate("a", 40)})
+      )
+
+    assert {:held, :job_result_pod_or_receipt_unverified} =
+             read(assignment, config, failed_job, [held_with_head], uid)
+
     wrong_exit = put_in(held_pod, ["status", "containerStatuses", Access.at(0), "state", "terminated", "exitCode"], 1)
     assert {:held, :job_result_pod_or_receipt_unverified} = read(assignment, config, failed_job, [wrong_exit], uid)
 
     failed_result = Jason.encode!(%{result | status: "failed"})
     failed = put_in(wrong_exit, ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"], failed_result)
     assert {:ok, %{exit_code: 1}} = read(assignment, config, failed_job, [failed], uid)
+
+    for changed <- [
+          %{result | head_oid: String.duplicate("a", 40)},
+          %{result | broker_lease_id: "publish-1"},
+          %{result | checkout_revocation: "confirmed"},
+          %{result | revocation: "confirmed"}
+        ] do
+      forged =
+        put_in(
+          failed,
+          ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"],
+          Jason.encode!(%{changed | status: "failed"})
+        )
+
+      assert {:held, :job_result_pod_or_receipt_unverified} =
+               read(assignment, config, failed_job, [forged], uid)
+    end
   end
 
   defp read(assignment, config, job, pods, uid) do
