@@ -80,6 +80,40 @@ defmodule SymphonyElixir.WorkerBrokerClientTest do
              BrokerClient.checkout("lease-1", "hypergridau/symphony", "2026-09-27T06:05:00Z", context)
   end
 
+  test "qualification checkout accepts only an explicit successful denial response", %{context: context} do
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.request_path == "/v1/checkout"
+      Req.Test.json(conn, %{"status" => "denied"})
+    end)
+
+    assert :confirmed_denied =
+             BrokerClient.checkout_denial("lease-1", "hypergridau/symphony", "2026-09-27T06:05:00Z", context)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{
+        "status" => "issued",
+        "installationToken" => "must-not-escape",
+        "repositoryRef" => "hypergridau/symphony",
+        "useNotAfter" => "2026-09-27T06:05:00Z"
+      })
+    end)
+
+    assert :unexpected_issue =
+             BrokerClient.checkout_denial("lease-1", "hypergridau/symphony", "2026-09-27T06:05:00Z", context)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{"status" => "denied", "reason" => "authorization_failed"})
+    end)
+
+    assert {:held, :broker_uncertain} =
+             BrokerClient.checkout_denial("lease-1", "hypergridau/symphony", "2026-09-27T06:05:00Z", context)
+
+    Req.Test.expect(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 401, "denied") end)
+
+    assert {:held, :broker_uncertain} =
+             BrokerClient.checkout_denial("lease-1", "hypergridau/symphony", "2026-09-27T06:05:00Z", context)
+  end
+
   test "holds an issued lease response bound to another repository", %{context: context} do
     Req.Test.expect(__MODULE__, fn conn ->
       {:ok, body, conn} = Plug.Conn.read_body(conn)

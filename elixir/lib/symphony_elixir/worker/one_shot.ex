@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.Worker.OneShot do
   @moduledoc "Runs one broker-authenticated disposable checkout and Codex turn."
 
+  alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.RKE2Job.JobSpec
   alias SymphonyElixir.Worker.BoundedOutput
   alias SymphonyElixir.Worker.BrokerClient
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
@@ -10,6 +12,11 @@ defmodule SymphonyElixir.Worker.OneShot do
   @askpass "/tmp/symphony-git-askpass"
   @codex_home "/var/lib/frigga-codex-home"
   @max_addition_bytes 512 * 1024
+  @hgs736_issue_uuid "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
+  @hgs736_generation 1
+  @hgs736_constraint_prefix "qualification/hgs-736/"
+  @hgs736_no_checkout_constraint "qualification/hgs-736/started-no-checkout/" <>
+                                   @hgs736_issue_uuid <> "/generation-1"
 
   @type result :: {:ok, map()} | {:held, String.t(), map()} | {:error, String.t(), map()}
 
@@ -18,29 +25,49 @@ defmodule SymphonyElixir.Worker.OneShot do
       when is_map(bundle) and is_map(subject) and is_map(env) and is_map(deps) do
     identity = WorkerCLI.base_result(decoded, "failed", "worker_failed")
 
+    case hgs736_qualification(decoded, env) do
+      :invalid ->
+        {:error, "invalid_hgs736_checkout_qualification", identity}
+
+      qualification ->
+        run_checkout_flow(qualification, bundle, subject, identity, env, deps)
+    end
+  end
+
+  def run(_decoded, _env, _deps), do: {:error, "invalid_worker_assignment", %{}}
+
+  defp run_checkout_flow(qualification, bundle, subject, identity, env, deps) do
     with :ok <- auth_slot_ready(env, deps),
          :ok <- workspace_ready(deps),
          {:ok, checkout_lease} <- issue_lease(subject, :git_checkout, "worker-checkout", deps) do
-      case checkout_with_lease(checkout_lease, bundle, subject, deps) do
-        {:ok, revocation} ->
-          identity = checkout_receipt(identity, checkout_lease, revocation)
-          run_assignment(bundle, subject, identity, deps)
-
-        {:held, reason, revocation} ->
-          result = checkout_receipt(identity, checkout_lease, revocation)
-          {:held, safe_reason(reason), result}
-
-        {:error, reason, revocation} ->
-          result = checkout_receipt(identity, checkout_lease, revocation)
-          {:error, safe_reason(reason), result}
-      end
+      checkout_result = checkout_for_qualification(qualification, checkout_lease, bundle, subject, deps)
+      checkout_outcome(checkout_result, checkout_lease, bundle, subject, identity, deps)
     else
       {:held, reason} -> {:held, safe_reason(reason), identity}
       {:error, reason} -> {:error, safe_reason(reason), identity}
     end
   end
 
-  def run(_decoded, _env, _deps), do: {:error, "invalid_worker_assignment", %{}}
+  defp checkout_for_qualification(:hgs736, lease, _bundle, subject, deps),
+    do: hgs736_checkout_denial(lease, subject, deps)
+
+  defp checkout_for_qualification(:ordinary, lease, bundle, subject, deps),
+    do: checkout_with_lease(lease, bundle, subject, deps)
+
+  defp checkout_outcome({:ok, revocation}, lease, bundle, subject, identity, deps) do
+    identity = checkout_receipt(identity, lease, revocation)
+    run_assignment(bundle, subject, identity, deps)
+  end
+
+  defp checkout_outcome({:held, reason, revocation}, lease, _bundle, _subject, identity, _deps) do
+    result = checkout_receipt(identity, lease, revocation)
+    {:held, safe_reason(reason), result}
+  end
+
+  defp checkout_outcome({:error, reason, revocation}, lease, _bundle, _subject, identity, _deps) do
+    result = checkout_receipt(identity, lease, revocation)
+    {:error, safe_reason(reason), result}
+  end
 
   defp run_assignment(bundle, subject, identity, deps) do
     with {:ok, codex_exit} <- run_codex(bundle, deps),
@@ -166,6 +193,90 @@ defmodule SymphonyElixir.Worker.OneShot do
     end
   end
 
+  defp hgs736_qualification(%{bundle: bundle, subject: subject}, env) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(bundle),
+         %{environment: %{constraints: constraints}} <- bundle,
+         true <- is_list(constraints) do
+      qualification_for_constraints(constraints, bundle, subject, env)
+    else
+      _ -> :invalid
+    end
+  rescue
+    _ -> :invalid
+  end
+
+  defp qualification_for_constraints(constraints, bundle, subject, env) do
+    case Enum.filter(constraints, &String.starts_with?(&1, @hgs736_constraint_prefix)) do
+      [] ->
+        :ordinary
+
+      [@hgs736_no_checkout_constraint] ->
+        if hgs736_assignment_binding?(bundle, subject, env), do: :hgs736, else: :invalid
+
+      _reserved_or_malformed ->
+        :invalid
+    end
+  end
+
+  defp hgs736_assignment_binding?(bundle, subject, env) do
+    bundle.lease.issue_id == @hgs736_issue_uuid and bundle.lease.generation == @hgs736_generation and
+      hgs736_subject_matches?(bundle, subject) and hgs736_job_matches?(bundle, subject, env)
+  rescue
+    _ -> false
+  end
+
+  defp hgs736_subject_matches?(bundle, subject) do
+    expected = %{
+      assignmentDigest: bundle.sha256,
+      issueUuid: bundle.lease.issue_id,
+      generation: bundle.lease.generation,
+      runnerId: bundle.seat,
+      repositoryId: subject.repositoryId,
+      repositoryRef: bundle.repository_ref,
+      branchRef: "refs/heads/" <> bundle.branch
+    }
+
+    map_size(subject) == map_size(expected) and
+      is_binary(subject.repositoryId) and Regex.match?(~r/\A[1-9][0-9]{0,19}\z/, subject.repositoryId) and
+      Map.take(subject, Map.keys(expected)) == expected
+  end
+
+  defp hgs736_job_matches?(bundle, subject, env) do
+    env_keys = ["SYMPHONY_ASSIGNMENT_SHA256", "SYMPHONY_ASSIGNMENT_ID", "SYMPHONY_REPOSITORY_ID"]
+
+    Map.take(env, env_keys) == %{
+      "SYMPHONY_ASSIGNMENT_SHA256" => bundle.sha256,
+      "SYMPHONY_ASSIGNMENT_ID" => JobSpec.identity(bundle),
+      "SYMPHONY_REPOSITORY_ID" => subject.repositoryId
+    }
+  end
+
+  defp hgs736_checkout_denial(lease, subject, deps) do
+    lease_id = lease["leaseId"]
+
+    case broker_revoke(lease_id, deps) do
+      :ok ->
+        checkout_result = broker_checkout_denial(lease, subject, deps)
+        revoke_result = broker_revoke(lease_id, deps)
+        hgs736_checkout_denial_result(checkout_result, revoke_result)
+
+      _ ->
+        {:held, :credential_revocation_unconfirmed, "held"}
+    end
+  end
+
+  defp hgs736_checkout_denial_result(:confirmed_denied, :ok),
+    do: {:error, :credential_checkout_denied, "confirmed"}
+
+  defp hgs736_checkout_denial_result(:unexpected_issue, :ok),
+    do: {:held, :qualification_checkout_denial_failed, "confirmed"}
+
+  defp hgs736_checkout_denial_result({:held, _reason}, :ok),
+    do: {:held, :credential_checkout_uncertain, "confirmed"}
+
+  defp hgs736_checkout_denial_result(_checkout_result, _revoke_result),
+    do: {:held, :credential_revocation_unconfirmed, "held"}
+
   defp checkout_receipt(identity, lease, revocation) do
     Map.merge(identity, %{
       checkout_lease_id: lease["leaseId"],
@@ -220,6 +331,20 @@ defmodule SymphonyElixir.Worker.OneShot do
       {:ok, %{installation_token: token}} when is_binary(token) -> {:ok, %{installation_token: token}}
       {:held, _} -> {:held, :credential_checkout_uncertain}
       {:error, _} -> {:error, :credential_checkout_denied}
+      _ -> {:held, :credential_checkout_uncertain}
+    end
+  end
+
+  defp broker_checkout_denial(lease, subject, deps) do
+    case call(
+           deps,
+           :broker_checkout_denial,
+           &BrokerClient.checkout_denial/4,
+           [lease["leaseId"], subject.repositoryRef, lease["notAfter"], %{}]
+         ) do
+      :confirmed_denied -> :confirmed_denied
+      :unexpected_issue -> :unexpected_issue
+      {:held, _} -> {:held, :credential_checkout_uncertain}
       _ -> {:held, :credential_checkout_uncertain}
     end
   end
