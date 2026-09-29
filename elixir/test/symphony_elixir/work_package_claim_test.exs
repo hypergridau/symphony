@@ -1489,7 +1489,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
     }
 
     {:ok, base} =
@@ -1662,7 +1664,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
     }
 
     assert {:ok, config} =
@@ -1877,7 +1881,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
     }
 
     {:ok, base} =

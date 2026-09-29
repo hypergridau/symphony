@@ -25,6 +25,8 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
     orchestrator_opts =
       case WorkPackageRuntime.configuration() do
         :disabled ->
+          install_abort_prepare_roots(nil)
+
           if WorkPackageRuntime.managed_pool?() do
             Logger.error("Managed Symphony pool requires the complete work-package runtime configuration")
             raise ArgumentError, "managed Symphony pool work-package runtime is not configured"
@@ -33,6 +35,7 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
           end
 
         {:ok, runtime} ->
+          install_abort_prepare_roots(runtime.disposable_rke2_host_config)
           Keyword.merge(orchestrator_opts, execution_supervisor: :systemd_user, work_package_runtime: runtime)
 
         {:error, reason} ->
@@ -52,5 +55,15 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
     ]
 
     Supervisor.init(children, strategy: :one_for_all)
+  end
+
+  defp install_abort_prepare_roots(%{abort_journal_root: journal_root, workspace_root: workspace_root}) do
+    Application.put_env(:symphony_elixir, :abort_prepare_journal_root, journal_root)
+    Application.put_env(:symphony_elixir, :abort_prepare_workspace_root, workspace_root)
+  end
+
+  defp install_abort_prepare_roots(_) do
+    Application.delete_env(:symphony_elixir, :abort_prepare_journal_root)
+    Application.delete_env(:symphony_elixir, :abort_prepare_workspace_root)
   end
 end
