@@ -22,11 +22,7 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
          {:ok, journal} <- Journal.load(path),
          key = Journal.reservation_key(issue, profile, repository, generation),
          saved when is_map(saved) <- Map.get(journal.reservations, key) do
-      case Map.get(saved, :dispatch) do
-        %{phase: "spawn_started"} -> classify_snapshot(saved)
-        %{phase: "allocation_suspended"} -> classify_suspended_snapshot(saved)
-        _ -> :local
-      end
+      classify_reservation(saved)
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :disposable_cleanup_reservation_missing}
@@ -37,25 +33,22 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
 
   def reservation(_runtime, _token), do: {:error, :disposable_cleanup_reservation_unavailable}
 
-  defp classify_snapshot(%{assignment_snapshot: snapshot} = saved) when is_binary(snapshot) do
+  defp classify_reservation(%{assignment_snapshot: snapshot} = saved) when is_binary(snapshot) do
     case ManagedAssignmentBundle.from_snapshot(snapshot) do
-      {:ok, %{environment: %{target_environment: :rke2}}} -> {:ok, saved}
+      {:ok, %{environment: %{target_environment: :rke2}}} -> classify_signed_disposable(saved)
       _ -> {:error, :disposable_cleanup_assignment_invalid}
     end
   end
 
-  defp classify_snapshot(%{dispatch: %{allocation_id: "rke2job:v1:" <> _}}),
+  defp classify_reservation(%{dispatch: %{allocation_id: "rke2job:v1:" <> _}}),
     do: {:error, :disposable_cleanup_assignment_missing}
 
-  defp classify_snapshot(_saved), do: :local
+  defp classify_reservation(_saved), do: :local
 
-  defp classify_suspended_snapshot(%{assignment_snapshot: snapshot}) when is_binary(snapshot),
-    do: {:error, :disposable_cleanup_not_started}
+  defp classify_signed_disposable(%{dispatch: %{phase: "spawn_started", allocation_id: "rke2job:v1:" <> _}} = saved),
+    do: {:ok, saved}
 
-  defp classify_suspended_snapshot(%{dispatch: %{allocation_id: "rke2job:v1:" <> _}}),
-    do: {:error, :disposable_cleanup_assignment_missing}
-
-  defp classify_suspended_snapshot(_saved), do: :local
+  defp classify_signed_disposable(_saved), do: {:error, :disposable_cleanup_not_started}
 
   @doc "Returns a bounded receipt reference only for an exact finalized disposable run."
   @spec verify(map(), map(), map(), String.t()) :: {:ok, String.t()} | {:error, term()}
