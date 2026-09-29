@@ -33,7 +33,9 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
     "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
     "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-    "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+    "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
+    "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
+    "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
   }
 
   test "host settings are all-or-nothing and pinned to a manifest repository" do
@@ -42,6 +44,9 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
 
     assert {:error, {:incomplete_rke2_host_context, ["SYMPHONY_RKE2_AUTH_CLAIM_NAME"]}} =
              HostAllocationContext.configuration(Map.delete(@env, "SYMPHONY_RKE2_AUTH_CLAIM_NAME"), manifest, "https://provider.example", "host-token")
+
+    assert {:error, {:incomplete_rke2_host_context, ["SYMPHONY_RKE2_ABORT_JOURNAL_ROOT"]}} =
+             HostAllocationContext.configuration(Map.delete(@env, "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT"), manifest, "https://provider.example", "host-token")
 
     assert {:error, :invalid_rke2_host_context} =
              HostAllocationContext.configuration(@env, nil, "https://provider.example", "host-token")
@@ -57,6 +62,33 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert config.repository_ref == "hypergridau/symphony"
     assert config.slot_id == "slot-one"
     assert config.result_journal_root == "/private/symphony/job-results"
+    assert config.abort_journal_root == "/private/symphony/abort-prepares"
+    assert config.workspace_root == "/private/symphony/workspaces"
+
+    assert {:error, :invalid_rke2_host_context} =
+             HostAllocationContext.configuration(
+               Map.put(@env, "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT", "/private/symphony/workspaces/abort"),
+               manifest,
+               "https://provider.example",
+               "host-token"
+             )
+  end
+
+  test "abort journal cannot resolve through a link into the workspace" do
+    root = Path.join(System.tmp_dir!(), "hgs733-abort-roots-#{System.unique_integer([:positive])}")
+    workspace = Path.join(root, "workspaces")
+    alias_path = Path.join(root, "alias")
+    File.mkdir_p!(workspace)
+    File.ln_s!(workspace, alias_path)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    env =
+      @env
+      |> Map.put("SYMPHONY_RKE2_WORKSPACE_ROOT", workspace)
+      |> Map.put("SYMPHONY_RKE2_ABORT_JOURNAL_ROOT", Path.join(alias_path, "abort"))
+
+    assert {:error, :invalid_rke2_host_context} =
+             HostAllocationContext.configuration(env, %{repository_ref: "hypergridau/symphony"}, "https://provider.example", "host-token")
   end
 
   test "prepares one exact slot-bound Job context without storing credentials in the assignment" do

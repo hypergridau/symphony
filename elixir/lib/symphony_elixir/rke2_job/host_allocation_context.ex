@@ -9,6 +9,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.PathSafety
   alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
   alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter, ResultJournal}
@@ -23,6 +24,8 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     SYMPHONY_RKE2_AUTH_SLOT_ID
     SYMPHONY_RKE2_AUTH_CLAIM_NAME
     SYMPHONY_RKE2_RESULT_JOURNAL_ROOT
+    SYMPHONY_RKE2_ABORT_JOURNAL_ROOT
+    SYMPHONY_RKE2_WORKSPACE_ROOT
   )
   @digest_image ~r|\A[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}\z|
   @dns_label ~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/
@@ -252,8 +255,11 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     slot_id = env["SYMPHONY_RKE2_AUTH_SLOT_ID"]
     claim_name = env["SYMPHONY_RKE2_AUTH_CLAIM_NAME"]
     result_journal_root = env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
+    abort_journal_root = env["SYMPHONY_RKE2_ABORT_JOURNAL_ROOT"]
+    workspace_root = env["SYMPHONY_RKE2_WORKSPACE_ROOT"]
 
     if valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name, result_journal_root) and
+         valid_abort_roots?(abort_journal_root, workspace_root) and
          https_origin?(provider_url) and byte_size(repository_ref) > 0 and byte_size(runner_token) > 0 do
       {:ok,
        %{
@@ -264,6 +270,8 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          slot_id: slot_id,
          claim_name: claim_name,
          result_journal_root: result_journal_root,
+         abort_journal_root: abort_journal_root,
+         workspace_root: workspace_root,
          repository_ref: repository_ref,
          provider_url: provider_url,
          runner_token: runner_token
@@ -286,6 +294,22 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     do: Path.type(root) == :absolute and Path.expand(root) == root
 
   defp absolute_root?(_root), do: false
+
+  defp valid_abort_roots?(journal_root, workspace_root) do
+    absolute_root?(journal_root) and absolute_root?(workspace_root) and
+      case {PathSafety.canonicalize(journal_root), PathSafety.canonicalize(workspace_root)} do
+        {{:ok, canonical_journal}, {:ok, canonical_workspace}} ->
+          not inside_root?(canonical_journal, canonical_workspace)
+
+        _ ->
+          false
+      end
+  end
+
+  defp inside_root?(path, root) do
+    PathSafety.lexically_equal?(path, root) or
+      String.starts_with?(path, String.trim_trailing(root, "/") <> "/")
+  end
 
   defp digest_image?(image), do: byte_size(image) <= 512 and Regex.match?(@digest_image, image)
 

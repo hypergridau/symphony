@@ -327,10 +327,14 @@ cleanup after activation.
 The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SERVER`,
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
 `SYMPHONY_RKE2_REPOSITORY_ID`, `SYMPHONY_RKE2_AUTH_SLOT_ID`,
-`SYMPHONY_RKE2_AUTH_CLAIM_NAME`, and `SYMPHONY_RKE2_RESULT_JOURNAL_ROOT` tuple.
+`SYMPHONY_RKE2_AUTH_CLAIM_NAME`, `SYMPHONY_RKE2_RESULT_JOURNAL_ROOT`,
+`SYMPHONY_RKE2_ABORT_JOURNAL_ROOT`, and `SYMPHONY_RKE2_WORKSPACE_ROOT` tuple.
 The journal root must be a host-private absolute directory outside worker workspaces;
 the result journal checks its ownership and mode before writing. Partial settings
-fail startup. For each new allocation, the host reads its rotating Kubernetes
+fail startup. The abort journal root must also be absolute and outside the declared
+workspace root; supervisor startup pins both paths for the root-only abort prepare
+caller. This configures its trust check but does not authorize an abort without an
+exact claim-bound abort intent and witness. For each new allocation, the host reads its rotating Kubernetes
 token, verifies the exact Bound PVC UID,
 reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
 configuration to the existing suspended controller. At terminal cleanup, the host
