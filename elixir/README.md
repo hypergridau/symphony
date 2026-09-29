@@ -357,7 +357,14 @@ the journaled suspended claim only after that exact readback. If a prior
 activation intent names an allocation, recovery requires either the exact
 active Job and bound OAuth slot or its durable terminal result and slot binding,
 including a lease that has already been released after verified cleanup.
-It restores only the existing claim fence; it does not create or resume a Job.
+It restores only the existing claim fence. When a blocked issue is still active
+and routed to this worker, a later unpaused poll may resume a `spawn_started`
+claim only after the exact suspended Job, its never-executed status and complete
+owned-Pod absence, active execution lease, signed assignment, claim binding,
+and OAuth slot are reverified. The existing root
+`spawn_intent` is replayed before the normal activation guard runs. A changed
+Job, missing witness, active Job, terminal issue, or renewed pause leaves the
+claim retained without another activation.
 For a retained `spawn_started` host claim, the same poll owner now tries the
 existing terminal finalizer against the exact active Job or its durable result
 after deletion. The finalizer records a terminal result, deletes only the

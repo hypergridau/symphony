@@ -1134,7 +1134,9 @@ defmodule SymphonyElixir.Orchestrator do
           Logger.info("Blocked pre-spawn claim has an exact provider release receipt: #{issue_context(issue)}; releasing local block")
           release_issue_claim(state, issue.id)
         else
-          refresh_blocked_issue_state(state, issue)
+          state
+          |> refresh_blocked_issue_state(issue)
+          |> resume_retained_disposable_activation(issue)
         end
 
       true ->
@@ -1145,6 +1147,37 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp resume_retained_disposable_activation(state, issue) do
+    runtime = state.work_package_runtime || %{}
+    execution = Map.get(state.execution_fence.executions, issue.id)
+
+    with %{configured?: true, paused?: false, state: "running"} <- GlobalPause.snapshot(),
+         host when is_map(host) <- Map.get(runtime, :disposable_rke2_host_config),
+         path when is_binary(path) <- Map.get(runtime, :journal_path),
+         runner_id when is_binary(runner_id) <- Map.get(runtime, :runner_id),
+         profile when is_binary(profile) <- Map.get(runtime, :managed_project_profile_id),
+         %{generation: generation, repository: repository, leases: leases} when is_integer(generation) <- execution,
+         key = Journal.reservation_key(issue.id, profile, repository, generation),
+         {:ok, journal} <- Journal.load(path),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         %{phase: "spawn_started", allocation_id: allocation_id} <- reservation.dispatch,
+         true <-
+           reservation.issue_id == issue.id and reservation.generation == generation and
+             reservation.repository_ref == repository and reservation.runner_id == runner_id,
+         {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(reservation.assignment_snapshot),
+         %{environment: %{target_environment: :rke2}} <- assignment,
+         %{status: :active, process_id: process_id, branch: branch, role: :worker} <-
+           Map.get(leases, reservation.session_id),
+         true <- process_id == reservation.process_id and branch == assignment.branch,
+         {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id),
+         {:ok, context} <- HostAllocationContext.reattach_unstarted(assignment, binding, allocation_id, host) do
+      dispatch = %{assignment_bundle: assignment, claim_binding: binding}
+      activate_disposable_allocation(state, issue, dispatch, context, claim_input(state, issue), allocation_id)
+    else
+      _ -> state
+    end
+  end
 
   defp retained_disposable_claim?(%State{work_package_runtime: runtime} = state, %Issue{} = issue)
        when is_map(runtime) do
