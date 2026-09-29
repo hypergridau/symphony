@@ -1,7 +1,7 @@
 defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  def allocate_or_reconcile(_assignment, key, context) do
+  def allocate_or_reconcile(assignment, key, context) do
     if is_binary(context[:claim_journal_path]) do
       {:ok, journal} = Journal.load(context.claim_journal_path)
       [reservation] = Map.values(journal.reservations)
@@ -9,7 +9,11 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
     end
 
     send(context.test_pid, {:allocation_requested, key})
-    Map.get(context, :allocation_result, {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}})
+
+    case Process.get(:suspended_allocation_result_fun) do
+      fun when is_function(fun, 1) -> fun.(assignment)
+      _ -> Map.get(context, :allocation_result, {:ok, %{id: "rke2job:v1:fixture-allocation", status: :ready}})
+    end
   end
 
   def activate_owned(allocation, assignment, key, context) do
@@ -41,6 +45,16 @@ end
 defmodule SymphonyElixir.RKE2Job.PollSlotGuard do
   def verify_claim_uid(_slot, _context), do: :ok
   def verify_bound(_slot, _assignment, _allocation, _context), do: :ok
+end
+
+defmodule SymphonyElixir.RKE2Job.PollUnstartedClient do
+  def get_job("frigga", _name, %{synthetic: true}), do: {:ok, Process.get(:retained_spawn_job)}
+
+  def list_pods_snapshot("frigga", %{synthetic: true}),
+    do: {:ok, %{items: Process.get(:retained_spawn_pods, []), resource_version: "pod-list-1"}}
+
+  def delete_suspended_job(_namespace, _name, _uid, _version, _context),
+    do: raise("unstarted readback must not delete the Job")
 end
 
 defmodule SymphonyElixir.WorkPackageClaimTest do
@@ -1829,6 +1843,168 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     refute_receive {:activation_requested, _, _, _}
   end
 
+  test "replays the exact paused spawn intent when its suspended Job remains owned" do
+    path = temp_path()
+    pause_root = temp_path()
+    File.mkdir_p!(pause_root)
+    pause_path = Path.join(pause_root, "global-mutable-pause.state")
+    File.write!(pause_path, "running\n")
+    previous_pause_path = System.get_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+    System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", pause_path)
+
+    on_exit(fn ->
+      if is_binary(previous_pause_path),
+        do: System.put_env("SYMPHONY_GLOBAL_PAUSE_FILE", previous_pause_path),
+        else: System.delete_env("SYMPHONY_GLOBAL_PAUSE_FILE")
+
+      File.rm_rf(path)
+      File.rm_rf(pause_root)
+    end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Paused spawn intent",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    env = %{
+      "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
+      "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
+      "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
+      "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results"
+    }
+
+    {:ok, base} =
+      HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    caller = self()
+
+    witness = fn request ->
+      if request["operation"] == "spawn_intent" and request["replayOnly"] != true do
+        File.write!(pause_path, "paused\n")
+      end
+
+      {:ok,
+       %{
+         "ok" => true,
+         "receipt" => %{
+           "version" => 1,
+           "sequence" => 1,
+           "hash" => String.duplicate("a", 64),
+           "replayed" => request["replayOnly"] == true
+         }
+       }}
+    end
+
+    Process.put(:suspended_allocation_result_fun, fn assignment ->
+      {id, _job} = retained_spawn_job(assignment, base, "job-uid-one", true)
+      {:ok, %{id: id, status: :ready}}
+    end)
+
+    config =
+      base
+      |> Map.put(:adapter, SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter)
+      |> Map.put(:test_pid, caller)
+      |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:pvc_read_fun, fn "frigga", "codex-oauth-slot-1", %{synthetic: true} ->
+        {:ok,
+         %{
+           "apiVersion" => "v1",
+           "kind" => "PersistentVolumeClaim",
+           "metadata" => %{"namespace" => "frigga", "name" => "codex-oauth-slot-1", "uid" => "pvc-uid-one"},
+           "status" => %{"phase" => "Bound"}
+         }}
+      end)
+      |> Map.put(:post_fun, fn _url, _opts ->
+        {:ok,
+         %Req.Response{
+           status: 200,
+           body: %{"data" => %{"slotId" => "slot-one", "claimName" => "codex-oauth-slot-1", "claimUid" => "pvc-uid-one", "leaseId" => "12345678-1234-4123-8123-123456789abc", "replayed" => false}}
+         }}
+      end)
+
+    {blocked, runtime} =
+      post_claim_revalidation_failure(path, issue, issue,
+        disposable_rke2_host_config: config,
+        host_witness_fun: witness
+      )
+
+    assert blocked.blocked[@issue_id].error =~ "disposable_rke2_activation_uncertain"
+    assert_receive {:allocation_requested, _}
+    refute_receive {:activation_requested, _, _, _}
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "spawn_started"
+    {:ok, assignment} = ManagedAssignmentBundle.from_snapshot(reservation.assignment_snapshot)
+    {allocation_id, job} = retained_spawn_job(assignment, base, "job-uid-one", true)
+    assert reservation.dispatch.allocation_id == allocation_id
+
+    host_config =
+      config
+      |> Map.put(:adapter, SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter)
+      |> Map.put(:slot_guard, SymphonyElixir.RKE2Job.PollSlotGuard)
+      |> Map.put(:observation_client, SymphonyElixir.RKE2Job.PollUnstartedClient)
+      |> Map.put(:test_pid, caller)
+      |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:job_read_fun, fn "frigga", _name, %{synthetic: true} -> {:ok, Process.get(:retained_spawn_job)} end)
+
+    Process.put(:retained_spawn_job, job)
+    state = %{blocked | work_package_runtime: Map.put(runtime, :disposable_rke2_host_config, host_config)}
+
+    assert %{paused?: true} = SymphonyElixir.GlobalPause.snapshot()
+    paused = Orchestrator.reconcile_blocked_issue_states_for_test([issue], state)
+    refute_receive {:activation_requested, _, _, _}
+    assert MapSet.member?(paused.claimed, @issue_id)
+
+    File.write!(pause_path, "running\n")
+    Process.put(:retained_spawn_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
+    mismatched = Orchestrator.reconcile_blocked_issue_states_for_test([issue], paused)
+    refute_receive {:activation_requested, _, _, _}
+
+    Process.put(:retained_spawn_job, job)
+    terminal_issue = %{issue | state: "Done", dispatchable: false}
+    _terminal = Orchestrator.reconcile_blocked_issue_states_for_test([terminal_issue], mismatched)
+    refute_receive {:activation_requested, _, _, _}
+
+    Process.put(:retained_spawn_job, put_in(job, ["status"], %{"active" => 1}))
+    _previously_active = Orchestrator.reconcile_blocked_issue_states_for_test([issue], mismatched)
+    refute_receive {:activation_requested, _, _, _}
+
+    Process.put(:retained_spawn_job, job)
+    Process.put(:retained_spawn_pods, [owned_spawn_pod(job)])
+    _pod_present = Orchestrator.reconcile_blocked_issue_states_for_test([issue], mismatched)
+    refute_receive {:activation_requested, _, _, _}
+    Process.put(:retained_spawn_pods, [])
+
+    stale_fence = %{
+      mismatched.execution_fence
+      | executions:
+          Map.update!(mismatched.execution_fence.executions, @issue_id, fn execution ->
+            %{execution | leases: Map.update!(execution.leases, reservation.session_id, &%{&1 | process_id: "another-process"})}
+          end)
+    }
+
+    stale_lease = %{mismatched | execution_fence: stale_fence}
+
+    _stale = Orchestrator.reconcile_blocked_issue_states_for_test([issue], stale_lease)
+    refute_receive {:activation_requested, _, _, _}
+
+    resumed = Orchestrator.reconcile_blocked_issue_states_for_test([issue], mismatched)
+    assert_receive {:activation_requested, ^allocation_id, activation_key, "spawn_started"}
+    assert activation_key == assignment.sha256 <> ":activate"
+    assert resumed.blocked[@issue_id].error =~ "disposable_rke2_started_retained"
+
+    Process.put(:retained_spawn_job, put_in(job, ["spec", "suspend"], false))
+    _again = Orchestrator.reconcile_blocked_issue_states_for_test([issue], resumed)
+    refute_receive {:activation_requested, _, _, _}
+  end
+
   test "paused RKE2 replay retains the exact suspended Job and its execution lease" do
     path = temp_path()
     pause_root = temp_path()
@@ -2293,6 +2469,67 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         assert replay.reservation.generation == reservation.generation
       end
     end
+  end
+
+  defp retained_spawn_job(assignment, base, uid, suspended) do
+    slot = %{
+      slot_id: base.slot_id,
+      claim_name: base.claim_name,
+      claim_uid: "pvc-uid-one",
+      lease_id: "12345678-1234-4123-8123-123456789abc",
+      assignment_sha256: assignment.sha256,
+      seat: assignment.seat
+    }
+
+    {:ok, expected} =
+      JobSpec.compile(assignment, %{
+        namespace: "frigga",
+        image: base.image,
+        repository_id: base.repository_id,
+        auth_slot: slot,
+        auth_slot_catalog: %{base.slot_id => base.claim_name}
+      })
+
+    name = expected["metadata"]["name"]
+    labels = %{"batch.kubernetes.io/controller-uid" => uid, "batch.kubernetes.io/job-name" => name}
+
+    job =
+      expected
+      |> put_in(["metadata", "uid"], uid)
+      |> put_in(["metadata", "generation"], 1)
+      |> put_in(["metadata", "resourceVersion"], "job-version-1")
+      |> put_in(["metadata", "labels"], Map.merge(expected["metadata"]["labels"], labels))
+      |> put_in(["spec", "selector"], %{"matchLabels" => %{"batch.kubernetes.io/controller-uid" => uid}})
+      |> put_in(
+        ["spec", "template", "metadata", "labels"],
+        Map.merge(expected["spec"]["template"]["metadata"]["labels"], labels)
+      )
+      |> put_in(["spec", "suspend"], suspended)
+
+    allocation_id =
+      "rke2job:v1:" <>
+        Base.url_encode64(Jason.encode!([1, "frigga", name, uid, assignment.sha256]), padding: false)
+
+    {allocation_id, job}
+  end
+
+  defp owned_spawn_pod(job) do
+    name = job["metadata"]["name"]
+    uid = job["metadata"]["uid"]
+
+    %{
+      "apiVersion" => "v1",
+      "kind" => "Pod",
+      "metadata" => %{
+        "namespace" => "frigga",
+        "name" => name <> "-pod",
+        "uid" => "pod-uid-one",
+        "resourceVersion" => "pod-version-1",
+        "labels" => %{"batch.kubernetes.io/controller-uid" => uid},
+        "ownerReferences" => [%{"apiVersion" => "batch/v1", "kind" => "Job", "name" => name, "uid" => uid}]
+      },
+      "spec" => %{"volumes" => []}
+    }
   end
 
   defp suspended_assignment(lease) do

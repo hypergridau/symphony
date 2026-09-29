@@ -12,6 +12,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
   alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter, ResultJournal}
+  alias SymphonyElixir.RKE2Job.SuspendedAbort
 
   @namespace "frigga"
   @settings ~w(
@@ -25,6 +26,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   )
   @digest_image ~r|\A[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}\z|
   @dns_label ~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/
+  @test_environment Mix.env() == :test
 
   @doc "Parses an all-or-nothing host declaration; no token or OAuth bytes are read."
   @spec configuration(map(), map() | nil, String.t(), String.t()) :: {:ok, map()} | :disabled | {:error, term()}
@@ -64,6 +66,29 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   @spec reattach(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
   def reattach(assignment, binding, allocation_id, config),
     do: reattach_existing(assignment, binding, allocation_id, config, true)
+
+  @doc "Reattaches only when the exact suspended Job has no execution status or owned Pods."
+  @spec reattach_unstarted(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
+  def reattach_unstarted(assignment, binding, allocation_id, config) do
+    with {:ok, context} <- reattach(assignment, binding, allocation_id, config),
+         {:ok, kube_context} <- client_context(assignment, config),
+         {:ok, expected} <- JobSpec.compile(assignment, context.config),
+         {:ok, uid} <- terminal_allocation_uid(allocation_id, expected),
+         {:ok, _observation} <-
+           SuspendedAbort.prepare_owned(assignment, allocation_id, uid,
+             client: observation_client(config),
+             client_context: kube_context,
+             config: context.config
+           ) do
+      {:ok, context}
+    else
+      _ -> {:held, :rke2_retained_unstarted_job_unverified}
+    end
+  rescue
+    _ -> {:held, :rke2_retained_unstarted_job_unverified}
+  catch
+    _kind, _reason -> {:held, :rke2_retained_unstarted_job_unverified}
+  end
 
   @doc "Rebuilds the context for an activated exact Job without issuing another OAuth lease."
   @spec reattach_started(map(), map(), String.t(), map()) :: {:ok, map()} | {:held, term()}
@@ -213,6 +238,10 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   end
 
   defp job_reader(config), do: Map.get(config, :job_read_fun, &HTTPClient.get_job/3)
+
+  defp observation_client(config) do
+    if @test_environment, do: Map.get(config, :observation_client, HTTPClient), else: HTTPClient
+  end
 
   defp validate_configuration(env, %{repository_ref: repository_ref}, provider_url, runner_token)
        when is_binary(repository_ref) and is_binary(provider_url) and is_binary(runner_token) do
