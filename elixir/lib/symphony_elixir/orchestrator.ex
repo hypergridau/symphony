@@ -36,9 +36,12 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedResponsibility.Admission, as: ManagedAdmission
   alias SymphonyElixir.ManagedTokenBudget.Runtime, as: ManagedBudget
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
+  alias SymphonyElixir.ResponsibilityGraph.DisposableReviewCompletion
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, SuspendedController, TerminalOwner}
+  alias SymphonyElixir.RKE2Job.{DisposableCleanupEvidence, HostActivationGuard, HostAllocationContext}
+  alias SymphonyElixir.RKE2Job.{MergedResultEvidence, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{TerminalLease, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
   alias SymphonyElixir.WorkPackageClaim.Recovery, as: ClaimRecovery
@@ -763,9 +766,8 @@ defmodule SymphonyElixir.Orchestrator do
          %{environment: %{target_environment: :rke2}} <- assignment,
          {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id) do
       case TerminalOwner.reconcile(assignment, binding, allocation_id, host_config) do
-        {:ok, _observation} ->
-          Logger.debug("Retained disposable Job terminal cleanup reconciled for issue_id=#{reservation.issue_id}")
-          state
+        {:ok, observation} ->
+          reconcile_finalized_disposable_lease(state, reservation, assignment, observation)
 
         {:held, _reason} ->
           state
@@ -780,6 +782,160 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_retained_disposable_terminal(state, _reservation), do: state
+
+  defp reconcile_finalized_disposable_lease(state, reservation, assignment, observation) do
+    now_ms = execution_fence_now_ms()
+
+    case TerminalLease.confirm(
+           state.execution_fence,
+           reservation,
+           assignment,
+           observation,
+           now_ms
+         ) do
+      {:ok, fence_state, _evidence} ->
+        state
+        |> persist_finalized_disposable_lease(reservation, fence_state)
+        |> reconcile_disposable_remote_review(reservation, assignment, observation)
+
+      {:error, reason} ->
+        Logger.warning("Disposable terminal lease proof was rejected for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp persist_finalized_disposable_lease(state, reservation, fence_state) do
+    case persist_execution_fence(state, fence_state) do
+      {:ok, persisted} ->
+        Logger.debug("Retained disposable Job terminal lease confirmed for issue_id=#{reservation.issue_id}")
+        release_matching_disposable_responsibility_lease(persisted, reservation)
+
+      {:error, reason} ->
+        Logger.warning("Disposable terminal lease proof was not persisted for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
+        state
+    end
+  end
+
+  defp release_matching_disposable_responsibility_lease(state, reservation) do
+    delegation = get_in(state.responsibility_graph, [:delegations, reservation.responsible_delegation_id])
+    lease = if is_map(delegation), do: Map.get(delegation, :runtime_lease)
+
+    expected = %{
+      issue_id: reservation.issue_id,
+      repository: reservation.repository_ref,
+      generation: reservation.generation,
+      session_id: reservation.session_id,
+      process_id: reservation.process_id
+    }
+
+    entry = %{
+      responsibility_delegation_id: reservation.responsible_delegation_id,
+      responsibility_runtime_lease: if(is_map(lease) and Map.take(lease, Map.keys(expected)) == expected, do: lease)
+    }
+
+    release_responsibility_lease(state, entry)
+  end
+
+  defp reconcile_disposable_remote_review(state, reservation, assignment, observation) do
+    runtime = state.work_package_runtime || %{}
+    observe = Map.get(runtime, :disposable_merge_evidence_fun) || (&MergedResultEvidence.observe/2)
+
+    with :ok <-
+           ExecutionFence.retained_process_quiescence(
+             state.execution_fence,
+             reservation.issue_id,
+             reservation.generation
+           ),
+         {:ok, %{accepted_head: head, merge_identity: merge}} <- observe.(assignment, observation),
+         {:ok, [%Issue{id: issue_id} = issue]} <- fetch_review_issues(state, [reservation.issue_id]),
+         true <- issue_id == reservation.issue_id and terminal_issue_state?(issue.state, terminal_state_set()),
+         :ok <- recheck_review_issue(state, issue) do
+      entry = disposable_review_entry(reservation, issue, head, merge)
+
+      state
+      |> maybe_fence_terminal_execution(entry, true)
+      |> reconcile_disposable_cleanup(entry, assignment, head)
+    else
+      _ -> state
+    end
+  end
+
+  @doc false
+  @spec reconcile_disposable_remote_review_for_test(map(), map(), map(), map()) :: map()
+  def reconcile_disposable_remote_review_for_test(state, reservation, assignment, observation),
+    do: reconcile_disposable_remote_review(state, reservation, assignment, observation)
+
+  defp disposable_review_entry(reservation, issue, head, merge) do
+    %{
+      issue: issue,
+      execution_token: %{issue_id: reservation.issue_id, generation: reservation.generation},
+      execution_session_id: reservation.session_id,
+      process_id: reservation.process_id,
+      responsibility_delegation_id: reservation.responsible_delegation_id,
+      review_reservation: reservation,
+      accepted_head: head,
+      merge_identity: merge,
+      disposable_merge_verified: true,
+      terminal_outcome: TerminalOutcome.for_tracker_state(issue.state)
+    }
+  end
+
+  defp reconcile_disposable_cleanup(
+         %State{work_package_runtime: %{disposable_rke2_host_config: host}} = state,
+         entry,
+         assignment,
+         head
+       )
+       when is_map(host) do
+    token = Map.put(entry.execution_token, :repository_ref, assignment.repository_ref)
+    delegation = get_in(state.responsibility_graph, [:delegations, entry.responsibility_delegation_id])
+
+    with %{status: :completed} <- delegation,
+         {:ok, evidence_ref} <-
+           DisposableCleanupEvidence.verify(state.work_package_runtime, state.execution_fence, token, head),
+         lease when is_map(lease) <-
+           get_in(state.execution_fence, [:executions, token.issue_id, :leases, entry.execution_session_id]),
+         state =
+           submit_termination_cleanup_receipt(
+             state,
+             %{entry | execution_token: token},
+             lease.termination_evidence
+           ),
+         false <- cleanup_receipt_pending?(state.work_package_runtime, token, "termination_confirmed"),
+         {:ok, state} <- persist_disposable_cleanup(state, token, head, evidence_ref, entry.terminal_outcome) do
+      submit_repository_cleanup_receipt(state, token, head, entry.terminal_outcome)
+    else
+      _ -> state
+    end
+  end
+
+  defp reconcile_disposable_cleanup(state, _entry, _assignment, _head), do: state
+
+  @doc false
+  @spec reconcile_disposable_cleanup_for_test(map(), map(), map(), String.t()) :: map()
+  def reconcile_disposable_cleanup_for_test(state, entry, assignment, head),
+    do: reconcile_disposable_cleanup(state, entry, assignment, head)
+
+  defp persist_disposable_cleanup(state, token, head, evidence_ref, outcome) do
+    execution = get_in(state.execution_fence, [:executions, token.issue_id])
+    fence_token = %{issue_id: token.issue_id, generation: token.generation}
+
+    if execution.cleanup == :cleaned do
+      {:ok, state}
+    else
+      now_ms = execution_fence_now_ms()
+
+      with {:ok, prepared, _} <-
+             ExecutionFence.prepare_cleanup(state.execution_fence, fence_token, head, now_ms, outcome),
+           {:ok, state} <- persist_execution_fence(state, prepared),
+           {:ok, evidenced} <-
+             ExecutionFence.record_cleanup_evidence(state.execution_fence, fence_token, head, evidence_ref, now_ms),
+           {:ok, state} <- persist_execution_fence(state, evidenced),
+           {:ok, cleaned, _} <- ExecutionFence.cleanup(state.execution_fence, fence_token, head, now_ms) do
+        persist_execution_fence(state, cleaned)
+      end
+    end
+  end
 
   defp restore_verified_retained_disposable_claim(state, issue_id, generation, allocation_id) do
     if Map.has_key?(state.running, issue_id) or Map.has_key?(state.blocked, issue_id) do
@@ -2998,9 +3154,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_fence_terminal_execution(state, _running_entry, false), do: state
 
   defp maybe_fence_terminal_execution(state, entry, true) do
-    if is_nil(state.work_package_runtime) or Map.get(entry, :review_merge_verified, false),
-      do: fence_terminal_execution(state, entry),
-      else: state
+    if is_nil(state.work_package_runtime) or Map.get(entry, :review_merge_verified, false) or
+         Map.get(entry, :disposable_merge_verified, false),
+       do: fence_terminal_execution(state, entry),
+       else: state
   end
 
   defp fence_terminal_execution(state, %{execution_token: token, issue: %Issue{state: issue_state} = issue} = entry)
@@ -3043,8 +3200,18 @@ defmodule SymphonyElixir.Orchestrator do
           execution_fence_now_ms()
         )
       else
-        now_ms = execution_fence_now_ms()
-        ResponsibilityGraph.complete(state.responsibility_graph, delegation_id, terminal_attrs, now_ms)
+        if Map.get(entry, :disposable_merge_verified, false) do
+          DisposableReviewCompletion.complete(
+            state.responsibility_graph,
+            state.execution_fence,
+            entry,
+            terminal_attrs,
+            execution_fence_now_ms()
+          )
+        else
+          now_ms = execution_fence_now_ms()
+          ResponsibilityGraph.complete(state.responsibility_graph, delegation_id, terminal_attrs, now_ms)
+        end
       end
 
     case result do
@@ -3322,6 +3489,23 @@ defmodule SymphonyElixir.Orchestrator do
   defp cleanup_evidence_missing_archive?(_reason), do: false
 
   defp cleanup_evidence_ref(runtime, state, token, head) do
+    case disposable_cleanup_evidence_ref(runtime, state, token, head) do
+      :local -> local_cleanup_evidence_ref(runtime, state, token, head)
+      result -> result
+    end
+  end
+
+  defp disposable_cleanup_evidence_ref(%{disposable_rke2_host_config: host} = runtime, state, token, head)
+       when is_map(host) do
+    case DisposableCleanupEvidence.reservation(runtime, token) do
+      {:ok, _reservation} -> DisposableCleanupEvidence.verify(runtime, state.execution_fence, token, head)
+      other -> other
+    end
+  end
+
+  defp disposable_cleanup_evidence_ref(_runtime, _state, _token, _head), do: :local
+
+  defp local_cleanup_evidence_ref(runtime, state, token, head) do
     case Map.get(runtime, :cleanup_evidence_fun) do
       verifier when is_function(verifier, 3) ->
         case verifier.(state, token, head) do

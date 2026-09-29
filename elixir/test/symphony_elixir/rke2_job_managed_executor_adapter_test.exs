@@ -185,6 +185,10 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     assert observation["job_uid"] == elem(allocation_uid(allocation), 1)
     assert {:ok, ^observation} = ResultJournal.load(assignment, observation["job_uid"], context.root)
+
+    assert {:ok, %{"phase" => "job_and_pods_absent_auth_slot_released"}} =
+             ResultJournal.load_finalization(assignment, observation["job_uid"], context.root)
+
     assert observation["pod_uid"] == "pod-uid-1"
     assert Agent.get(context.client, & &1.deletes) == [observation["job_uid"]]
     assert Agent.get(context.client, &Map.has_key?(&1.pods, "unrelated-uid"))
@@ -256,6 +260,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     uid = elem(allocation_uid(allocation), 1)
     assert {:ok, _observation} = ResultJournal.load(assignment, uid, context.root)
     assert {:ok, _observation, slot} = ResultJournal.load_with_slot(assignment, uid, context.root)
+    assert :missing = ResultJournal.load_finalization(assignment, uid, context.root)
     assert slot == opts.config.auth_slot
     assert Agent.get(context.client, & &1.deletes) == [uid]
 
@@ -275,6 +280,9 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
 
     assert {:ok, _observation} =
              ManagedExecutorAdapter.finalize_terminal_owned(allocation, assignment, key(assignment, :finalize), opts)
+
+    assert {:ok, %{"phase" => "job_and_pods_absent_auth_slot_released"}} =
+             ResultJournal.load_finalization(assignment, uid, context.root)
 
     assert Agent.get(context.client, & &1.deletes) == [uid]
   end

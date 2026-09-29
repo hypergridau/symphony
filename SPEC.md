@@ -2406,3 +2406,12 @@ acknowledges reservation before Job creation and binds the server UID after regi
 MUST hold activation unless the guard reauthorizes the same assignment, lease and UID. It
 MUST not report slot release until Job and Pod absence is confirmed and the guard confirms
 durable session retention or quarantine. A missing guard MUST fail closed.
+
+For a completed disposable Job, the host MUST retain the exact terminal result
+before deletion and a separate durable post-finalization fact after Job and Pod
+absence and OAuth slot release. Provider termination and repository-cleanup
+receipts use the existing generation-bound cleanup contract only after the
+worker's merged PR head, native terminal issue state, execution fence and
+retained claim agree. The destroyed Job checkout is not a local workspace
+archive. Missing or contradictory teardown evidence and uncertain provider
+acknowledgements MUST retain cleanup authority for replay.

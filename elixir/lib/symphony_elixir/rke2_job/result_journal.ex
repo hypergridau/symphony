@@ -15,6 +15,7 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
 
   @result_schema_version 2
   @cleanup_schema_version 1
+  @finalization_schema_version 1
   @max_cleanup_receipts 8
   @max_bytes 8_192
   @uid ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,255}\z/
@@ -71,6 +72,80 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
     end
   rescue
     _ -> {:held, :job_result_journal_read_unavailable}
+  end
+
+  @doc "Records the trusted adapter's completed exact Job deletion and OAuth slot release."
+  @spec record_finalization(map(), String.t(), Path.t()) ::
+          {:ok, Path.t()} | {:held, atom()} | {:error, atom()}
+  def record_finalization(assignment, uid, root) do
+    with {:ok, observation, slot} <- load_with_slot(assignment, uid, root),
+         {:ok, payload} <- finalization_payload(assignment, uid, observation, slot),
+         {:ok, result_path} <- path(root, assignment.sha256, uid),
+         finalization_path = result_path <> ".finalized",
+         {:ok, bytes} <- Jason.encode(payload) do
+      case :file.open(String.to_charlist(finalization_path), [:write, :binary, :exclusive, :raw]) do
+        {:ok, file} -> write_new(file, finalization_path, bytes)
+        {:error, :eexist} -> compare_existing(finalization_path, bytes)
+        _ -> {:held, :job_result_journal_write_unavailable}
+      end
+    else
+      :missing -> {:held, :job_result_journal_missing}
+      {:held, _} = held -> held
+      {:error, _} = error -> error
+    end
+  rescue
+    _ -> {:held, :job_result_journal_write_unavailable}
+  end
+
+  @doc "Reads the immutable post-finalization fact against the exact journaled result."
+  @spec load_finalization(map(), String.t(), Path.t()) ::
+          {:ok, map()} | :missing | {:held, atom()} | {:error, atom()}
+  def load_finalization(assignment, uid, root) do
+    with {:ok, observation, slot} <- load_with_slot(assignment, uid, root),
+         {:ok, expected} <- finalization_payload(assignment, uid, observation, slot),
+         {:ok, result_path} <- path(root, assignment.sha256, uid) do
+      case read_regular(result_path <> ".finalized") do
+        {:ok, bytes} ->
+          decode_finalization(bytes, expected)
+
+        {:error, :enoent} ->
+          :missing
+
+        _ ->
+          {:held, :job_finalization_journal_invalid}
+      end
+    else
+      :missing -> :missing
+      other -> other
+    end
+  rescue
+    _ -> {:held, :job_finalization_journal_invalid}
+  end
+
+  defp decode_finalization(bytes, expected) when byte_size(bytes) <= @max_bytes do
+    case Jason.decode(bytes) do
+      {:ok, ^expected} -> {:ok, expected}
+      _ -> {:held, :job_finalization_journal_invalid}
+    end
+  end
+
+  defp decode_finalization(_bytes, _expected), do: {:held, :job_finalization_journal_invalid}
+
+  defp finalization_payload(assignment, uid, observation, slot) do
+    with true <- observation["job_uid"] == uid,
+         {:ok, bytes} <- Jason.encode(%{"observation" => observation, "auth_slot" => slot_payload(slot)}) do
+      {:ok,
+       %{
+         "schema_version" => @finalization_schema_version,
+         "assignment_digest" => assignment.sha256,
+         "job_uid" => uid,
+         "pod_uid" => observation["pod_uid"],
+         "result_sha256" => :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower),
+         "phase" => "job_and_pods_absent_auth_slot_released"
+       }}
+    else
+      _ -> {:error, :invalid_job_finalization_record}
+    end
   end
 
   @doc "Persists the one immutable cleanup receipt before a potentially uncertain provider POST."
