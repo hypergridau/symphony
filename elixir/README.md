@@ -365,12 +365,13 @@ matching Job UID, and replays OAuth slot release. A pending result leaves the
 claim retained for the next poll. After that finalizer succeeds, the poll owner
 binds the result to the signed assignment and persisted claim, then releases and
 confirms the exact execution-fence worker lease using the journaled Job UID.
-The same confirmation replays after restart. A separate remote merge reader can
-bind the completed result's PR number, branch and worker head to GitHub's merged
-PR without requiring a local worktree. The remote reader is not yet connected to
-the terminal handoff. This path does not publish the result to Dahlia, release
-its provider reservation, or enable Job activation; those transitions remain
-gated.
+The same confirmation replays after restart. A remote merge reader binds the
+completed result's PR number, branch and worker head to GitHub's merged PR
+without requiring a local worktree. The poll owner then rechecks the native
+terminal Linear state before fencing that exact head and completing the matching
+responsible delegation. This path does not yet submit HGS350 cleanup receipts,
+release the provider reservation, or enable Job activation; those transitions
+remain gated.
 
 A spawned attempt that failed before useful work uses
 `ExecutionFence.FailedAttempt.record/4` after every required process termination

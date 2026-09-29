@@ -36,9 +36,10 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ManagedResponsibility.Admission, as: ManagedAdmission
   alias SymphonyElixir.ManagedTokenBudget.Runtime, as: ManagedBudget
   alias SymphonyElixir.ManagedTokenBudget.Stop, as: ManagedBudgetStop
+  alias SymphonyElixir.ResponsibilityGraph.DisposableReviewCompletion
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
-  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{HostActivationGuard, HostAllocationContext, MergedResultEvidence, SuspendedController}
   alias SymphonyElixir.RKE2Job.{TerminalLease, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
@@ -792,7 +793,9 @@ defmodule SymphonyElixir.Orchestrator do
            now_ms
          ) do
       {:ok, fence_state, _evidence} ->
-        persist_finalized_disposable_lease(state, reservation, fence_state)
+        state
+        |> persist_finalized_disposable_lease(reservation, fence_state)
+        |> reconcile_disposable_remote_review(reservation, assignment, observation)
 
       {:error, reason} ->
         Logger.warning("Disposable terminal lease proof was rejected for issue_id=#{reservation.issue_id}: #{inspect(reason)}")
@@ -830,6 +833,47 @@ defmodule SymphonyElixir.Orchestrator do
     }
 
     release_responsibility_lease(state, entry)
+  end
+
+  defp reconcile_disposable_remote_review(state, reservation, assignment, observation) do
+    runtime = state.work_package_runtime || %{}
+    observe = Map.get(runtime, :disposable_merge_evidence_fun) || (&MergedResultEvidence.observe/2)
+
+    with :ok <-
+           ExecutionFence.retained_process_quiescence(
+             state.execution_fence,
+             reservation.issue_id,
+             reservation.generation
+           ),
+         {:ok, %{accepted_head: head, merge_identity: merge}} <- observe.(assignment, observation),
+         {:ok, [%Issue{id: issue_id} = issue]} <- fetch_review_issues(state, [reservation.issue_id]),
+         true <- issue_id == reservation.issue_id and terminal_issue_state?(issue.state, terminal_state_set()),
+         :ok <- recheck_review_issue(state, issue) do
+      entry = disposable_review_entry(reservation, issue, head, merge)
+      maybe_fence_terminal_execution(state, entry, true)
+    else
+      _ -> state
+    end
+  end
+
+  @doc false
+  @spec reconcile_disposable_remote_review_for_test(map(), map(), map(), map()) :: map()
+  def reconcile_disposable_remote_review_for_test(state, reservation, assignment, observation),
+    do: reconcile_disposable_remote_review(state, reservation, assignment, observation)
+
+  defp disposable_review_entry(reservation, issue, head, merge) do
+    %{
+      issue: issue,
+      execution_token: %{issue_id: reservation.issue_id, generation: reservation.generation},
+      execution_session_id: reservation.session_id,
+      process_id: reservation.process_id,
+      responsibility_delegation_id: reservation.responsible_delegation_id,
+      review_reservation: reservation,
+      accepted_head: head,
+      merge_identity: merge,
+      disposable_merge_verified: true,
+      terminal_outcome: TerminalOutcome.for_tracker_state(issue.state)
+    }
   end
 
   defp restore_verified_retained_disposable_claim(state, issue_id, generation, allocation_id) do
@@ -3049,9 +3093,10 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_fence_terminal_execution(state, _running_entry, false), do: state
 
   defp maybe_fence_terminal_execution(state, entry, true) do
-    if is_nil(state.work_package_runtime) or Map.get(entry, :review_merge_verified, false),
-      do: fence_terminal_execution(state, entry),
-      else: state
+    if is_nil(state.work_package_runtime) or Map.get(entry, :review_merge_verified, false) or
+         Map.get(entry, :disposable_merge_verified, false),
+       do: fence_terminal_execution(state, entry),
+       else: state
   end
 
   defp fence_terminal_execution(state, %{execution_token: token, issue: %Issue{state: issue_state} = issue} = entry)
@@ -3094,8 +3139,18 @@ defmodule SymphonyElixir.Orchestrator do
           execution_fence_now_ms()
         )
       else
-        now_ms = execution_fence_now_ms()
-        ResponsibilityGraph.complete(state.responsibility_graph, delegation_id, terminal_attrs, now_ms)
+        if Map.get(entry, :disposable_merge_verified, false) do
+          DisposableReviewCompletion.complete(
+            state.responsibility_graph,
+            state.execution_fence,
+            entry,
+            terminal_attrs,
+            execution_fence_now_ms()
+          )
+        else
+          now_ms = execution_fence_now_ms()
+          ResponsibilityGraph.complete(state.responsibility_graph, delegation_id, terminal_attrs, now_ms)
+        end
       end
 
     case result do
