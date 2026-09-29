@@ -3,9 +3,14 @@ defmodule SymphonyElixir.WorkerOneShotTest do
 
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.RKE2Job.JobSpec
+  alias SymphonyElixir.Worker.Assignment
   alias SymphonyElixir.Worker.BoundedOutput
   alias SymphonyElixir.Worker.CLI
   alias SymphonyElixir.Worker.OneShot
+
+  @hgs736_issue_uuid "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
+  @hgs736_no_checkout_constraint "qualification/hgs-736/started-no-checkout/" <>
+                                   @hgs736_issue_uuid <> "/generation-1"
 
   test "bounds command output through System.cmd's collectable sink" do
     {sink, 0} = System.cmd("git", ["--version"], stderr_to_stdout: true, into: struct(BoundedOutput, limit: 4))
@@ -117,6 +122,215 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     prompt = List.last(codex_args)
     refute String.contains?(prompt, token)
     refute String.contains?(prompt, "context_secret_refs")
+  end
+
+  test "signed HGS-736 assignment revokes the checkout lease before requiring broker denial" do
+    assignment = hgs736_assignment()
+    test_pid = self()
+
+    deps = %{
+      auth_slot_ready: fn -> true end,
+      workspace_ready: fn -> true end,
+      now: fn -> ~U[2026-09-27 00:00:00Z] end,
+      broker_issue: fn subject, use, key, _now, ttl, _ctx ->
+        send(test_pid, {:broker, :issue, use, key, ttl, subject})
+        {:ok, %{"leaseId" => "hgs736-checkout", "notAfter" => "2026-09-27T00:10:00Z"}}
+      end,
+      broker_revoke: fn lease_id, _ctx ->
+        send(test_pid, {:broker, :revoke, lease_id})
+        :ok
+      end,
+      broker_checkout_denial: fn lease_id, repository_ref, cutoff, _ctx ->
+        send(test_pid, {:broker, :checkout_denial, lease_id, repository_ref, cutoff})
+        :confirmed_denied
+      end,
+      command: fn executable, args, _opts ->
+        flunk("checkout-denial qualification must not invoke #{executable}: #{inspect(args)}")
+      end
+    }
+
+    assert %{exit_code: 1, result: result} =
+             CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+    assert result.status == "failed"
+    assert result.reason == "credential_checkout_denied"
+    assert result.checkout_lease_id == "hgs736-checkout"
+    assert result.checkout_revocation == "confirmed"
+    assert result.revocation == "confirmed"
+    assert result.broker_lease_id == nil
+    assert result.codex_exit_code == nil
+    assert result.head_oid == nil
+    assert_receive {:broker, :issue, :git_checkout, key, 600, subject}
+    assert key == assignment.sha256 <> ":worker-checkout"
+    assert subject.assignmentDigest == assignment.sha256
+    assert subject.issueUuid == @hgs736_issue_uuid
+    assert subject.generation == 1
+    assert subject.runnerId == assignment.seat
+    assert_receive {:broker, :revoke, "hgs736-checkout"}
+    assert_receive {:broker, :checkout_denial, "hgs736-checkout", "hypergridau/symphony", "2026-09-27T00:10:00Z"}
+    assert_receive {:broker, :revoke, "hgs736-checkout"}
+    refute_receive {:command, _, _}
+  end
+
+  test "reserved HGS-736 intent fails closed before any worker or broker operation" do
+    invalid_assignments = [
+      assignment(
+        "00000000-0000-4000-8000-000000000000",
+        1,
+        ["repository", "no-production-workload", @hgs736_no_checkout_constraint]
+      ),
+      assignment(@hgs736_issue_uuid, 2, ["repository", "no-production-workload", @hgs736_no_checkout_constraint]),
+      assignment(
+        @hgs736_issue_uuid,
+        1,
+        ["repository", "no-production-workload", @hgs736_no_checkout_constraint <> "-typo"]
+      ),
+      assignment(
+        @hgs736_issue_uuid,
+        1,
+        ["repository", "no-production-workload", @hgs736_no_checkout_constraint, "qualification/hgs-736/duplicate"]
+      )
+    ]
+
+    for assignment <- invalid_assignments do
+      deps = no_operation_deps()
+
+      assert %{exit_code: 1, result: %{status: "failed", reason: "invalid_hgs736_checkout_qualification"}} =
+               CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+    end
+  end
+
+  test "HGS-736 intent fails closed when the signed subject is misbound" do
+    assignment = hgs736_assignment()
+
+    {:ok, decoded} = Assignment.decode(Jason.encode!(assignment), assignment.sha256, "123456789")
+
+    misbound = put_in(decoded.subject.runnerId, "other-runner")
+
+    assert {:error, "invalid_hgs736_checkout_qualification", _result} =
+             OneShot.run(misbound, environment(assignment), no_operation_deps())
+
+    mismatched_job = Map.put(environment(assignment), "SYMPHONY_ASSIGNMENT_ID", "other-job")
+
+    assert {:error, "invalid_hgs736_checkout_qualification", _result} =
+             OneShot.run(decoded, mismatched_job, no_operation_deps())
+  end
+
+  test "HGS-736 intent fails closed on revocation uncertainty and never requests checkout" do
+    assignment = hgs736_assignment()
+    test_pid = self()
+
+    deps = %{
+      auth_slot_ready: fn -> true end,
+      workspace_ready: fn -> true end,
+      broker_issue: fn _subject, :git_checkout, _key, _now, _ttl, _ctx ->
+        send(test_pid, {:broker, :issue})
+        {:ok, %{"leaseId" => "hgs736-checkout", "notAfter" => "2026-09-27T00:10:00Z"}}
+      end,
+      broker_revoke: fn _lease_id, _ctx ->
+        send(test_pid, {:broker, :revoke})
+        {:held, :broker_uncertain}
+      end,
+      broker_checkout_denial: fn _lease_id, _repository_ref, _cutoff, _ctx ->
+        flunk("checkout after uncertain HGS-736 revocation")
+      end
+    }
+
+    assert %{
+             exit_code: 2,
+             result: %{
+               status: "held",
+               reason: "credential_revocation_unconfirmed",
+               checkout_lease_id: "hgs736-checkout",
+               checkout_revocation: "held",
+               revocation: "held"
+             }
+           } =
+             CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+    assert_receive {:broker, :issue}
+    assert_receive {:broker, :revoke}
+    refute_receive {:broker, :revoke}
+  end
+
+  test "HGS-736 holds an unconfirmed checkout response even when both revocations are confirmed" do
+    assignment = hgs736_assignment()
+    test_pid = self()
+
+    deps = %{
+      auth_slot_ready: fn -> true end,
+      workspace_ready: fn -> true end,
+      broker_issue: fn _subject, :git_checkout, _key, _now, _ttl, _ctx ->
+        {:ok, %{"leaseId" => "hgs736-checkout", "notAfter" => "2026-09-27T00:10:00Z"}}
+      end,
+      broker_revoke: fn _lease_id, _ctx ->
+        send(test_pid, {:broker, :revoke})
+        :ok
+      end,
+      broker_checkout_denial: fn _lease_id, _repository_ref, _cutoff, _ctx ->
+        send(test_pid, {:broker, :checkout_uncertain})
+        {:held, :broker_uncertain}
+      end
+    }
+
+    assert %{
+             exit_code: 2,
+             result: %{
+               status: "held",
+               reason: "credential_checkout_uncertain",
+               checkout_lease_id: "hgs736-checkout",
+               checkout_revocation: "confirmed",
+               revocation: "confirmed"
+             }
+           } =
+             CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+    assert_receive {:broker, :revoke}
+    assert_receive {:broker, :checkout_uncertain}
+    assert_receive {:broker, :revoke}
+  end
+
+  test "HGS-736 intent never clones if a revoked lease unexpectedly returns a checkout token" do
+    assignment = hgs736_assignment()
+    test_pid = self()
+
+    deps = %{
+      auth_slot_ready: fn -> true end,
+      workspace_ready: fn -> true end,
+      broker_issue: fn _subject, :git_checkout, _key, _now, _ttl, _ctx ->
+        send(test_pid, {:broker, :issue})
+        {:ok, %{"leaseId" => "hgs736-checkout", "notAfter" => "2026-09-27T00:10:00Z"}}
+      end,
+      broker_revoke: fn _lease_id, _ctx ->
+        send(test_pid, {:broker, :revoke})
+        :ok
+      end,
+      broker_checkout_denial: fn _lease_id, _repository_ref, _cutoff, _ctx ->
+        send(test_pid, {:broker, :unexpected_checkout_success})
+        :unexpected_issue
+      end,
+      command: fn executable, args, _opts ->
+        flunk("unexpected token must not reach #{executable}: #{inspect(args)}")
+      end
+    }
+
+    assert %{
+             exit_code: 2,
+             result: %{
+               status: "held",
+               reason: "qualification_checkout_denial_failed",
+               checkout_lease_id: "hgs736-checkout",
+               checkout_revocation: "confirmed",
+               revocation: "confirmed"
+             }
+           } =
+             CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+    assert_receive {:broker, :issue}
+    assert_receive {:broker, :revoke}
+    assert_receive {:broker, :unexpected_checkout_success}
+    assert_receive {:broker, :revoke}
+    refute_receive {:command, _, _}
   end
 
   test "does not retry uncertain issuance or start checkout" do
@@ -861,7 +1075,40 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     }
   end
 
+  defp no_operation_deps do
+    %{
+      auth_slot_ready: fn -> flunk("invalid HGS-736 intent must fail before auth check") end,
+      workspace_ready: fn -> flunk("invalid HGS-736 intent must fail before workspace check") end,
+      broker_issue: fn _subject, _use, _key, _now, _ttl, _ctx ->
+        flunk("invalid HGS-736 intent must not issue a lease")
+      end,
+      broker_revoke: fn _lease, _ctx -> flunk("invalid HGS-736 intent must not revoke a lease") end,
+      broker_checkout_denial: fn _lease, _repo, _cutoff, _ctx ->
+        flunk("invalid HGS-736 intent must not check out")
+      end,
+      command: fn executable, args, _opts ->
+        flunk("invalid HGS-736 intent must not invoke #{executable}: #{inspect(args)}")
+      end
+    }
+  end
+
   defp assignment do
+    assignment(
+      "937400ab-b95e-4ddb-8adf-e28bf13c3852",
+      4,
+      ["repository", "no-production-workload"]
+    )
+  end
+
+  defp hgs736_assignment do
+    assignment(
+      @hgs736_issue_uuid,
+      1,
+      ["repository", "no-production-workload", @hgs736_no_checkout_constraint]
+    )
+  end
+
+  defp assignment(issue_id, generation, constraints) do
     {:ok, bundle} =
       ManagedAssignmentBundle.build(%{
         objective: %{id: "objective-1", identity: "objective-1", content: "Add a bounded canary file"},
@@ -870,18 +1117,18 @@ defmodule SymphonyElixir.WorkerOneShotTest do
         branch: "codex/hgs729-canary",
         seat: "runner-17",
         lease: %{
-          issue_id: "937400ab-b95e-4ddb-8adf-e28bf13c3852",
+          issue_id: issue_id,
           repository: "hypergridau/symphony",
-          generation: 4,
-          session_id: "worker:hgs729:4",
-          process_id: "worker:hgs729:4"
+          generation: generation,
+          session_id: "worker:assignment:#{generation}",
+          process_id: "worker:assignment:#{generation}"
         },
         intent_ancestry: ["objective-root", "delegation-1"],
         acceptance: %{deliverable: "Canary file", evidence: "Focused test coverage"},
         context_secret_refs: [],
         platform: "linux-x86_64",
         environment_classification: "repository",
-        environment_constraints: ["repository", "no-production-workload"],
+        environment_constraints: constraints,
         placement: :internal_beta,
         target_environment: :rke2
       })

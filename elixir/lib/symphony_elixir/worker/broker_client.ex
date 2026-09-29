@@ -46,6 +46,26 @@ defmodule SymphonyElixir.Worker.BrokerClient do
     end
   end
 
+  @spec checkout_denial(String.t(), String.t(), String.t(), map()) ::
+          :confirmed_denied | :unexpected_issue | {:held, :broker_uncertain}
+  def checkout_denial(lease_id, repository_ref, not_after, context \\ %{}) do
+    if valid_lease_id?(lease_id) and valid_repo_ref?(repository_ref) and is_binary(not_after) do
+      case post_raw("/v1/checkout", %{leaseId: lease_id}, context) do
+        {:ok, %{"status" => "denied"} = response} when map_size(response) == 1 ->
+          :confirmed_denied
+
+        {:ok, %{"status" => "issued", "installationToken" => token}}
+        when is_binary(token) and byte_size(token) in 1..16_384 ->
+          :unexpected_issue
+
+        _ ->
+          {:held, :broker_uncertain}
+      end
+    else
+      {:held, :broker_uncertain}
+    end
+  end
+
   @spec commit(String.t(), String.t(), String.t(), [map()], map()) :: result(String.t())
   def commit(lease_id, expected_oid, message, additions, context \\ %{}) do
     if valid_lease_id?(lease_id) and oid?(expected_oid) and valid_message?(message) and valid_additions?(additions) do
@@ -154,6 +174,13 @@ defmodule SymphonyElixir.Worker.BrokerClient do
   defp pull_request_response(other, _repository_ref), do: other
 
   defp post(path, body, context) do
+    case post_raw(path, body, context) do
+      {:http_error, _status} -> {:error, :broker_denied}
+      result -> result
+    end
+  end
+
+  defp post_raw(path, body, context) do
     with {:ok, token} <- projected_token(context),
          {:ok, plug} <- test_plug(context) do
       options = [
@@ -171,7 +198,7 @@ defmodule SymphonyElixir.Worker.BrokerClient do
 
       case Req.request(options) do
         {:ok, %{status: status, body: response}} when status in 200..299 and is_map(response) -> {:ok, response}
-        {:ok, %{status: status}} when status in 400..499 -> {:error, :broker_denied}
+        {:ok, %{status: status}} when status in 400..499 -> {:http_error, status}
         _ -> {:held, :broker_uncertain}
       end
     else
