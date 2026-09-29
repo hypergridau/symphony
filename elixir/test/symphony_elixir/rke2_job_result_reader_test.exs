@@ -192,6 +192,40 @@ defmodule SymphonyElixir.RKE2JobResultReaderTest do
     end
   end
 
+  test "classifies only revoked, headless checkout failures for later release proof" do
+    assignment = assignment()
+    base = receipt(assignment) |> Map.merge(%{status: "failed", reason: "credential_issuance_denied"})
+    encoded = fn value -> value |> Jason.encode!() |> Jason.decode!() end
+
+    assert ResultReader.no_checkout_failure?(encoded.(base), 1)
+    refute ResultReader.no_checkout_failure?(encoded.(base), 2)
+
+    checked_out =
+      base
+      |> Map.merge(%{
+        reason: "repository_checkout_failed",
+        checkout_lease_id: "checkout-1",
+        checkout_revocation: "confirmed",
+        revocation: "confirmed"
+      })
+      |> encoded.()
+
+    assert ResultReader.no_checkout_failure?(checked_out, 1)
+
+    for changed <- [
+          %{checked_out | "checkout_revocation" => "held"},
+          %{checked_out | "revocation" => "held"},
+          %{checked_out | "head_oid" => String.duplicate("a", 40)},
+          %{checked_out | "base_oid" => String.duplicate("a", 40)},
+          %{checked_out | "broker_lease_id" => "publish-1"},
+          %{checked_out | "pull_request_number" => 12},
+          %{checked_out | "reason" => "credential_issuance_denied"},
+          %{checked_out | "status" => "held"}
+        ] do
+      refute ResultReader.no_checkout_failure?(changed, 1)
+    end
+  end
+
   defp read(assignment, config, job, pods, uid) do
     ResultReader.read(assignment, uid,
       client: Client,

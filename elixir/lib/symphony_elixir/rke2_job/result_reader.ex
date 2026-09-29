@@ -14,6 +14,8 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
   @safe_reason ~r/\A[a-z][a-z0-9_]{0,127}\z/
   @safe_id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/
   @result_keys ~w(schema_version status reason assignment_digest issue_uuid generation repository_ref branch_ref checkout_lease_id checkout_revocation broker_lease_id revocation codex_exit_code head_oid branch_head_oid base_oid changed_files pull_request_number pull_request_url)
+  @pre_checkout_denials ~w(codex_auth_slot_unavailable workspace_not_empty workspace_unavailable credential_issuance_denied)
+  @checkout_failures ~w(credential_checkout_denied repository_checkout_failed)
 
   @spec read(map(), String.t(), keyword()) :: {:ok, map()} | {:held, atom()} | {:error, atom()}
   def read(assignment, job_uid, opts) when is_map(assignment) and is_binary(job_uid) and is_list(opts) do
@@ -60,6 +62,31 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
   end
 
   def valid_receipt_outcome?(_result, _exit_code), do: false
+
+  @doc "Classifies a failed worker result reporting no Git head or publish lease."
+  @spec no_checkout_failure?(map(), integer()) :: boolean()
+  def no_checkout_failure?(result, 1) when is_map(result) do
+    no_git_artifacts? =
+      Enum.all?(
+        ~w(broker_lease_id codex_exit_code head_oid branch_head_oid base_oid changed_files pull_request_number pull_request_url),
+        &is_nil(result[&1])
+      )
+
+    valid_receipt_outcome?(result, 1) and result["status"] == "failed" and no_git_artifacts? and
+      no_checkout_lease_state?(result)
+  end
+
+  def no_checkout_failure?(_result, _exit_code), do: false
+
+  defp no_checkout_lease_state?(%{"checkout_lease_id" => nil} = result),
+    do:
+      result["reason"] in @pre_checkout_denials and
+        result["checkout_revocation"] == "not_started" and result["revocation"] == "not_started"
+
+  defp no_checkout_lease_state?(result),
+    do:
+      result["reason"] in @checkout_failures and
+        result["checkout_revocation"] == "confirmed" and result["revocation"] == "confirmed"
 
   defp read_pods(client, context, namespace, uid, expected, job) do
     if JobSpec.owned_job_for_cleanup?(job, expected) and get_in(job, ["metadata", "uid"]) == uid and
