@@ -8,7 +8,7 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
   """
 
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle}
-  alias SymphonyElixir.RKE2Job.ResultJournal
+  alias SymphonyElixir.RKE2Job.{ResultJournal, ResultReader}
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   @doc "Finds the exact retained disposable reservation, or a local claim on a mixed host."
@@ -82,6 +82,35 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
 
   def verify(_runtime, _fence, _token, _head), do: {:error, :disposable_cleanup_evidence_unverified}
 
+  @doc "Verifies a finalized started Job whose failed worker reported no checkout head."
+  @spec verify_no_checkout_failure(map(), map(), map()) :: {:ok, String.t()} | {:error, term()}
+  def verify_no_checkout_failure(runtime, fence, token)
+      when is_map(runtime) and is_map(fence) and is_map(token) do
+    with {:ok, saved} <- reservation(runtime, token),
+         {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(saved.assignment_snapshot),
+         %{environment: %{target_environment: :rke2}} <- assignment,
+         %{result_journal_root: root} when is_binary(root) <- Map.get(runtime, :disposable_rke2_host_config),
+         execution when is_map(execution) <- get_in(fence, [:executions, token.issue_id]),
+         true <- execution.cleanup == :pending and is_nil(execution.terminal),
+         lease when is_map(lease) <- get_in(execution, [:leases, saved.session_id]),
+         :ok <- exact_authority(saved, assignment, execution, lease),
+         evidence when is_map(evidence) <- Map.get(lease, :termination_evidence),
+         job_uid when is_binary(job_uid) <- Map.get(evidence, :job_uid),
+         {:ok, observation} <- ResultJournal.load(assignment, job_uid, root),
+         {:ok, marker} <- ResultJournal.load_finalization(assignment, job_uid, root),
+         :ok <- exact_no_checkout_failure(assignment, observation, marker, evidence, lease) do
+      seed = "no-checkout-failure\0" <> assignment.sha256 <> "\0" <> job_uid <> "\0" <> marker["result_sha256"]
+      {:ok, "sha256:" <> (:crypto.hash(:sha256, seed) |> Base.encode16(case: :lower))}
+    else
+      _ -> {:error, :disposable_no_checkout_failure_unverified}
+    end
+  rescue
+    _ -> {:error, :disposable_no_checkout_failure_unverified}
+  end
+
+  def verify_no_checkout_failure(_runtime, _fence, _token),
+    do: {:error, :disposable_no_checkout_failure_unverified}
+
   defp exact_authority(saved, assignment, execution, lease) do
     job_uid = get_in(lease, [:termination_evidence, :job_uid]) || ""
     expected_ref = :crypto.hash(:sha256, assignment.sha256 <> "\0" <> job_uid)
@@ -146,6 +175,33 @@ defmodule SymphonyElixir.RKE2Job.DisposableCleanupEvidence do
          observation["pod_uid"] == evidence.pod_uid and result["head_oid"] == head and result_revoked,
        do: :ok,
        else: {:error, :disposable_cleanup_result_mismatch}
+  end
+
+  defp exact_no_checkout_failure(assignment, observation, marker, evidence, lease) do
+    result = observation["result"]
+
+    marker_matches =
+      Map.take(marker, ~w(phase assignment_digest job_uid pod_uid)) == %{
+        "phase" => "job_and_pods_absent_auth_slot_released",
+        "assignment_digest" => assignment.sha256,
+        "job_uid" => evidence.job_uid,
+        "pod_uid" => evidence.pod_uid
+      }
+
+    evidence_matches =
+      Map.take(evidence, [:assignment_digest, :process_tree, :session_id, :process_id, :terminal_status, :exit_code]) == %{
+        assignment_digest: assignment.sha256,
+        process_tree: :terminated,
+        session_id: lease.session_id,
+        process_id: lease.process_id,
+        terminal_status: "failed",
+        exit_code: 1
+      }
+
+    if marker_matches and evidence_matches and observation["pod_uid"] == evidence.pod_uid and
+         ResultReader.no_checkout_failure?(result, observation["exit_code"]),
+       do: :ok,
+       else: {:error, :disposable_no_checkout_failure_mismatch}
   end
 
   defp fence_evidence_matches?(%{cleanup: :pending, cleanup_receipt: nil}, _head, _ref), do: true

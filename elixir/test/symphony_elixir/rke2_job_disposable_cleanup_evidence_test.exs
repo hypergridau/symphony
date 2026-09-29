@@ -203,7 +203,33 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
     assert :missing = WorkPackageClaim.Journal.cleanup_receipt(journal, key, "repository_cleanup_verified")
   end
 
-  defp fixture(root) do
+  test "finalized failed checkout proves a stable headless result without authorizing successful cleanup", %{root: root} do
+    {runtime, fence, token, assignment, _observation} = fixture(root, :no_checkout_failure)
+
+    assert {:error, :disposable_no_checkout_failure_unverified} =
+             DisposableCleanupEvidence.verify_no_checkout_failure(runtime, fence, token)
+
+    assert {:ok, _} = ResultJournal.record_finalization(assignment, "job-uid-1", root)
+    assert {:ok, evidence_ref} = DisposableCleanupEvidence.verify_no_checkout_failure(runtime, fence, token)
+    assert {:ok, ^evidence_ref} = DisposableCleanupEvidence.verify_no_checkout_failure(runtime, fence, token)
+
+    assert {:error, :disposable_cleanup_evidence_unverified} =
+             DisposableCleanupEvidence.verify(runtime, fence, token, @head)
+
+    contradictory = put_in(fence, [:executions, @issue, :leases, "worker:issue-1:1", :termination_evidence, :terminal_status], "completed")
+
+    assert {:error, :disposable_no_checkout_failure_unverified} =
+             DisposableCleanupEvidence.verify_no_checkout_failure(runtime, contradictory, token)
+
+    marker_path = Path.join(root, assignment.sha256 <> "-job-uid-1.json.finalized")
+    changed = Jason.decode!(File.read!(marker_path)) |> Map.put("pod_uid", "another-pod")
+    :ok = File.write(marker_path, Jason.encode!(changed))
+
+    assert {:error, :disposable_no_checkout_failure_unverified} =
+             DisposableCleanupEvidence.verify_no_checkout_failure(runtime, fence, token)
+  end
+
+  defp fixture(root, outcome \\ :completed) do
     {:ok, assignment} = assignment()
     {:ok, snapshot} = ManagedAssignmentBundle.snapshot(assignment)
     reservation = reservation(snapshot)
@@ -218,7 +244,7 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
       disposable_rke2_host_config: %{result_journal_root: root}
     }
 
-    observation = observation(assignment)
+    observation = observation(assignment, outcome)
     {:ok, _} = ResultJournal.record(assignment, observation, root)
 
     {:ok, admitted, token} =
@@ -248,15 +274,22 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
 
     assert {:ok, confirmed, _} = TerminalLease.confirm(registered, reservation, assignment, observation, 100)
 
-    assert {:ok, fenced, :fenced} =
-             ExecutionFence.fence(
-               confirmed,
-               token,
-               %{terminal_state: "Done", accepted_head: @head, merge_identity: @merge},
-               101
-             )
+    fence =
+      if outcome == :completed do
+        assert {:ok, fenced, :fenced} =
+                 ExecutionFence.fence(
+                   confirmed,
+                   token,
+                   %{terminal_state: "Done", accepted_head: @head, merge_identity: @merge},
+                   101
+                 )
 
-    {runtime, fenced, Map.put(token, :repository_ref, @repository), assignment, observation}
+        fenced
+      else
+        confirmed
+      end
+
+    {runtime, fence, Map.put(token, :repository_ref, @repository), assignment, observation}
   end
 
   defp reservation(snapshot) do
@@ -288,7 +321,7 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
     }
   end
 
-  defp observation(assignment) do
+  defp observation(assignment, outcome) do
     result =
       CLI.base_result(
         %{
@@ -317,13 +350,32 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
         pull_request_url: "https://github.com/hypergridau/symphony/pull/1"
       })
 
+    result =
+      if outcome == :no_checkout_failure do
+        result
+        |> Map.merge(%{
+          status: "failed",
+          reason: "repository_checkout_failed",
+          broker_lease_id: nil,
+          codex_exit_code: nil,
+          head_oid: nil,
+          branch_head_oid: nil,
+          base_oid: nil,
+          changed_files: nil,
+          pull_request_number: nil,
+          pull_request_url: nil
+        })
+      else
+        result
+      end
+
     %{
       job_uid: "job-uid-1",
       job_resource_version: "job-rv-1",
       pod_uid: "pod-uid-1",
       pod_resource_version: "pod-rv-1",
       pod_list_resource_version: "pods-rv-1",
-      exit_code: 0,
+      exit_code: if(outcome == :completed, do: 0, else: 1),
       result: Map.new(result, fn {key, value} -> {Atom.to_string(key), value} end)
     }
   end
