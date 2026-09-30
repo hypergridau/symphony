@@ -85,6 +85,11 @@ Paths are explicit repository-relative paths, with `.` allowed for the fresh iss
 environment is `repository`. Both grants use `routine_engineering` authority, future expiry,
 bounded model/effort/token budgets and a deliverable/evidence return contract. The responsible
 child cannot delegate children. This is authority metadata, not a claim of OS sandbox isolation.
+The signed `scope.work_package_id` must equal the provider's canonical projection ID for that
+reservation, as returned by its exact-issue lookup; a Linear identifier such as `linear:HGS-736`
+does not substitute for that provider ID. The signed assignment objective content must be the raw
+runtime Linear Markdown snapshot (native title, optionally followed by a blank line and description);
+connector-rendered rich links can differ and will fail the exact admission comparison.
 Each nonempty v2 entry additionally signs an `assignment_context` with an
 `objective` `{id, content}`, `base_ref`, and `environment` `{platform,
 classification, constraints}`. The objective ID must equal the delegation
@@ -136,6 +141,52 @@ This manifest path does not claim distributed atomicity or erase unresolved cras
 Pause before an operator changes authorization configuration, update its pinned digest and
 restart the pool. Do not repair missing authority by editing live graph JSON or changing to
 manual enforcement. Completed graph responsibility alone is not cleanup acceptance.
+
+### Owner-signed successor for a never-submitted scope correction
+
+For an exact generation that provably never submitted a claim and never spawned a worker, a distinct owner-signed
+v2 successor may carry `prior_unsubmitted_authority` (the exact issue, generation, repository,
+profile, old IDs and immutable grant digests) and `unsubmitted_observation` (the provider projection,
+claim state, Kubernetes resource versions and absence counts, derived systemd scope, process result,
+workspace result, exact journal/fence/graph paths, timestamps and evidence hashes). The predecessor
+must be the exact active pair or exact `restart_reconciliation`-blocked pair with its recorded lease;
+expired grants are retired directly and are never reactivated. The successor must bind the corrected provider
+projection ID, reuse the old authority content except for fresh IDs/expiry/projection, and keep the
+same issue and repository. Both new delegation IDs must be distinct from every old ID. The graph
+does not retain the predecessor's `assignment_context`, so this transition does not compare the old
+objective snapshot with the successor's. The successor signs the current raw runtime Linear Markdown
+and its base/environment fields; normal admission rechecks that context against the current issue.
+This extension does not rewrite the old signed grant or make a provider reservation claimable.
+
+The observation is root-attested in the exact signed manifest and each source reference is a
+lowercase SHA-256 of retained raw evidence. Provider, Job/Pod, process and workspace observations
+must all be no more than 60 seconds old when the one-shot task first runs. The task also checks the
+local journal, fence, exact graph pair and absent canonical workspace itself. It rejects
+every same-issue journal generation, any claim or process evidence, stale or mismatched identity,
+and any graph or fence conflict. Signed state paths must match the configured paths, the expected
+`/srv/dahlia-runner-state` pool layout, and the workflow's pool identity. Journal, fence, graph and
+launcher lock must be regular files with no symlink ancestors.
+
+With the exact global admission gate paused, stop the Symphony system service. Run the reviewed
+candidate escript as the service identity with the normal trusted runtime environment. This command
+does not start the Symphony application. It derives the pool launcher lock from the signed journal
+path under the fixed canonical host root, acquires it nonblocking, and keeps it through both writes and readback. Leave that lock
+available to the command. It also verifies that the exact system unit is loaded and inactive, with
+no cgroup or main process:
+
+```text
+bin/symphony --retire-unsubmitted-successor --workflow /etc/dahlia-managed-delegations/hgs736-v7/hypergrid-gitops.workflow.md HGS-736
+```
+
+`--workflow` must name the absolute root-owned workflow copy before the issue identifier. The task
+checks that the pause gate remains configured and paused, verifies the workflow file and its
+root-owned ancestors, loads the normal signature-verified manifest, then persists the exact graph
+retirement before the fence retirement. If the process stops between those writes, rerun the same
+command: replay is allowed only from the identical persisted graph receipt and its original fresh
+observation. Do not edit either snapshot by hand. Keep the gate paused through successor manifest
+installation and normal service restart; ordinary provider reservation, exact provider projection
+equality and claim checks still precede dispatch. The signed `work_package_id` is the provider's
+canonical projection ID; the Linear issue identifier is not interchangeable with it.
 
 ## Managed assignment bundle
 

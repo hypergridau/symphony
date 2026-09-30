@@ -12,6 +12,10 @@ defmodule SymphonyElixir.ManagedResponsibility do
   @payload_keys ~w(schema_version pool_key repository_ref managed_project_profile_id authority_ref entries)
   @entry_keys ~w(issue_id identifier owner_id accountable responsible)
   @v2_entry_keys @entry_keys ++ ["assignment_context"]
+  @prior_unsubmitted_authority_keys ~w(issue_id generation repository_ref managed_project_profile_id accountable_id responsible_id accountable_digest responsible_digest)
+  @unsubmitted_observation_keys ~w(issue_id generation repository_ref managed_project_profile_id journal_path execution_fence_path responsibility_graph_path provider_projection_id provider_reservation_state provider_claimed_at provider_claim_generation provider_execution_fence_token provider_observed_at_ms provider_evidence_ref kubernetes_namespace kubernetes_job_issue_matches kubernetes_pod_issue_matches kubernetes_jobs_resource_version kubernetes_pods_resource_version kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref kubernetes_observed_at_ms process_unit process_load_state process_active_state process_control_group process_main_pid process_count process_observed_at_ms process_evidence_ref workspace_absent workspace_observed_at_ms workspace_evidence_ref)
+  @observation_timestamp_keys ~w(provider_observed_at_ms kubernetes_observed_at_ms process_observed_at_ms workspace_observed_at_ms)
+  @observation_digest_keys ~w(provider_evidence_ref kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref process_evidence_ref workspace_evidence_ref)
   @base_ref "refs/remotes/origin/main"
   @supported_platforms ["linux-x86_64"]
   @scope_ids [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
@@ -148,7 +152,9 @@ defmodule SymphonyElixir.ManagedResponsibility do
          true <- Enum.all?([accountable, responsible], &repository_authority?/1),
          {:ok, first, _} <- ResponsibilityGraph.delegate(ResponsibilityGraph.new(), accountable, now_ms),
          {:ok, _validated, _} <- ResponsibilityGraph.delegate(first, responsible, now_ms),
-         {:ok, assignment_context} <- decode_assignment_context(raw, version) do
+         {:ok, assignment_context} <- decode_assignment_context(raw, version),
+         {:ok, prior_authority, observation} <-
+           decode_unsubmitted_successor(raw, version, context, raw["issue_id"], accountable, responsible) do
       entry = %{
         issue_id: raw["issue_id"],
         identifier: raw["identifier"],
@@ -158,9 +164,13 @@ defmodule SymphonyElixir.ManagedResponsibility do
         assignment_context: assignment_context
       }
 
-      if Map.has_key?(raw, "prior_authority_revocation_ref"),
-        do: {:ok, Map.put(entry, :prior_authority_revocation_ref, raw["prior_authority_revocation_ref"])},
-        else: {:ok, entry}
+      entry =
+        entry
+        |> maybe_put(:prior_authority_revocation_ref, raw["prior_authority_revocation_ref"])
+        |> maybe_put(:prior_unsubmitted_authority, prior_authority)
+        |> maybe_put(:unsubmitted_observation, observation)
+
+      {:ok, entry}
     else
       {:error, _reason} = error -> error
       _ -> {:error, :invalid_managed_delegation_entry}
@@ -176,8 +186,116 @@ defmodule SymphonyElixir.ManagedResponsibility do
 
   defp entry_keys?(raw, 2) do
     exact_keys?(raw, @v2_entry_keys) or
-      (exact_keys?(raw, @v2_entry_keys ++ ["prior_authority_revocation_ref"]) and valid_revocation_ref?(raw["prior_authority_revocation_ref"]))
+      (exact_keys?(raw, @v2_entry_keys ++ ["prior_authority_revocation_ref"]) and valid_revocation_ref?(raw["prior_authority_revocation_ref"])) or
+      exact_keys?(raw, @v2_entry_keys ++ ["prior_unsubmitted_authority", "unsubmitted_observation"])
   end
+
+  defp decode_unsubmitted_successor(raw, 2, context, issue_id, accountable, responsible) do
+    case {Map.fetch(raw, "prior_unsubmitted_authority"), Map.fetch(raw, "unsubmitted_observation")} do
+      {:error, :error} ->
+        {:ok, nil, nil}
+
+      {{:ok, prior}, {:ok, observation}} ->
+        with {:ok, decoded_prior} <- decode_prior_unsubmitted_authority(prior, context, issue_id, responsible),
+             true <- decoded_prior.accountable_id not in [accountable.id, responsible.id],
+             true <- decoded_prior.responsible_id not in [accountable.id, responsible.id],
+             {:ok, decoded_observation} <-
+               decode_unsubmitted_observation(observation, context, issue_id, decoded_prior, responsible) do
+          {:ok, decoded_prior, decoded_observation}
+        else
+          _ -> {:error, :invalid_unsubmitted_successor_authority}
+        end
+
+      _ ->
+        {:error, :invalid_unsubmitted_successor_authority}
+    end
+  end
+
+  defp decode_unsubmitted_successor(_raw, 1, _context, _issue_id, _accountable, _responsible), do: {:ok, nil, nil}
+
+  defp decode_prior_unsubmitted_authority(raw, context, issue_id, responsible) when is_map(raw) do
+    with true <- exact_keys?(raw, @prior_unsubmitted_authority_keys),
+         true <- raw["issue_id"] == issue_id,
+         true <- is_integer(raw["generation"]) and raw["generation"] > 0,
+         true <- raw["repository_ref"] == context.repository_ref,
+         true <- raw["managed_project_profile_id"] == context.managed_project_profile_id,
+         true <- present?(raw["accountable_id"]) and present?(raw["responsible_id"]),
+         true <- raw["accountable_id"] != raw["responsible_id"],
+         true <- raw["accountable_id"] != responsible.id and raw["responsible_id"] != responsible.id,
+         true <- valid_sha256?(raw["accountable_digest"]),
+         true <- valid_sha256?(raw["responsible_digest"]) do
+      {:ok,
+       %{
+         issue_id: issue_id,
+         generation: raw["generation"],
+         repository_ref: raw["repository_ref"],
+         managed_project_profile_id: raw["managed_project_profile_id"],
+         accountable_id: raw["accountable_id"],
+         responsible_id: raw["responsible_id"],
+         accountable_digest: raw["accountable_digest"],
+         responsible_digest: raw["responsible_digest"]
+       }}
+    else
+      _ -> {:error, :invalid_unsubmitted_successor_authority}
+    end
+  end
+
+  defp decode_prior_unsubmitted_authority(_raw, _context, _issue_id, _responsible),
+    do: {:error, :invalid_unsubmitted_successor_authority}
+
+  defp decode_unsubmitted_observation(raw, context, issue_id, prior, responsible) when is_map(raw) do
+    with true <- exact_keys?(raw, @unsubmitted_observation_keys),
+         true <- raw["issue_id"] == issue_id and raw["issue_id"] == prior.issue_id,
+         true <- raw["generation"] == prior.generation,
+         true <- raw["repository_ref"] == context.repository_ref and raw["repository_ref"] == prior.repository_ref,
+         true <- raw["managed_project_profile_id"] == context.managed_project_profile_id,
+         true <- valid_unsubmitted_state_paths?(raw, context.pool_key),
+         true <- raw["provider_projection_id"] == responsible.scope.work_package_id,
+         true <- raw["provider_reservation_state"] == "reserved",
+         true <- is_nil(raw["provider_claimed_at"]) and is_nil(raw["provider_claim_generation"]),
+         true <- is_nil(raw["provider_execution_fence_token"]),
+         true <- raw["kubernetes_namespace"] == "frigga",
+         true <- raw["kubernetes_job_issue_matches"] == 0 and raw["kubernetes_pod_issue_matches"] == 0,
+         true <- valid_resource_version?(raw["kubernetes_jobs_resource_version"]),
+         true <- valid_resource_version?(raw["kubernetes_pods_resource_version"]),
+         true <- raw["process_load_state"] == "not-found",
+         true <- raw["process_active_state"] in ["inactive", "unknown"],
+         true <- is_nil(raw["process_control_group"]) and raw["process_main_pid"] in [nil, 0] and raw["process_count"] == 0,
+         true <- raw["workspace_absent"] == true,
+         true <- Enum.all?(@observation_timestamp_keys, &(is_integer(raw[&1]) and raw[&1] >= 0)),
+         true <- Enum.all?(@observation_digest_keys, &valid_sha256?(raw[&1])),
+         true <- present?(raw["process_unit"]) do
+      {:ok, raw}
+    else
+      _ -> {:error, :invalid_unsubmitted_successor_observation}
+    end
+  end
+
+  defp decode_unsubmitted_observation(_raw, _context, _issue_id, _prior, _responsible),
+    do: {:error, :invalid_unsubmitted_successor_observation}
+
+  defp valid_sha256?(value) when is_binary(value), do: Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+  defp valid_sha256?(_value), do: false
+
+  defp valid_resource_version?(value), do: is_binary(value) and byte_size(value) in 1..128
+
+  defp valid_unsubmitted_state_paths?(observation, pool_key) when is_binary(pool_key) do
+    pool_pattern = ~r/\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}\z/
+    base = "/srv/dahlia-runner-state"
+
+    expected = %{
+      "journal_path" => Path.join([base, "run", "pools", pool_key, "work-package.json"]),
+      "execution_fence_path" => Path.join([base, "workspaces", "pools", pool_key, ".symphony", "execution-fence.json"]),
+      "responsibility_graph_path" => Path.join([base, "workspaces", "pools", pool_key, ".symphony", "responsibility-graph.json"])
+    }
+
+    Regex.match?(pool_pattern, pool_key) and
+      Enum.all?(expected, fn {key, path} ->
+        observation[key] == path
+      end)
+  end
+
+  defp valid_unsubmitted_state_paths?(_observation, _pool_key), do: false
 
   defp decode_assignment_context(_raw, 1), do: {:ok, nil}
 
@@ -346,5 +464,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
   defp safe_path?(_path), do: false
 
   defp exact_keys?(map, keys), do: MapSet.new(Map.keys(map)) == MapSet.new(keys)
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
   defp present?(value), do: is_binary(value) and String.trim(value) != ""
 end

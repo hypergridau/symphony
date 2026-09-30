@@ -174,4 +174,70 @@ defmodule SymphonyElixir.CLITest do
     assert {:error, "Responsibility graph activation is unavailable"} =
              CLI.evaluate([@ack_flag, @activate_flag, "WORKFLOW.md"], deps)
   end
+
+  test "one-shot retirement CLI path calls its bounded handler without service startup" do
+    parent = self()
+    workflow_path = "/etc/dahlia-managed-delegations/hgs736-v7/hypergrid-gitops.workflow.md"
+
+    assert {:ok, :retired} =
+             CLI.evaluate_unsubmitted_successor_retirement(
+               ["--retire-unsubmitted-successor", "--workflow", workflow_path, "HGS-736"],
+               fn identifier, path ->
+                 send(parent, {:retirement_called, identifier, path})
+                 {:ok, :retired}
+               end
+             )
+
+    assert_received {:retirement_called, "HGS-736", ^workflow_path}
+  end
+
+  test "one-shot retirement rejects malformed arguments without calling its handler" do
+    parent = self()
+
+    assert {:error, message} =
+             CLI.evaluate_unsubmitted_successor_retirement(
+               ["--retire-unsubmitted-successor", "HGS-736", "--workflow", "/trusted/workflow.md"],
+               fn _identifier, _path -> send(parent, :unexpected_retirement_call) end
+             )
+
+    assert message =~ "Usage: symphony --retire-unsubmitted-successor"
+    refute_received :unexpected_retirement_call
+  end
+
+  test "malformed retirement CLI invocation cannot fall through to application startup" do
+    parent = self()
+
+    assert {:retirement, {:error, message}} =
+             CLI.dispatch_unsubmitted_successor_retirement(
+               ["--retire-unsubmitted-successor", "HGS-736", "--workflow"],
+               fn ->
+                 send(parent, :application_started)
+                 {:ok, [:symphony_elixir]}
+               end,
+               fn _identifier, _workflow -> send(parent, :retirement_executed) end
+             )
+
+    assert message =~ "Usage: symphony --retire-unsubmitted-successor"
+    refute_received :application_started
+    refute_received :retirement_executed
+  end
+
+  test "ordinary CLI invocations retain the normal startup path" do
+    parent = self()
+
+    start = fn ->
+      send(parent, :application_started)
+      {:ok, [:symphony_elixir]}
+    end
+
+    assert {:normal, ^start} =
+             CLI.dispatch_unsubmitted_successor_retirement(
+               ["WORKFLOW.md"],
+               start,
+               fn _identifier, _workflow -> send(parent, :retirement_executed) end
+             )
+
+    refute_received :application_started
+    refute_received :retirement_executed
+  end
 end

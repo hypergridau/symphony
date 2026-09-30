@@ -498,6 +498,31 @@ recovery contract; a partial write is not admission authority. If an expired
 grant pair was already retired under a prior evidence reference, retain that
 original graph receipt and append the distinct terminal-local fence evidence.
 
+For an active or exact restart-reconciliation-blocked pair whose old signed scope needs correction,
+only a distinct signed v2 successor with exact old IDs/digests and a fresh, root-attested
+provider/Kubernetes/systemd/workspace observation can authorize retirement. Expired grants are retired
+directly and never reactivated. The signed observation includes the exact journal, execution fence,
+and responsibility graph paths under `/srv/dahlia-runner-state`; runtime config and workflow pool
+identity must match those paths, and all state and lock files must be regular with no symlink ancestors.
+It rejects any claim-journal row for the issue, any observed or
+supervised lease, a present workspace, changed authority, or conflicting graph or fence state. The
+graph does not retain the predecessor's `assignment_context`; normal admission checks the successor's
+signed current raw Linear Markdown and base/environment fields against the current issue. The
+one-shot command requires a configured paused gate and a root-owned trusted workflow file. Stop the
+service, then run the reviewed candidate escript as the service identity with the normal trusted
+runtime environment. This command does not start the Symphony application. It derives and acquires
+the pool launcher lock itself and checks that the system service is inactive:
+
+```text
+bin/symphony --retire-unsubmitted-successor --workflow /etc/dahlia-managed-delegations/hgs736-v7/hypergrid-gitops.workflow.md HGS-736
+```
+
+Keep the launcher lock available to the task and the gate paused through manifest installation and
+restart. The task writes the graph receipt first, then the execution fence; after an interruption,
+rerun the same command. Replay completes only from that exact persisted graph receipt and its original
+observation. The signed `work_package_id` must be the provider's canonical projection ID. Never
+hand-edit the graph or fence snapshots.
+
 To enable this managed runtime on a Linux runner, the host must provide the complete tuple below;
 the service rejects a partial tuple during supervisor startup and leaves the adapter disabled when
 all five values are absent. A host that declares `SYMPHONY_POOL_KEY` or
@@ -876,6 +901,11 @@ executor also defines an assignment-bound JIT credential lease port with acquire
 callbacks; it does not implement a broker or issue credentials. Admission stays paused until the
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
+
+The signed `scope.work_package_id` must be the provider's canonical projection ID returned for the
+exact issue reservation; a Linear identifier is not a substitute. The objective content must be
+the raw runtime Linear Markdown snapshot, because connector-rendered rich links can differ from the
+runtime content used by the exact assignment check.
 
 The source-only executor journal v8 acquires and renews the assignment credential before
 checkout and passes its opaque lease handle to the checkout adapter. A denied or invalid lease
