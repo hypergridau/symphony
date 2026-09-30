@@ -93,11 +93,10 @@ The installed runner calls startup verification from a root `ExecStartPre` with 
 environment. Before an apply marker exists, startup is allowed only when that issue has no HGS-740
 evidence directory; once candidate evidence exists without its durable transaction marker, startup
 fails closed until root applies or investigates it. `applying` markers always deny startup.
-`local_applied` markers require the global pause to remain set, the root-signed local-transition
-receipt, and exact journal, fence, and graph postimages. The complete command accepts only the
-pinned HGS-485 final release receipt and fresh full Frigga Job/Pod snapshots; it also checks the
-released journal/fence/graph invariants. A completed marker rechecks those signed receipts,
-claim-scoped Job/Pod absence, and released local authority at every startup.
+`local_applied` markers deny startup until provider release is complete. The complete command
+accepts only the pinned HGS-485 final release receipt and fresh full Frigga Job/Pod snapshots;
+it also checks the released journal/fence/graph invariants. A completed marker rechecks its signed
+receipts and claim lineage at startup. Later valid generations may create new Jobs and leases.
 
 Evidence is stored root-only under
 `/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
@@ -108,6 +107,14 @@ replays only exact saved postimages from exact preimages; contradictory bytes, m
 uncertain Kubernetes pagination, an absent signer, or an unpaused gate keep the transition held.
 The completion command does not unpause admission. This source change does not install the
 ExecStartPre hook, run on a host, or qualify a live recovery.
+
+The apply and complete commands require all six pool units and both witness units stopped and
+masked, the state owner's user manager inactive, and no process running under the state owner's
+UID. State files retain their original UID, GID, and mode from the durable marker; after each
+domain save or replay the command restores and verifies that metadata before it advances the
+marker. A crash during restoration remains fail-closed and can be replayed under the same gate.
+Provider-held evidence must include complete, empty broker-credential and OAuth-slot lease
+inventories from the same database snapshot as the held reservation readback.
 
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 

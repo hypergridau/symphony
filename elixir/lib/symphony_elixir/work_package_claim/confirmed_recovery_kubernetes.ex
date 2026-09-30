@@ -52,7 +52,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
          }
        }}
     else
-      false -> {:error, :claim_resources_present}
+      false -> {:error, :kubernetes_observation_unavailable}
       _ -> {:error, :kubernetes_observation_unavailable}
     end
   rescue

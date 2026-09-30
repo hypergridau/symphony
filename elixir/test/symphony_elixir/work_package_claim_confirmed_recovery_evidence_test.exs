@@ -35,6 +35,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_valid(put_in(payload, ["providerHeld", "observedAt"], "2026-09-30T09:00:00Z"))
   end
 
+  test "requires complete empty credential and OAuth lease inventories from the same provider snapshot" do
+    payload = payload()
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "leaseIds"], ["credential-1"]))
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "readbacks"], [%{"state" => "released"}]))
+
+    refute_valid(put_in(payload, ["providerHeld", "oauthSlotLeaseInventory", "leaseCount"], 1))
+
+    refute_valid(put_in(payload, ["providerHeld", "oauthSlotLeaseInventory", "leases"], [%{"state" => "released"}]))
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "observedAt"], "2026-09-30T09:59:41Z"))
+  end
+
   test "rejects wrong dispatch phase, incomplete pool history, and a non-retired predecessor" do
     payload = payload()
     refute_valid(put_in(payload, ["observation", "dispatchPhase"], "recovery_pending"))
@@ -78,7 +92,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   test "canonical JSON and a detached Ed25519 envelope round-trip with an ephemeral key" do
     assert Evidence.canonical_json(%{"z" => 1, "a" => "é"}) == "{\"a\":\"é\",\"z\":1}"
 
-    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+    seed = :binary.list_to_bin(Enum.to_list(0..31))
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519, seed)
     payload_bytes = Evidence.canonical_json(payload())
     signature = :crypto.sign(:eddsa, :none, Evidence.signature_message(payload_bytes), [private, :ed25519])
 
@@ -225,7 +240,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
       "mutationState" => "applied",
       "reservationState" => "claimed",
       "executionCapacityState" => "held",
-      "scopeState" => "held"
+      "scopeState" => "held",
+      "credentialLeaseInventory" => %{
+        "observedAt" => observed,
+        "complete" => true,
+        "leaseIds" => [],
+        "readbacks" => []
+      },
+      "oauthSlotLeaseInventory" => %{
+        "observedAt" => observed,
+        "complete" => true,
+        "leaseCount" => 0,
+        "leaseIds" => [],
+        "leases" => []
+      }
     }
   end
 

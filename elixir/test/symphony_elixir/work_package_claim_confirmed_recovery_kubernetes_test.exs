@@ -69,4 +69,57 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
 
     assert {:error, :claim_resources_present} = ConfirmedRecoveryKubernetes.complete_resources_absent(nil, @claim, :pod)
   end
+
+  test "every resource must have valid namespace identity and metadata maps" do
+    base = %{
+      "kind" => "Job",
+      "metadata" => %{
+        "namespace" => "frigga",
+        "name" => "unrelated",
+        "uid" => "uid-1",
+        "labels" => %{},
+        "annotations" => %{}
+      }
+    }
+
+    assert :ok = ConfirmedRecoveryKubernetes.complete_resources_absent([base], @claim, :job)
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([put_in(base, ["metadata", "namespace"], "default")], @claim, :job)
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([put_in(base, ["metadata", "labels"], [])], @claim, :pod)
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([put_in(base, ["kind"], "Pod")], @claim, :job)
+  end
+
+  test "the exact issue annotation and generation also identify an allocated Job" do
+    job = %{
+      "kind" => "Job",
+      "metadata" => %{
+        "namespace" => "frigga",
+        "name" => "symphony-claim",
+        "uid" => "uid-2",
+        "labels" => %{},
+        "annotations" => %{
+          "symphony.hypergrid.au/assignment-issue-id" => @claim["issueId"],
+          "symphony.hypergrid.au/assignment-generation" => "2"
+        }
+      }
+    }
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([job], @claim, :job)
+  end
+
+  test "live observation denies before contacting Kubernetes when scope is wrong" do
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe(Map.put(@claim, "generation", 1), %{"apiServer" => "https://10.0.14.10:6443"})
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe(@claim, %{"apiServer" => "https://wrong.example"})
+
+    assert {:error, :kubernetes_observation_unavailable} = ConfirmedRecoveryKubernetes.observe(nil, %{})
+  end
 end
