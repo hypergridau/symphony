@@ -1,6 +1,10 @@
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.ExecutionFence
+  alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
+  alias SymphonyElixir.ResponsibilityGraph
+  alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
@@ -8,10 +12,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Facade
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
-  alias SymphonyElixir.ExecutionFence
-  alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
-  alias SymphonyElixir.ResponsibilityGraph
-  alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   test "WAL replay completes a crash after any partial prefix of state writes" do
@@ -1006,7 +1006,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     payload_bytes = Evidence.canonical_json(payload)
     {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
-    signature = :crypto.sign(:eddsa, :none, Evidence.signature_message(payload_bytes), [private_key, :ed25519])
+
+    signature =
+      :crypto.sign(
+        :eddsa,
+        :none,
+        Evidence.signature_message(payload_bytes),
+        [private_key, :ed25519]
+      )
 
     proof_bytes =
       Evidence.canonical_json(%{
@@ -1049,25 +1056,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     local_candidate_path = Path.join(evidence_directory, "local-transition-candidate.json")
 
-    verify_signed_evidence = fn bytes, bindings ->
-      with {:ok, envelope} when is_map(envelope) <- Jason.decode(bytes),
-           {:ok, signed_payload} <- Base.url_decode64(envelope["payload"], padding: false),
-           {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
-           true <- :crypto.verify(:eddsa, :none, Evidence.signature_message(signed_payload), signature, [public_key, :ed25519]),
-           true <- signed_payload == payload_bytes,
-           true <- bindings.pool == payload["pool"] and bindings.issue_id == payload["issueId"],
-           true <- bindings.generation == payload["generation"] and bindings.nonce == payload["nonce"],
-           true <- bindings.reservation_id == payload["reservationId"],
-           true <- bindings.assignment_sha256 == payload["assignmentSHA256"],
-           true <- bindings.fence_sha256 == expected_hashes["fenceSHA256"],
-           true <- bindings.claim_journal_sha256 == expected_hashes["claimJournalSHA256"],
-           true <- bindings.responsibility_graph_sha256 == expected_hashes["responsibilityGraphSHA256"],
-           {:ok, decoded_payload} <- Jason.decode(signed_payload) do
-        {:ok, decoded_payload}
-      else
-        _ -> {:error, :invalid_confirmed_recovery_evidence}
-      end
-    end
+    verify_signed_evidence = positive_evidence_verifier(public_key, payload_bytes, payload, expected_hashes)
 
     host_ops =
       root_operations
@@ -1082,7 +1071,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         fixed_runtime_paths: fn pool -> ConfirmedRecoveryRootHost.fixed_runtime_paths(pool) end,
         lstat: fn path -> vfs_lstat(vfs, path, paths, evidence_root, issue_id) end,
         lstat_posix: fn path -> vfs_lstat_posix(vfs, path, paths, evidence_root, issue_id) end,
-        open: fn path, _modes -> if Map.has_key?(Agent.get(vfs, & &1.files), path), do: {:ok, path}, else: {:error, :enoent} end,
+        open: fn path, _modes -> vfs_open(vfs, path) end,
         raw_read: fn path, _limit -> Map.fetch(Agent.get(vfs, & &1.files), path) end,
         read_file_info: fn path, _options ->
           case vfs_lstat_posix(vfs, path, paths, evidence_root, issue_id) do
@@ -1120,13 +1109,22 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
               {bytes, files} ->
                 meta = Map.get(state.file_meta, source, %{uid: 0, gid: 0, mode: 0o600})
-                next = %{state | files: Map.put(files, destination, bytes), file_meta: state.file_meta |> Map.delete(source) |> Map.put(destination, meta)}
+
+                next = %{
+                  state
+                  | files: Map.put(files, destination, bytes),
+                    file_meta: state.file_meta |> Map.delete(source) |> Map.put(destination, meta)
+                }
+
                 {:ok, next}
             end
           end)
         end,
         remove: fn path ->
-          Agent.update(vfs, fn state -> %{state | files: Map.delete(state.files, path), file_meta: Map.delete(state.file_meta, path)} end)
+          Agent.update(vfs, fn state ->
+            %{state | files: Map.delete(state.files, path), file_meta: Map.delete(state.file_meta, path)}
+          end)
+
           :ok
         end
       })
@@ -1143,7 +1141,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     %{
       context: context,
       vfs: vfs,
-      state_paths: %{journal: runtime.journal_path, fence: runtime.execution_fence_path, graph: runtime.responsibility_graph_path},
+      state_paths: %{
+        journal: runtime.journal_path,
+        fence: runtime.execution_fence_path,
+        graph: runtime.responsibility_graph_path
+      },
       local_candidate_path: local_candidate_path,
       expected: expected,
       predecessor: predecessor,
@@ -1171,6 +1173,35 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       graph_bytes: graph_bytes,
       reservation_id: expected["reservationId"]
     }
+  end
+
+  defp positive_evidence_verifier(public_key, payload_bytes, payload, expected_hashes) do
+    fn bytes, bindings ->
+      with {:ok, envelope} when is_map(envelope) <- Jason.decode(bytes),
+           {:ok, signed_payload} <- Base.url_decode64(envelope["payload"], padding: false),
+           {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
+           true <-
+             :crypto.verify(
+               :eddsa,
+               :none,
+               Evidence.signature_message(signed_payload),
+               signature,
+               [public_key, :ed25519]
+             ),
+           true <- signed_payload == payload_bytes,
+           true <- bindings.pool == payload["pool"] and bindings.issue_id == payload["issueId"],
+           true <- bindings.generation == payload["generation"] and bindings.nonce == payload["nonce"],
+           true <- bindings.reservation_id == payload["reservationId"],
+           true <- bindings.assignment_sha256 == payload["assignmentSHA256"],
+           true <- bindings.fence_sha256 == expected_hashes["fenceSHA256"],
+           true <- bindings.claim_journal_sha256 == expected_hashes["claimJournalSHA256"],
+           true <- bindings.responsibility_graph_sha256 == expected_hashes["responsibilityGraphSHA256"],
+           {:ok, decoded_payload} <- Jason.decode(signed_payload) do
+        {:ok, decoded_payload}
+      else
+        _ -> {:error, :invalid_confirmed_recovery_evidence}
+      end
+    end
   end
 
   defp confirmed_preimages(issue_id, now_ms) do
@@ -1386,7 +1417,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       paths: [],
       modules: [],
       environments: ["local"],
-      actions: [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
+      actions: [
+        :read,
+        :observe,
+        :delegate,
+        :reconcile,
+        :edit,
+        :commit,
+        :push,
+        :state_mutation,
+        :cleanup,
+        :review,
+        :report
+      ]
     }
 
     graph = ResponsibilityGraph.new()
@@ -1409,7 +1452,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   defp graph_delegation(id, parent_id, role, scope) do
-    actions = [:read, :observe, :delegate, :reconcile, :edit, :commit, :push, :state_mutation, :cleanup, :review, :report]
+    actions = [
+      :read,
+      :observe,
+      :delegate,
+      :reconcile,
+      :edit,
+      :commit,
+      :push,
+      :state_mutation,
+      :cleanup,
+      :review,
+      :report
+    ]
 
     %{
       id: id,
@@ -1426,12 +1481,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     }
   end
 
+  defp vfs_open(vfs, path) do
+    case Map.fetch(Agent.get(vfs, & &1.files), path) do
+      {:ok, _bytes} -> {:ok, path}
+      :error -> {:error, :enoent}
+    end
+  end
+
   defp vfs_lstat(vfs, path, state_paths, evidence_root, issue_id) do
     state = Agent.get(vfs, & &1)
 
     case Map.fetch(state.files, path) do
       {:ok, bytes} ->
-        defaults = if path in state_paths, do: %{uid: 1001, gid: 1001, mode: 0o600}, else: %{uid: 0, gid: 0, mode: 0o600}
+        defaults =
+          if path in state_paths do
+            %{uid: 1001, gid: 1001, mode: 0o600}
+          else
+            %{uid: 0, gid: 0, mode: 0o600}
+          end
+
         metadata = Map.get(state.file_meta, path, defaults)
         {:ok, vfs_file_stat(path, bytes, metadata.uid, metadata.gid, metadata.mode)}
 
@@ -1445,7 +1513,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     case Map.fetch(state.files, path) do
       {:ok, bytes} ->
-        defaults = if path in state_paths, do: %{uid: 1001, gid: 1001, mode: 0o600}, else: %{uid: 0, gid: 0, mode: 0o600}
+        defaults =
+          if path in state_paths do
+            %{uid: 1001, gid: 1001, mode: 0o600}
+          else
+            %{uid: 0, gid: 0, mode: 0o600}
+          end
+
         metadata = Map.get(state.file_meta, path, defaults)
         {:ok, vfs_file_stat(path, bytes, metadata.uid, metadata.gid, metadata.mode)}
 
@@ -1455,26 +1529,41 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   defp vfs_directory_stat(vfs, path, evidence_root, issue_id) do
-    evidence_directory = Path.join([evidence_root, issue_id, "generation-2"])
-    state_root = "/srv/dahlia-runner-state"
-
-    defaults =
-      cond do
-        path in ["/", "/srv", state_root, Path.join(state_root, "evidence")] -> %{uid: 0, gid: 0, mode: 0o755}
-        path in [evidence_root, Path.dirname(evidence_directory), evidence_directory] -> %{uid: 0, gid: 0, mode: 0o700}
-        String.starts_with?(path, Path.join(state_root, "run") <> "/") or path == Path.join(state_root, "run") -> %{uid: 1001, gid: 1001, mode: 0o750}
-        String.starts_with?(path, Path.join(state_root, "workspaces") <> "/") or path == Path.join(state_root, "workspaces") -> %{uid: 1001, gid: 1001, mode: 0o750}
-        true -> nil
-      end
-
-    case defaults do
+    case vfs_directory_defaults(path, evidence_root, issue_id) do
       nil ->
         {:error, :enoent}
 
-      metadata ->
-        actual = Map.get(Agent.get(vfs, & &1.dir_meta), path, metadata)
+      defaults ->
+        actual = Map.get(Agent.get(vfs, & &1.dir_meta), path, defaults)
         {:ok, vfs_dir_stat(path, actual.uid, actual.gid, actual.mode)}
     end
+  end
+
+  defp vfs_directory_defaults(path, evidence_root, issue_id) do
+    evidence_directory = Path.join([evidence_root, issue_id, "generation-2"])
+    state_root = "/srv/dahlia-runner-state"
+
+    cond do
+      path in ["/", "/srv", state_root, Path.join(state_root, "evidence")] ->
+        %{uid: 0, gid: 0, mode: 0o755}
+
+      path in [evidence_root, Path.dirname(evidence_directory), evidence_directory] ->
+        %{uid: 0, gid: 0, mode: 0o700}
+
+      state_directory?(path, state_root, "run") ->
+        %{uid: 1001, gid: 1001, mode: 0o750}
+
+      state_directory?(path, state_root, "workspaces") ->
+        %{uid: 1001, gid: 1001, mode: 0o750}
+
+      true ->
+        nil
+    end
+  end
+
+  defp state_directory?(path, state_root, directory) do
+    root = Path.join(state_root, directory)
+    path == root or String.starts_with?(path, root <> "/")
   end
 
   defp vfs_change_owner(vfs, path, uid, gid) do
