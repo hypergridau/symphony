@@ -17,11 +17,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @state_root "/srv/dahlia-runner-state"
   @evidence_root "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
   @identity_root "/srv/dahlia-runner-state/identity/claim-recovery-hgs485"
+  @issuer_private_path "/srv/dahlia-runner-state/identity/claim-recovery-hgs485/private.pem"
   @pause_path "/srv/dahlia-runner-state/control/global-mutable-pause.state"
   @provider_receipt_root "/etc/dahlia-managed-claim-recovery/hgs485-20260909"
   @signer_fingerprint "903b66d70e23219ee947bdbbdd738b29851302a24985edd4a69abc8a2875d8e6"
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
   @systemd_properties ~w(ActiveState ControlGroup MainPID)
+  @issuer_input_files ~w(reviewed-preflight.json provider-held-readback.json issuer-input.json)
+  @issuer_denial_files ~w(provider-held-denial.json provider-held-transport-error.json)
+  @issuer_blocked_outputs ~w(candidate.json confirmed-root-envelope.json transaction.json local-transition-candidate.json local-transition-receipt.json)
 
   @type result :: {:ok, ConfirmedRecoveryContext.t()} | {:error, term()}
 
@@ -91,6 +95,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       no_processes_for_uid: &no_processes_for_uid/1,
       require_paused_gate: &require_paused_gate/0,
       read_public_key: &read_public_key/0,
+      sign_recovery_payload: &sign_recovery_payload/1,
+      read_issuer_bundle: &read_issuer_bundle/2,
+      persist_issuer_outputs: &persist_issuer_outputs/3,
       verify_signed_evidence: &verify_signed_evidence/2,
       save_state: &save_state/3,
       lstat: &File.lstat/1,
@@ -170,6 +177,51 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          do: ConfirmedRecoveryEvidence.verify(bytes, key, bindings)
   end
 
+  @doc false
+  @spec sign_recovery_payload(binary()) :: {:ok, binary()} | {:error, :untrusted_recovery_key}
+  def sign_recovery_payload(message) when is_binary(message) do
+    with {:ok, public_key} <- read_public_key(),
+         {:ok, private_bytes} <- read_root_private_key(),
+         {:ok, private_key} <- decode_private_key(private_bytes),
+         signature <- :crypto.sign(:eddsa, :none, message, [private_key, :ed25519]),
+         true <- :crypto.verify(:eddsa, :none, message, signature, [public_key, :ed25519]) do
+      {:ok, signature}
+    else
+      _ -> {:error, :untrusted_recovery_key}
+    end
+  rescue
+    _ -> {:error, :untrusted_recovery_key}
+  catch
+    _, _ -> {:error, :untrusted_recovery_key}
+  end
+
+  def sign_recovery_payload(_message), do: {:error, :untrusted_recovery_key}
+
+  @doc false
+  @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
+  def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
+    read_issuer_bundle_with(issue_id, path, &require_issuer_input_directory/1, &File.lstat/1, &File.read/1)
+  end
+
+  def read_issuer_bundle(_issue_id, _path), do: {:error, :untrusted_issuer_bundle}
+
+  @doc false
+  @spec persist_issuer_outputs(String.t(), binary(), binary()) :: :ok | {:error, term()}
+  def persist_issuer_outputs(issue_id, candidate, envelope)
+      when is_binary(issue_id) and is_binary(candidate) and is_binary(envelope) do
+    persist_issuer_outputs_with(
+      issue_id,
+      candidate,
+      envelope,
+      &require_issue_id/1,
+      &require_issuer_input_directory/1,
+      &exclusive_durable_write/2,
+      &sync_directory/1
+    )
+  end
+
+  def persist_issuer_outputs(_issue_id, _candidate, _envelope), do: {:error, :issuer_output_conflict}
+
   defp verified_context(issue_id, pool, nonce, workflow_path, runtime) do
     {:ok,
      %ConfirmedRecoveryContext{
@@ -189,6 +241,131 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     if is_binary(issue_id) and Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, issue_id),
       do: :ok,
       else: {:error, :invalid_issue_id}
+  end
+
+  defp require_issuer_input_directory(issue_id) do
+    validate_issuer_input_directory(issue_id, &File.lstat/1, &File.ls/1, &trusted_root_directory/1)
+  end
+
+  defp read_issuer_bundle_with(issue_id, path, validate_directory, lstat, read) do
+    expected_path = Path.join(marker_directory(issue_id), "issuer-input.json")
+
+    with :ok <- validate_directory.(issue_id),
+         true <- Path.type(path) == :absolute and Path.expand(path) == path and path == expected_path,
+         {:ok, %File.Stat{type: :regular, uid: 0, mode: mode, links: 1, size: size}} <- lstat.(path),
+         true <- band(mode, 0o777) == 0o600 and size in 1..1_048_576,
+         {:ok, bytes} <- read.(path),
+         true <- byte_size(bytes) == size do
+      {:ok, bytes}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :untrusted_issuer_bundle}
+    end
+  rescue
+    _ -> {:error, :untrusted_issuer_bundle}
+  catch
+    _, _ -> {:error, :untrusted_issuer_bundle}
+  end
+
+  @spec persist_issuer_outputs_with(
+          String.t(),
+          binary(),
+          binary(),
+          (String.t() -> term()),
+          (String.t() -> term()),
+          (String.t(), binary() -> term()),
+          (String.t() -> term())
+        ) :: :ok | {:error, term()}
+  defp persist_issuer_outputs_with(issue_id, candidate, envelope, validate_issue, validate_directory, write, sync) do
+    directory = marker_directory(issue_id)
+
+    with :ok <- validate_issue.(issue_id),
+         :ok <- validate_directory.(issue_id),
+         :ok <- write.(Path.join(directory, "candidate.json"), candidate),
+         :ok <- write.(Path.join(directory, "confirmed-root-envelope.json"), envelope),
+         :ok <- sync.(directory) do
+      :ok
+    else
+      result -> normalize_issuer_output_result(result)
+    end
+  rescue
+    _ -> {:error, :issuer_output_conflict}
+  catch
+    _, _ -> {:error, :issuer_output_conflict}
+  end
+
+  @spec normalize_issuer_output_result(term()) :: {:error, term()}
+  def normalize_issuer_output_result({:error, _reason} = error), do: error
+  def normalize_issuer_output_result(_unexpected), do: {:error, :issuer_output_conflict}
+
+  defp validate_issuer_input_directory(issue_id, lstat, ls, trusted_directory)
+       when is_function(lstat, 1) and is_function(ls, 1) and is_function(trusted_directory, 1) do
+    directory = marker_directory(issue_id)
+    issue_directory = Path.dirname(directory)
+
+    with :ok <- require_issue_id(issue_id),
+         :ok <- trusted_directory.(directory),
+         {:ok, %File.Stat{type: :directory, uid: 0, mode: issue_mode}} <- lstat.(issue_directory),
+         true <- band(issue_mode, 0o777) == 0o700,
+         {:ok, %File.Stat{type: :directory, uid: 0, mode: evidence_mode}} <- lstat.(directory),
+         true <- band(evidence_mode, 0o777) == 0o700,
+         {:ok, entries} when is_list(entries) and length(entries) <= 1_024 <- ls.(directory),
+         :ok <- validate_issuer_entry_names(entries),
+         :ok <- validate_issuer_entries(directory, entries, lstat) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :untrusted_issuer_bundle}
+    end
+  rescue
+    _ -> {:error, :untrusted_issuer_bundle}
+  catch
+    _, _ -> {:error, :untrusted_issuer_bundle}
+  end
+
+  defp validate_issuer_input_directory(_issue_id, _lstat, _ls, _trusted_directory),
+    do: {:error, :untrusted_issuer_bundle}
+
+  defp validate_issuer_entry_names(entries) do
+    cond do
+      Enum.any?(@issuer_denial_files, &Enum.member?(entries, &1)) ->
+        {:error, :provider_readback_denied}
+
+      Enum.any?(@issuer_blocked_outputs, &Enum.member?(entries, &1)) ->
+        {:error, :issuer_output_conflict}
+
+      Enum.all?(@issuer_input_files, &Enum.member?(entries, &1)) ->
+        :ok
+
+      true ->
+        {:error, :untrusted_issuer_bundle}
+    end
+  end
+
+  defp validate_issuer_entries(directory, entries, lstat) do
+    required = @issuer_input_files
+    results = Enum.map(entries, &validate_issuer_entry(directory, &1, required, lstat))
+
+    if Enum.all?(results, &(&1 == :ok)), do: :ok, else: {:error, :untrusted_issuer_bundle}
+  end
+
+  defp validate_issuer_entry(directory, name, required, lstat) do
+    case lstat.(Path.join(directory, name)) do
+      {:ok, %File.Stat{type: :regular, uid: 0, gid: 0, mode: mode, links: 1, size: size}} ->
+        required_file? = Enum.member?(required, name)
+        if secure_issuer_file?(mode, size, required_file?), do: :ok, else: {:error, :untrusted_issuer_bundle}
+
+      {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} ->
+        if band(mode, 0o022) == 0, do: :ok, else: {:error, :untrusted_issuer_bundle}
+
+      _ ->
+        {:error, :untrusted_issuer_bundle}
+    end
+  end
+
+  defp secure_issuer_file?(mode, size, required?) do
+    band(mode, 0o022) == 0 and size in 1..33_554_432 and
+      (not required? or band(mode, 0o777) == 0o600)
   end
 
   defp require_root do
@@ -273,6 +450,131 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     end
   rescue
     _ -> {:error, :untrusted_recovery_key}
+  end
+
+  defp read_root_private_key do
+    with :ok <- trusted_root_directory(Path.dirname(@issuer_private_path)),
+         {:ok, %File.Stat{type: :regular, uid: 0, mode: mode, links: 1, size: size}} <- File.lstat(@issuer_private_path),
+         true <- band(mode, 0o077) == 0 and size in 1..16_384,
+         {:ok, bytes} <- File.read(@issuer_private_path),
+         true <- byte_size(bytes) == size do
+      {:ok, bytes}
+    else
+      _ -> {:error, :untrusted_recovery_key}
+    end
+  end
+
+  defp decode_private_key(pem) do
+    with [{:PrivateKeyInfo, der, :not_encrypted}] <- :public_key.pem_decode(pem),
+         {:ECPrivateKey, 1, private_key, {:namedCurve, {1, 3, 101, 112}}, :asn1_NOVALUE, :asn1_NOVALUE} <-
+           :public_key.der_decode(:PrivateKeyInfo, der),
+         true <- byte_size(private_key) == 32 do
+      {:ok, private_key}
+    else
+      _ -> {:error, :untrusted_recovery_key}
+    end
+  rescue
+    _ -> {:error, :untrusted_recovery_key}
+  end
+
+  if Mix.env() == :test do
+    @doc false
+    @spec decode_private_key_for_test(binary()) :: {:ok, binary()} | {:error, :untrusted_recovery_key}
+    def decode_private_key_for_test(pem), do: decode_private_key(pem)
+
+    @doc false
+    @spec sync_directory_for_test(String.t()) :: :ok | {:error, term()}
+    def sync_directory_for_test(path), do: sync_directory(path)
+
+    @doc false
+    @spec exclusive_durable_write_for_test(String.t(), binary()) :: :ok | {:error, :issuer_output_conflict}
+    def exclusive_durable_write_for_test(path, bytes), do: exclusive_durable_write(path, bytes)
+
+    @doc false
+    @spec issuer_input_directory_for_test(String.t(), map()) :: :ok | {:error, term()}
+    def issuer_input_directory_for_test(issue_id, operations) when is_map(operations),
+      do: validate_issuer_input_directory(issue_id, operations.lstat, operations.ls, operations.trusted_root_directory)
+
+    @doc false
+    @spec read_issuer_bundle_for_test(String.t(), String.t(), map()) :: {:ok, binary()} | {:error, term()}
+    def read_issuer_bundle_for_test(issue_id, path, operations) when is_map(operations),
+      do: read_issuer_bundle_with(issue_id, path, operations.validate_directory, operations.lstat, operations.read)
+
+    @doc false
+    @spec persist_issuer_outputs_for_test(String.t(), binary(), binary(), map()) :: :ok | {:error, term()}
+    def persist_issuer_outputs_for_test(issue_id, candidate, envelope, operations) when is_map(operations) do
+      persist_issuer_outputs_with(
+        issue_id,
+        candidate,
+        envelope,
+        operations.validate_issue,
+        operations.validate_directory,
+        operations.write,
+        operations.sync_directory
+      )
+    end
+
+    @doc false
+    @spec trusted_root_directory_for_test(String.t()) :: :ok | {:error, :untrusted_root_directory}
+    def trusted_root_directory_for_test(path), do: trusted_root_directory(path)
+
+    @doc false
+    @spec parse_systemd_properties_for_test(binary()) :: {:ok, map()} | {:error, :invalid_systemd_properties}
+    def parse_systemd_properties_for_test(output), do: parse_systemd_properties(output)
+
+    @doc false
+    @spec trusted_state_ancestors_for_test(String.t(), non_neg_integer()) :: boolean()
+    def trusted_state_ancestors_for_test(path, owner), do: trusted_state_ancestors?(path, owner)
+
+    @doc false
+    @spec trusted_runtime_directories_for_test(map(), String.t(), non_neg_integer()) ::
+            :ok | {:error, :untrusted_pool_state_directory}
+    def trusted_runtime_directories_for_test(runtime, pool, owner), do: trusted_runtime_directories(runtime, pool, owner)
+  end
+
+  defp exclusive_durable_write(path, bytes) do
+    with {:error, :enoent} <- File.lstat(path),
+         {:ok, io} <- raw_open(path, [:write, :binary, :exclusive]),
+         :ok <- File.chmod(path, 0o600),
+         :ok <- raw_write(io, bytes),
+         :ok <- raw_sync(io),
+         :ok <- raw_close(io),
+         {:ok, %File.Stat{type: :regular, uid: 0, mode: mode, links: 1, size: size}} <- File.lstat(path),
+         true <- band(mode, 0o777) == 0o600 and size == byte_size(bytes) do
+      :ok
+    else
+      _ -> {:error, :issuer_output_conflict}
+    end
+  end
+
+  defp sync_directory(path) do
+    script =
+      "import os, stat, sys\npath = sys.argv[1]\nflags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC\nfd = os.open(path, flags)\ntry:\n    if not stat.S_ISDIR(os.fstat(fd).st_mode):\n        raise NotADirectoryError(path)\n    os.fsync(fd)\nfinally:\n    os.close(fd)\n"
+
+    try do
+      case System.cmd("/usr/bin/python3", ["-I", "-c", script, path],
+             stderr_to_stdout: true,
+             env: [
+               {"PATH", "/usr/bin:/bin"},
+               {"HOME", nil},
+               {"PYTHONPATH", nil},
+               {"PYTHONHOME", nil},
+               {"PYTHONUSERBASE", nil}
+             ]
+           ) do
+        {_output, 0} ->
+          :ok
+
+        {output, status} ->
+          {:error, {:directory_sync_failed, {:exit_status, status, output}}}
+      end
+    rescue
+      error ->
+        {:error, {:directory_sync_failed, {:helper_error, error.__struct__, Exception.message(error)}}}
+    catch
+      kind, reason ->
+        {:error, {:directory_sync_failed, {:helper_failure, kind, reason}}}
+    end
   end
 
   defp public_key_fingerprint(key) do
@@ -417,5 +719,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   defp lstat_posix(path), do: File.lstat(path, time: :posix)
   defp change_owner(path, uid, gid), do: :file.change_owner(String.to_charlist(path), uid, gid)
   defp raw_open(path, modes), do: :file.open(String.to_charlist(path), modes)
+  defp raw_write(io, bytes), do: :file.write(io, bytes)
+  defp raw_sync(io), do: :file.sync(io)
+  defp raw_close(io), do: :file.close(io)
   defp read_file_info(io, opts), do: :file.read_file_info(io, opts)
 end

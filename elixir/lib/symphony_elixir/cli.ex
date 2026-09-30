@@ -28,7 +28,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery"])) do
+    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery", "--issue-hgs740-confirmed-recovery"])) do
       dispatch_hgs740(args)
     else
       if "--retire-unsubmitted-successor" in args do
@@ -41,12 +41,19 @@ defmodule SymphonyElixir.CLI do
 
   @spec dispatch_hgs740([String.t()]) :: no_return()
   defp dispatch_hgs740(args) do
-    case evaluate_hgs740(
-           args,
-           &ConfirmedRecoveryTransaction.verify_startup/2,
-           &ConfirmedRecoveryTransaction.apply/4,
-           &ConfirmedRecoveryTransaction.complete/3
-         ) do
+    result =
+      if "--issue-hgs740-confirmed-recovery" in args do
+        evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
+      else
+        evaluate_hgs740(
+          args,
+          &ConfirmedRecoveryTransaction.verify_startup/2,
+          &ConfirmedRecoveryTransaction.apply/4,
+          &ConfirmedRecoveryTransaction.complete/3
+        )
+      end
+
+    case result do
       :ok ->
         System.halt(0)
 
@@ -79,14 +86,30 @@ defmodule SymphonyElixir.CLI do
 
       _ ->
         {:error,
-         "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+         "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
     end
   end
 
   def evaluate_hgs740(_args, _verify_startup, _apply_recovery, _complete_recovery),
     do:
       {:error,
-       "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+       "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+
+  @doc false
+  @spec evaluate_hgs740_issue([String.t()], (String.t(), String.t(), String.t(), String.t(), String.t() -> term())) ::
+          :ok | {:error, String.t()}
+  def evaluate_hgs740_issue(args, issue_recovery) when is_list(args) and is_function(issue_recovery, 5) do
+    case args do
+      ["--issue-hgs740-confirmed-recovery", "--workflow", workflow_path, "--nonce", nonce, "--bundle", bundle_path, issue_id, pool] ->
+        normalize_hgs740_result(issue_recovery.(issue_id, pool, workflow_path, nonce, bundle_path))
+
+      _ ->
+        {:error, "Usage: symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>"}
+    end
+  end
+
+  def evaluate_hgs740_issue(_args, _issue_recovery),
+    do: {:error, "Usage: symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>"}
 
   defp normalize_hgs740_result(:ok), do: :ok
   defp normalize_hgs740_result({:ok, _value}), do: :ok

@@ -7,6 +7,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   """
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance
 
   @type result :: {:ok, :applied | :already_applied} | {:error, term()}
 
@@ -14,6 +15,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   @spec apply(String.t(), String.t(), String.t(), String.t()) :: result()
   def apply(issue_id, pool, workflow_path, nonce),
     do: ConfirmedRecoveryCore.apply(issue_id, pool, workflow_path, nonce)
+
+  @doc "Issues immutable HGS-740 evidence from a root-owned observation bundle while paused."
+  @spec issue(String.t(), String.t(), String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def issue(issue_id, pool, workflow_path, nonce, bundle_path),
+    do: ConfirmedRecoveryIssuance.issue(issue_id, pool, workflow_path, nonce, bundle_path)
 
   @doc "Completes a locally applied recovery after exact provider release and fresh no-Job/no-Pod readback."
   @spec complete(String.t(), String.t(), String.t()) :: :ok | {:error, term()}

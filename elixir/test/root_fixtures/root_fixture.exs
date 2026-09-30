@@ -1,10 +1,14 @@
 defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost, as: RootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
 
   @issue_id "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
+  @issuer_issue_id "33333333-3333-4333-8333-333333333333"
+  @issuer_denial_issue_id "44444444-4444-4444-8444-444444444444"
+  @issuer_replay_issue_id "55555555-5555-4555-8555-555555555555"
   @pool "midgard"
   @workflow "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/midgard.md"
   @evidence_root "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
@@ -62,6 +66,64 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     File.rm!(first.name)
     assert {:error, :enoent} == elem(replay([first, second], :infinity), 0)
     assert File.read!(second.name) == second.preimage_bytes
+  end
+
+  test "issuer accepts collector inputs in its existing directory and writes immutable outputs" do
+    directory = Transaction.marker_directory(@issuer_issue_id)
+    File.mkdir_p!(directory)
+    File.chmod!(Path.dirname(directory), 0o700)
+    File.chmod!(directory, 0o700)
+
+    write_root_private(Path.join(directory, "reviewed-preflight.json"), "{}\n")
+    write_root_private(Path.join(directory, "provider-held-readback.json"), "{\"held\":true}\n")
+    write_root_private(Path.join(directory, "issuer-input.json"), "{\"bundle\":true}\n")
+
+    input_path = Path.join(directory, "issuer-input.json")
+    assert {:ok, "{\"bundle\":true}\n"} = RootHost.read_issuer_bundle(@issuer_issue_id, input_path)
+    assert {:error, :untrusted_issuer_bundle} = RootHost.read_issuer_bundle(@issuer_issue_id, Path.join(directory, "foreign-input.json"))
+
+    candidate = "{\"candidate\":true}\n"
+    envelope = "{\"envelope\":true}\n"
+
+    assert :ok = RootHost.persist_issuer_outputs(@issuer_issue_id, candidate, envelope)
+    assert File.read!(Path.join(directory, "candidate.json")) == candidate
+    assert File.read!(Path.join(directory, "confirmed-root-envelope.json")) == envelope
+    assert_owned_root(Path.join(directory, "candidate.json"))
+    assert_owned_root(Path.join(directory, "confirmed-root-envelope.json"))
+  end
+
+  test "issuer preserves collector denial without writing outputs" do
+    directory = Transaction.marker_directory(@issuer_denial_issue_id)
+    File.mkdir_p!(directory)
+    File.chmod!(Path.dirname(directory), 0o700)
+    File.chmod!(directory, 0o700)
+    write_root_private(Path.join(directory, "reviewed-preflight.json"), "{}\n")
+    write_root_private(Path.join(directory, "provider-held-readback.json"), "{\"held\":true}\n")
+    write_root_private(Path.join(directory, "issuer-input.json"), "{\"bundle\":true}\n")
+    write_root_private(Path.join(directory, "provider-held-denial.json"), "{\"denied\":true}\n")
+
+    assert {:error, :provider_readback_denied} =
+             RootHost.persist_issuer_outputs(@issuer_denial_issue_id, "candidate", "envelope")
+
+    refute File.exists?(Path.join(directory, "candidate.json"))
+    refute File.exists?(Path.join(directory, "confirmed-root-envelope.json"))
+  end
+
+  test "issuer refuses a transaction marker already present in the collector directory" do
+    directory = Transaction.marker_directory(@issuer_replay_issue_id)
+    File.mkdir_p!(directory)
+    File.chmod!(Path.dirname(directory), 0o700)
+    File.chmod!(directory, 0o700)
+    write_root_private(Path.join(directory, "reviewed-preflight.json"), "{}\n")
+    write_root_private(Path.join(directory, "provider-held-readback.json"), "{\"held\":true}\n")
+    write_root_private(Path.join(directory, "issuer-input.json"), "{\"bundle\":true}\n")
+    write_root_private(Path.join(directory, "transaction.json"), "{\"state\":\"applying\"}\n")
+
+    assert {:error, :issuer_output_conflict} =
+             RootHost.persist_issuer_outputs(@issuer_replay_issue_id, "candidate", "envelope")
+
+    refute File.exists?(Path.join(directory, "candidate.json"))
+    refute File.exists?(Path.join(directory, "confirmed-root-envelope.json"))
   end
 
   test "exact postimage replay repairs ownership after a save before metadata restore" do
@@ -158,11 +220,18 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     assert {:error, :untrusted_workflow_file} =
              Transaction.complete(@issue_id, @pool, Path.join(@fixture_root, "forged.md"))
 
-    assert {:error, :enoent} = File.lstat(@evidence_root)
-    assert :ok = Transaction.verify_startup(@workflow, @pool)
+    case File.lstat(@evidence_root) do
+      {:error, :enoent} ->
+        assert :ok = Transaction.verify_startup(@workflow, @pool)
+
+      {:ok, %File.Stat{type: :directory, uid: 0}} ->
+        assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup(@workflow, @pool)
+    end
 
     File.mkdir_p!(@evidence_root)
     File.chmod!(@evidence_root, 0o700)
+    assert {:ok, %File.Stat{type: :directory, uid: 0, mode: evidence_mode}} = File.lstat(@evidence_root)
+    assert Bitwise.band(evidence_mode, 0o777) == 0o700
     File.mkdir_p!(Path.join(@evidence_root, @issue_id))
     File.chmod!(Path.join(@evidence_root, @issue_id), 0o700)
     File.mkdir_p!(Transaction.marker_directory(@issue_id))
@@ -236,6 +305,13 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     restore_owned_metadata(path)
   end
 
+  defp write_root_private(path, bytes) do
+    File.write!(path, bytes, [:binary, :exclusive])
+    File.chown!(path, 0)
+    File.chgrp!(path, 0)
+    File.chmod!(path, 0o600)
+  end
+
   defp restore_owned_metadata(path) do
     File.chown!(path, @owner)
     File.chgrp!(path, @owner)
@@ -244,6 +320,11 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
 
   defp assert_owned(path) do
     assert {:ok, %File.Stat{uid: @owner, gid: @owner, mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
+  defp assert_owned_root(path) do
+    assert {:ok, %File.Stat{uid: 0, gid: 0, mode: mode, links: 1}} = File.lstat(path)
     assert Bitwise.band(mode, 0o777) == 0o600
   end
 

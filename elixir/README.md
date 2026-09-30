@@ -338,8 +338,8 @@ generation-2 claim, the retired generation-1 successor receipt, the six-pool no-
 all stopped and masked services, no process/workspace/turn, complete claim-scoped RKE2 Job and
 Pod absence snapshots, and a fresh provider readback showing the exact claimed/held reservation.
 Unknown fields, incomplete snapshots, a changed tuple, stale evidence, or another signing key
-fail closed. The verifier does not write state or provide a recovery command; a separate
-write-ahead transition and startup guard are required before this evidence can authorize recovery.
+fail closed. The verifier does not write state; the root-only issuer and separate write-ahead
+transition/startup guard own those side effects.
 Its caller must supply the expected one-shot nonce and the exact pre-mutation SHA-256 values for
 the claim journal, execution fence, and responsibility graph; all four values must match the
 signed payload. The later WAL driver must durably consume that nonce before the first state write,
@@ -351,8 +351,25 @@ Before transition, Symphony also recomputes the predecessor retirement `evidence
 persisted receipt fields using the original deterministic Erlang term encoding; the candidate
 does not need to reproduce that encoding in Python.
 
+`symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
+--bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the
+paused gate, stopped and masked pool/witness services, and state-owner quiescence; refreshes complete
+Frigga Job and Pod absence; then validates and signs the canonical proof with the pinned HGS-485
+Ed25519 identity. The trusted collector must first create the generation-2 directory with root
+ownership and mode `0700`, and write `reviewed-preflight.json`, `provider-held-readback.json`, and
+`issuer-input.json` as root-owned `0600` single-link files. The canonical bundle has
+`assignmentSHA256`, `reservationId`, `observation`, and `providerHeld` fields. Other retained
+top-level evidence is accepted only when root-owned and not group- or other-writable. Provider
+denial/transport-error files, prior candidate/envelope files, and transaction or local-transition
+markers block issuance. Output files use exclusive creation, mode `0600`, file sync, and a tested
+Linux directory-fsync helper; partial output is retained and blocks replay.
+The provider readback inside the bundle must be supplied by a trusted root-owned collector using
+provider-core's dual-auth held-claim readback; the bundle must contain no auth material. The issuer
+validates that snapshot but does not call provider-core, so the collector is a prerequisite for
+end-to-end live issuance.
+
 The root-only transaction CLI is `symphony --apply-hgs740-confirmed-recovery --workflow
-<trusted-WORKFLOW.md> --nonce <proof-nonce> f77e349e-21d9-4bdf-bad3-ce08b302e7e8
+<trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> f77e349e-21d9-4bdf-bad3-ce08b302e7e8
 <pool-key>`, followed after HGS-485 provider confirmation by
 `symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md>
 f77e349e-21d9-4bdf-bad3-ce08b302e7e8 <pool-key>`. Startup uses

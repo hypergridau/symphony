@@ -69,11 +69,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
            "firstResourceVersion" => jobs.resource_version,
            "confirmingResourceVersion" => final_jobs.resource_version,
            "sha256" => digest(Jason.encode!(jobs.items)),
+           "itemCount" => length(jobs.items),
            "claimAbsent" => true
          },
          "pods" => %{
            "resourceVersion" => pods.resource_version,
            "sha256" => digest(Jason.encode!(pods.items)),
+           "itemCount" => length(pods.items),
            "claimAbsent" => true
          }
        }}
