@@ -307,6 +307,35 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert Transaction.marker_directory("issue") == "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/issue/generation-2"
   end
 
+  test "recovery decoders and custody helpers reject malformed typed inputs" do
+    assert {:error, :transaction_target_conflict} = Transaction.apply_image(:unknown, "hash", "post", fn _ -> :ok end)
+    refute Transaction.local_receipt_bytes_valid?(nil, nil, nil)
+    assert {:error, :invalid_provider_response_json} = Transaction.decode_provider_response(nil)
+
+    assert {:error, :provider_confirmation_receipt_mismatch} =
+             Transaction.validate_hgs719_receipt_binding(nil, %{}, "id", %{}, "digest", "revision", "proof")
+
+    refute Transaction.valid_state_ownership?(nil)
+
+    refute Transaction.valid_state_ownership?(%{
+             "claimJournal" => nil,
+             "fence" => nil,
+             "responsibilityGraph" => nil,
+             "directories" => %{}
+           })
+
+    refute Transaction.valid_state_ownership?(%{
+             "claimJournal" => %{"uid" => 1001, "gid" => 1001, "mode" => 0o600},
+             "fence" => %{"uid" => 1001, "gid" => 1001, "mode" => 0o600},
+             "responsibilityGraph" => %{"uid" => 1001, "gid" => 1001, "mode" => 0o600},
+             "directories" => nil
+           })
+
+    refute Transaction.directory_transition_allowed?(nil, %{}, :freeze)
+    assert Facade.marker_directory("issue") == Transaction.marker_directory("issue")
+    assert {:error, :hgs740_transaction_marker_missing} = Facade.no_marker_startup_policy("issue", true)
+  end
+
   test "production Core independently authorizes every entry point before host callbacks" do
     issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
     pool = "unknown-pool"
@@ -591,6 +620,56 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     Agent.stop(fixture.vfs)
   end
 
+  test "Core preserves the marker and holds replay after a durability failure" do
+    for failure <- [:marker_open, :directory_sync, :terminal_rename] do
+      fixture = positive_apply_fixture()
+      original_open = fixture.context.host_ops.raw_open
+      original_rename = fixture.context.host_ops.rename
+      marker_directory = Path.dirname(fixture.marker_path)
+
+      host_ops =
+        case failure do
+          :marker_open ->
+            Map.put(fixture.context.host_ops, :raw_open, fn path, modes ->
+              if path == fixture.marker_path, do: {:error, :synthetic_open_failure}, else: original_open.(path, modes)
+            end)
+
+          :directory_sync ->
+            Map.put(fixture.context.host_ops, :raw_open, fn path, modes ->
+              if path == marker_directory, do: {:error, :synthetic_sync_failure}, else: original_open.(path, modes)
+            end)
+
+          :terminal_rename ->
+            Map.put(fixture.context.host_ops, :rename, fn source, destination ->
+              if destination == fixture.marker_path,
+                do: {:error, :synthetic_rename_failure},
+                else: original_rename.(source, destination)
+            end)
+        end
+
+      assert {:error, _reason} = Transaction.apply_with_test_context(%{fixture.context | host_ops: host_ops})
+
+      before_replay = Agent.get(fixture.vfs, & &1)
+      assert before_replay.state_write_calls == if(failure == :terminal_rename, do: 3, else: 0)
+
+      if failure == :marker_open do
+        refute Map.has_key?(before_replay.files, fixture.marker_path)
+      else
+        assert %{"status" => "applying"} = Jason.decode!(before_replay.files[fixture.marker_path])
+      end
+
+      if failure == :marker_open do
+        assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+        assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+      else
+        assert {:error, :existing_hgs740_marker_conflict} = Transaction.apply_with_test_context(fixture.context)
+        assert Agent.get(fixture.vfs, & &1.state_write_calls) == before_replay.state_write_calls
+      end
+
+      Agent.stop(fixture.vfs)
+    end
+  end
+
   test "Core completion preserves its held-closed result and stops after the service gate" do
     parent = self()
 
@@ -691,6 +770,65 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
              ConfirmedRecoveryRootHost.verify_signed_evidence(fixture.proof_bytes, fixture.bindings)
 
     Agent.stop(fixture.vfs)
+  end
+
+  test "Core completion rejects changed signed inputs before a Kubernetes observation" do
+    parent = self()
+
+    for tamper <- [:local_receipt, :provider_envelope, :provider_operation, :candidate] do
+      fixture = positive_apply_fixture()
+      assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+      files = Agent.get(fixture.vfs, & &1.files)
+      marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+      completion = install_completion_evidence(fixture, marker, files)
+
+      path =
+        case tamper do
+          :local_receipt -> completion.receipt_path
+          :provider_envelope -> completion.provider_path
+          :provider_operation -> Enum.find(completion.operation_paths, &String.ends_with?(&1, "prepare-request.json"))
+          :candidate -> Path.join(Path.dirname(fixture.marker_path), "candidate.json")
+        end
+
+      Agent.update(fixture.vfs, &put_in(&1.files[path], "{}"))
+
+      context =
+        %{
+          completion.context
+          | host_ops:
+              Map.put(completion.context.host_ops, :observe_kubernetes_for_test, fn _, _ ->
+                send(parent, :must_not_observe)
+                {:ok, %{}}
+              end)
+        }
+
+      assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
+      refute_received :must_not_observe
+      assert Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path))) == marker
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+      Agent.stop(fixture.vfs)
+    end
+  end
+
+  test "Core holds recovery closed when host callbacks raise or throw" do
+    for failure <- [:raise, :throw] do
+      fail = fn ->
+        case failure do
+          :raise -> raise "synthetic host failure"
+          :throw -> throw(:synthetic_host_failure)
+        end
+      end
+
+      context =
+        core_context(%{
+          require_service_stopped: fn _pool -> fail.() end,
+          lstat: fn _path -> fail.() end
+        })
+
+      assert {:error, :confirmed_recovery_held_closed} = Transaction.apply_with_test_context(context)
+      assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
+      assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(context)
+    end
   end
 
   test "Core replays a signed complete marker after directory restore fails and then admits startup" do

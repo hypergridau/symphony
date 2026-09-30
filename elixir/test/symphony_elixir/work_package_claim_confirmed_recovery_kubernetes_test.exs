@@ -92,6 +92,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
 
     assert {:error, :claim_resources_present} =
              ConfirmedRecoveryKubernetes.complete_resources_absent([put_in(base, ["kind"], "Pod")], @claim, :job)
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([base], @claim, :pod)
+
+    assert :ok =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([Map.put(base, "kind", "Pod")], @claim, :pod)
   end
 
   test "the exact issue annotation and generation also identify an allocated Job" do
@@ -219,5 +225,28 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
 
     refute_received :jobs_read
     refute_received :pods_read
+  end
+
+  test "unexpected credential or list callback failures deny the observation" do
+    cluster = %{"apiServer" => "https://10.0.14.10:6443", "caSha256" => String.duplicate("c", 64)}
+    list = fn _namespace, _context -> {:ok, %{items: [], resource_version: "1"}} end
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe_with_test_adapter(
+               @claim,
+               cluster,
+               fn _ -> raise "credential read failed" end,
+               list,
+               list
+             )
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe_with_test_adapter(
+               @claim,
+               cluster,
+               fn _ -> throw(:credential_read_failed) end,
+               list,
+               list
+             )
   end
 end

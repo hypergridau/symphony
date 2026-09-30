@@ -154,7 +154,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
       valid_map_or_nil?(metadata["annotations"])
   end
 
-  defp valid_resource_kind?(_item, :pod), do: true
+  defp valid_resource_kind?(item, :pod), do: item["kind"] in [nil, "Pod"]
   defp valid_resource_kind?(item, :job), do: item["kind"] in [nil, "Job"]
   defp nonempty?(value), do: is_binary(value) and value != ""
   defp valid_map_or_nil?(nil), do: true
