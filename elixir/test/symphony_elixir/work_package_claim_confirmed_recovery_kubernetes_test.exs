@@ -159,10 +159,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
              "firstResourceVersion" => "1",
              "confirmingResourceVersion" => "2",
              "sha256" => :crypto.hash(:sha256, "[]") |> Base.encode16(case: :lower),
+             "itemCount" => 0,
              "claimAbsent" => true
            }
 
     assert observation["pods"]["resourceVersion"] == "7"
+    assert observation["pods"]["itemCount"] == 0
     assert observation["pods"]["claimAbsent"]
 
     assert Enum.reverse(Agent.get(calls, & &1)) == [

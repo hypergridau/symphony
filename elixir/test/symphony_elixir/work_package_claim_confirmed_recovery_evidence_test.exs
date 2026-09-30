@@ -1,7 +1,10 @@
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer, as: Issuer
 
   @now_ms 1_790_762_400_000
   @issue "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
@@ -107,6 +110,222 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(envelope, public, bindings())
   end
 
+  test "issuer emits a canonical nonce-bound proof only after independent verifier roundtrip" do
+    source = payload()
+
+    bundle = %{
+      "assignmentSHA256" => source["assignmentSHA256"],
+      "reservationId" => source["reservationId"],
+      "observation" => source["observation"],
+      "providerHeld" => source["providerHeld"]
+    }
+
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519, :binary.copy(<<3>>, 32))
+
+    assert {:ok, issued, payload_bytes, envelope_bytes} =
+             Issuer.issue(
+               Evidence.canonical_json(bundle),
+               @pool,
+               @issue,
+               @nonce,
+               bindings(),
+               fn message -> :crypto.sign(:eddsa, :none, message, [private, :ed25519]) end,
+               fn envelope, exact_bindings -> Evidence.verify_test_envelope(envelope, public, exact_bindings) end
+             )
+
+    assert issued["nonce"] == @nonce
+    assert Evidence.canonical_json(issued) == payload_bytes
+    assert {:ok, ^issued} = Evidence.verify_test_envelope(envelope_bytes, public, bindings())
+
+    assert {:error, :invalid_confirmed_recovery_evidence} =
+             Issuer.issue(Evidence.canonical_json(Map.put(bundle, "extra", true)), @pool, @issue, @nonce, bindings(), fn _ -> <<0::512>> end, fn _, _ -> {:error, :denied} end)
+  end
+
+  test "issuance binds exact local preimages, refreshes complete Kubernetes absence, and writes verified bytes" do
+    source = issuer_test_bundle()
+    state_bytes = %{"journal" => "claim-journal", "fence" => "execution-fence", "graph" => "responsibility-graph"}
+    runtime = %{pool_key: @pool, journal_path: "/state/journal", execution_fence_path: "/state/fence", responsibility_graph_path: "/state/graph"}
+    observation = source["observation"]
+
+    observation =
+      observation
+      |> Map.put("claimJournalSHA256", digest(state_bytes["journal"]))
+      |> Map.put("fenceSHA256", digest(state_bytes["fence"]))
+      |> Map.put("responsibilityGraphSHA256", digest(state_bytes["graph"]))
+
+    bundle = Map.put(source, "observation", observation)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519, :binary.copy(<<11>>, 32))
+    parent = self()
+
+    host_ops = %{
+      lstat: fn
+        "/state/journal" -> {:ok, state_stat()}
+        "/state/fence" -> {:ok, state_stat()}
+        "/state/graph" -> {:ok, state_stat()}
+      end,
+      read: fn
+        "/state/journal" -> {:ok, state_bytes["journal"]}
+        "/state/fence" -> {:ok, state_bytes["fence"]}
+        "/state/graph" -> {:ok, state_bytes["graph"]}
+      end,
+      now_ms: fn -> @now_ms end,
+      sign_recovery_payload: fn bytes ->
+        result = {:ok, :crypto.sign(:eddsa, :none, bytes, [private_key, :ed25519])}
+        send(parent, {:sign_result, result})
+        result
+      end,
+      verify_signed_evidence: fn envelope, bindings ->
+        result = Evidence.verify_test_envelope(envelope, public_key, bindings)
+        send(parent, {:verify_result, result})
+        result
+      end,
+      persist_issuer_outputs: fn issue_id, candidate, envelope ->
+        send(parent, {:outputs, issue_id, candidate, envelope})
+        :ok
+      end
+    }
+
+    context = %ConfirmedRecoveryContext{
+      issue_id: @issue,
+      pool: @pool,
+      nonce: @nonce,
+      workflow_path: "/trusted/workflow.md",
+      runtime: runtime,
+      host_ops: host_ops
+    }
+
+    observe_kubernetes = fn received_observation, assignment_sha ->
+      assert assignment_sha == bundle["assignmentSHA256"]
+      assert received_observation["expected"]["issueId"] == @issue
+      cluster = received_observation["kubernetes"]["cluster"]
+      assert cluster["apiServer"] == "https://10.0.0.1:6443"
+
+      ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+        received_observation,
+        assignment_sha,
+        fn _claim, _cluster ->
+          {:ok,
+           %{
+             "observedAt" => "2026-09-30T09:59:45Z",
+             "namespace" => "frigga",
+             "jobs" => %{
+               "confirmingResourceVersion" => "12346",
+               "sha256" => digest("fresh-jobs"),
+               "itemCount" => 0,
+               "claimAbsent" => true
+             },
+             "pods" => %{
+               "resourceVersion" => "12347",
+               "sha256" => digest("fresh-pods"),
+               "itemCount" => 0,
+               "claimAbsent" => true
+             }
+           }}
+        end
+      )
+    end
+
+    issue_result =
+      ConfirmedRecoveryIssuance.issue_bundle_with_test_context(
+        context,
+        Evidence.canonical_json(bundle),
+        observe_kubernetes
+      )
+
+    assert_received {:sign_result, sign_result}
+    assert_received {:verify_result, verify_result}
+    assert sign_result != nil
+    assert verify_result != nil
+    assert :ok = issue_result
+
+    assert_received {:outputs, @issue, candidate_bytes, envelope_bytes}
+    assert {:ok, candidate} = Jason.decode(candidate_bytes)
+    assert Evidence.canonical_json(candidate) == candidate_bytes
+    assert candidate["claimJournalSHA256"] == digest(state_bytes["journal"])
+    bindings = Issuer.bindings(bundle, @pool, @issue, @nonce, @now_ms)
+    assert {:ok, issued} = Evidence.verify_test_envelope(envelope_bytes, public_key, bindings)
+    assert issued["observation"] == candidate
+    assert issued["providerHeld"]["observedAt"] > candidate["observedAt"]
+  end
+
+  test "issuance stops before signing or output when a retained preimage changed" do
+    bundle = issuer_test_bundle()
+    state_bytes = %{"journal" => "changed-journal", "fence" => "execution-fence", "graph" => "responsibility-graph"}
+    observation = bundle["observation"]
+
+    observation =
+      observation
+      |> Map.put("claimJournalSHA256", digest("original-journal"))
+      |> Map.put("fenceSHA256", digest(state_bytes["fence"]))
+      |> Map.put("responsibilityGraphSHA256", digest(state_bytes["graph"]))
+
+    bundle = Map.put(bundle, "observation", observation)
+    parent = self()
+
+    host_ops = %{
+      lstat: fn _path -> {:ok, state_stat()} end,
+      read: fn
+        "/state/journal" -> {:ok, state_bytes["journal"]}
+        "/state/fence" -> {:ok, state_bytes["fence"]}
+        "/state/graph" -> {:ok, state_bytes["graph"]}
+      end,
+      now_ms: fn -> @now_ms end,
+      sign_recovery_payload: fn _bytes ->
+        send(parent, :sign_must_not_run)
+        <<0::512>>
+      end,
+      verify_signed_evidence: fn _envelope, _bindings -> flunk("verifier must not run") end,
+      persist_issuer_outputs: fn _issue_id, _candidate, _envelope -> flunk("outputs must not be written") end
+    }
+
+    context = %ConfirmedRecoveryContext{
+      issue_id: @issue,
+      pool: @pool,
+      nonce: @nonce,
+      workflow_path: "/trusted/workflow.md",
+      runtime: %{pool_key: @pool, journal_path: "/state/journal", execution_fence_path: "/state/fence", responsibility_graph_path: "/state/graph"},
+      host_ops: host_ops
+    }
+
+    assert {:error, :local_preimage_changed} =
+             ConfirmedRecoveryIssuance.issue_bundle_with_test_context(
+               context,
+               Evidence.canonical_json(bundle),
+               fn observation, _assignment_sha -> {:ok, observation} end
+             )
+
+    refute_received :sign_must_not_run
+  end
+
+  test "fresh Kubernetes confirmation replaces the bundle snapshot while preserving the host timestamp" do
+    bundle = issuer_test_bundle()
+    observation = bundle["observation"]
+    fresh_at = "2026-09-30T09:59:45Z"
+
+    snapshot = %{
+      "observedAt" => fresh_at,
+      "namespace" => "frigga",
+      "jobs" => %{"confirmingResourceVersion" => "12", "sha256" => String.duplicate("1", 64), "itemCount" => 0, "claimAbsent" => true},
+      "pods" => %{"resourceVersion" => "13", "sha256" => String.duplicate("2", 64), "itemCount" => 0, "claimAbsent" => true}
+    }
+
+    assert {:ok, updated} =
+             ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+               observation,
+               bundle["assignmentSHA256"],
+               fn claim, _cluster ->
+                 assert claim["issueId"] == @issue
+                 assert claim["assignmentSHA256"] == bundle["assignmentSHA256"]
+                 {:ok, snapshot}
+               end
+             )
+
+    assert updated["kubernetes"]["observedAt"] == fresh_at
+    assert updated["kubernetes"]["jobs"]["resourceVersion"] == "12"
+    assert updated["kubernetes"]["pods"]["resourceVersion"] == "13"
+    assert updated["observedAt"] == observation["observedAt"]
+  end
+
   test "malformed signed-input types and claim-bound nested fields fail closed" do
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(nil, <<0::256>>, bindings())
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify("{}", "short", bindings())
@@ -135,6 +354,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   end
 
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
+
+  @doc false
+  def issuer_test_bundle do
+    value = payload()
+
+    %{
+      "assignmentSHA256" => value["assignmentSHA256"],
+      "reservationId" => value["reservationId"],
+      "observation" => value["observation"],
+      "providerHeld" => value["providerHeld"]
+    }
+  end
+
+  @doc false
+  def issuer_test_bindings, do: bindings()
 
   defp bindings do
     %{
@@ -370,4 +604,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
 
     %{"execution" => execution, "claim" => old_claim, "receipt" => receipt}
   end
+
+  defp state_stat, do: %File.Stat{type: :regular, uid: 1000, gid: 1000, mode: 0o600, links: 1}
+
+  defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 end

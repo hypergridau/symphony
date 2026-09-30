@@ -48,6 +48,35 @@ defmodule SymphonyElixir.CLITest do
     assert_received({:apply, "24e34a86-b214-41bc-8a35-9e1d31bfb8e4", "midgard", "/trusted/WORKFLOW.md", "11111111-2222-4333-8444-555555555501"})
   end
 
+  test "routes exact HGS-740 issuance arguments to the root-only issuer" do
+    assert :ok =
+             CLI.evaluate_hgs740_issue(
+               [
+                 "--issue-hgs740-confirmed-recovery",
+                 "--workflow",
+                 "/trusted/workflow.md",
+                 "--nonce",
+                 "11111111-2222-4333-8444-555555555501",
+                 "--bundle",
+                 "/root/input.json",
+                 "24e34a86-b214-41bc-8a35-9e1d31bfb8e4",
+                 "midgard"
+               ],
+               fn issue_id, pool, workflow_path, nonce, bundle_path ->
+                 assert issue_id == "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+                 assert pool == "midgard"
+                 assert workflow_path == "/trusted/workflow.md"
+                 assert nonce == "11111111-2222-4333-8444-555555555501"
+                 assert bundle_path == "/root/input.json"
+                 :ok
+               end
+             )
+  end
+
+  test "rejects HGS-740 issuance argument drift without invoking issuer" do
+    assert {:error, _} = CLI.evaluate_hgs740_issue(["--issue-hgs740-confirmed-recovery", "--bundle", "/tmp/input.json"], fn _, _, _, _, _ -> flunk("issuer must not run") end)
+  end
+
   test "routes HGS-740 completion to the root-only final proof verifier" do
     parent = self()
 

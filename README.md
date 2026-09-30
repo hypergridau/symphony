@@ -84,10 +84,22 @@ HGS-740 handles a confirmed generation-2 provider claim when no RKE2 Job was all
 source-only root commands are:
 
 ```text
-symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key>
+symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>
+symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> <issue-uuid> <pool-key>
 symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>
 symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key>
 ```
+
+Issuance accepts a canonical root-owned, mode-`0600` JSON input bundle with exactly `assignmentSHA256`,
+`reservationId`, `observation`, and `providerHeld`. It requires the paused gate and all managed
+services stopped and masked, checks the state-owner processes, refreshes complete Frigga Job/Pod
+absence, validates the existing HGS-740 schema and pinned signer, then writes the canonical
+`candidate.json` and detached root-signed `confirmed-root-envelope.json` with exclusive creation
+and mode `0600`. Existing artifacts are never replaced; an interrupted partial write is preserved
+for investigation. The bundle's provider readback must come from a trusted root-owned collector
+using the provider's dual-auth held-claim readback; it must contain no auth material. Symphony
+validates its schema and freshness but does not fetch that provider readback itself, so this source
+path is not end-to-end live qualification.
 
 The installed runner calls startup verification from a root `ExecStartPre` with an empty
 environment. Before an apply marker exists, startup is allowed only when that issue has no HGS-740
