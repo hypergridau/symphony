@@ -197,31 +197,28 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
       ConfirmedRecoveryWAL.apply_images(
         Enum.map(images, &wal_image/1),
         &read_current/1,
-        fn path, bytes, already_applied? ->
-          if already_applied? do
-            assert File.read!(path) == bytes
-            File.chown!(path, @owner)
-            File.chgrp!(path, @owner)
-            File.chmod!(path, 0o600)
-            :ok
-          else
-            written = :counters.get(counter, 1)
-
-            if allowed_writes == :infinity or written < allowed_writes do
-              File.write!(path, bytes)
-              File.chown!(path, @owner)
-              File.chgrp!(path, @owner)
-              File.chmod!(path, 0o600)
-              :counters.add(counter, 1, 1)
-              :ok
-            else
-              {:error, :synthetic_crash}
-            end
-          end
-        end
+        &persist_replay_image(&1, &2, &3, counter, allowed_writes)
       )
 
     {result, :counters.get(counter, 1)}
+  end
+
+  defp persist_replay_image(path, bytes, true, _counter, _allowed_writes) do
+    assert File.read!(path) == bytes
+    restore_owned_metadata(path)
+    :ok
+  end
+
+  defp persist_replay_image(path, bytes, false, counter, allowed_writes) do
+    written = :counters.get(counter, 1)
+
+    if allowed_writes == :infinity or written < allowed_writes do
+      write_owned(path, bytes)
+      :counters.add(counter, 1, 1)
+      :ok
+    else
+      {:error, :synthetic_crash}
+    end
   end
 
   defp wal_image(image), do: Map.take(image, [:name, :preimage_sha256, :postimage_bytes])
@@ -235,6 +232,10 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
 
   defp write_owned(path, bytes) do
     File.write!(path, bytes)
+    restore_owned_metadata(path)
+  end
+
+  defp restore_owned_metadata(path) do
     File.chown!(path, @owner)
     File.chgrp!(path, @owner)
     File.chmod!(path, 0o600)
