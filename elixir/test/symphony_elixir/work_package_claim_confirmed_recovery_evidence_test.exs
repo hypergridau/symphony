@@ -61,13 +61,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
 
   defp bindings do
-    %{pool: @pool, issue_id: @issue, generation: 2, reservation_id: @reservation,
-      assignment_sha256: @assignment_sha, now_ms: @now_ms}
+    %{pool: @pool, issue_id: @issue, generation: 2, reservation_id: @reservation, assignment_sha256: @assignment_sha, now_ms: @now_ms}
   end
 
   defp payload do
     observed = "2026-09-30T09:59:30Z"
     claim = claim()
+
     %{
       "contractVersion" => "work-package-paused-confirmed-recovery.v1",
       "pool" => @pool,
@@ -85,13 +85,22 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
 
   defp claim do
     %{
-      "projectionId" => "projection-gen2", "reservationId" => @reservation,
-      "workspaceId" => "workspace-1", "companyId" => "company-1", "issueId" => @issue,
-      "runnerId" => "runner-1", "managedProjectProfileId" => @profile,
-      "repositoryRef" => @repository, "scopeKeys" => ["issue:" <> @issue, "repo:symphony"],
-      "generation" => 2, "sessionId" => "worker:#{@issue}:2", "processId" => "worker:#{@issue}:2",
-      "responsibleDelegationId" => "responsible-gen2", "executionFenceToken" => "#{@issue}:2",
-      "runtimeLeaseId" => "worker:#{@issue}:2", "nonceHash" => String.duplicate("b", 64)
+      "projectionId" => "projection-gen2",
+      "reservationId" => @reservation,
+      "workspaceId" => "workspace-1",
+      "companyId" => "company-1",
+      "issueId" => @issue,
+      "runnerId" => "runner-1",
+      "managedProjectProfileId" => @profile,
+      "repositoryRef" => @repository,
+      "scopeKeys" => ["issue:" <> @issue, "repo:symphony"],
+      "generation" => 2,
+      "sessionId" => "worker:#{@issue}:2",
+      "processId" => "worker:#{@issue}:2",
+      "responsibleDelegationId" => "responsible-gen2",
+      "executionFenceToken" => "#{@issue}:2",
+      "runtimeLeaseId" => "worker:#{@issue}:2",
+      "nonceHash" => String.duplicate("b", 64)
     }
   end
 
@@ -129,70 +138,135 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
       "observedAt" => observed,
       "cluster" => %{"apiServer" => "https://10.0.0.1:6443", "caSha256" => String.duplicate("f", 64)},
       "namespace" => "frigga",
-      "claim" => %{"issueId" => @issue, "generation" => 2, "repositoryRef" => @repository,
-        "reservationId" => @reservation, "assignmentSHA256" => @assignment_sha},
-      "jobs" => snapshot(), "pods" => snapshot()
+      "claim" => %{"issueId" => @issue, "generation" => 2, "repositoryRef" => @repository, "reservationId" => @reservation, "assignmentSHA256" => @assignment_sha},
+      "jobs" => snapshot(),
+      "pods" => snapshot()
     }
   end
 
   defp snapshot do
-    %{"resourceVersion" => "12345", "sha256" => String.duplicate("a", 64), "complete" => true,
-      "itemCount" => 4, "claimAbsent" => true}
+    %{"resourceVersion" => "12345", "sha256" => String.duplicate("a", 64), "complete" => true, "itemCount" => 4, "claimAbsent" => true}
   end
 
   defp witness(generation) do
-    %{"generation" => generation, "sequence" => generation, "hash" => String.duplicate("a", 64),
-      "source" => %{"sourceHead" => String.duplicate("a", 40), "executableSHA256" => String.duplicate("1", 64),
-        "wrapperSHA256" => String.duplicate("2", 64), "attestationSHA256" => String.duplicate("3", 64)},
-      "acceptedBuildReceiptSHA256" => String.duplicate("4", 64)}
+    %{
+      "generation" => generation,
+      "sequence" => generation,
+      "hash" => String.duplicate("a", 64),
+      "source" => %{
+        "sourceHead" => String.duplicate("a", 40),
+        "executableSHA256" => String.duplicate("1", 64),
+        "wrapperSHA256" => String.duplicate("2", 64),
+        "attestationSHA256" => String.duplicate("3", 64)
+      },
+      "acceptedBuildReceiptSHA256" => String.duplicate("4", 64)
+    }
   end
 
   defp service_units do
     Map.new(@pools, fn pool ->
-      {pool, %{"unit" => "dahlia-symphony@#{pool}.service", "mainPID" => 0,
-        "activeState" => "inactive", "masked" => true, "cgroupProcessCount" => 0}}
+      {pool, %{"unit" => "dahlia-symphony@#{pool}.service", "mainPID" => 0, "activeState" => "inactive", "masked" => true, "cgroupProcessCount" => 0}}
     end)
   end
 
   defp provider_readback(claim, observed) do
-    %{"observedAt" => observed, "sourceIdentity" => "provider-core:postgres",
-      "assignmentDigest" => Evidence.tuple_digest(claim), "expected" => claim,
-      "projectionState" => "active", "mutationState" => "applied", "reservationState" => "claimed",
-      "executionCapacityState" => "held", "scopeState" => "held"}
+    %{
+      "observedAt" => observed,
+      "sourceIdentity" => "provider-core:postgres",
+      "assignmentDigest" => Evidence.tuple_digest(claim),
+      "expected" => claim,
+      "projectionState" => "active",
+      "mutationState" => "applied",
+      "reservationState" => "claimed",
+      "executionCapacityState" => "held",
+      "scopeState" => "held"
+    }
   end
 
   defp predecessor(current_claim) do
-    old_claim = Map.merge(claim(), %{"projectionId" => "projection-gen1", "reservationId" => "reservation-gen1", "generation" => 1,
-      "sessionId" => "worker:#{@issue}:1", "processId" => "worker:#{@issue}:1",
-      "responsibleDelegationId" => "responsible-gen1", "executionFenceToken" => "#{@issue}:1",
-      "runtimeLeaseId" => "worker:#{@issue}:1"})
+    old_claim =
+      Map.merge(claim(), %{
+        "projectionId" => "projection-gen1",
+        "reservationId" => "reservation-gen1",
+        "generation" => 1,
+        "sessionId" => "worker:#{@issue}:1",
+        "processId" => "worker:#{@issue}:1",
+        "responsibleDelegationId" => "responsible-gen1",
+        "executionFenceToken" => "#{@issue}:1",
+        "runtimeLeaseId" => "worker:#{@issue}:1"
+      })
+
     receipt = %{
-      "active_process" => "absent", "evidence_ref" => "sha256:" <> String.duplicate("1", 64),
-      "generation" => 1, "issue_id" => @issue, "linear_state" => "In Progress",
-      "local_claim" => "absent", "provider_claim" => "absent", "provider_projection_id" => "projection-gen1",
-      "retired_at_ms" => @now_ms - 100_000, "workspace" => "absent", "type" => "unsubmitted_successor",
-      "repository_ref" => @repository, "managed_project_profile_id" => @profile,
-      "prior_accountable_id" => "accountable-gen1", "prior_responsible_id" => "responsible-gen1",
-      "prior_accountable_digest" => String.duplicate("5", 64), "prior_responsible_digest" => String.duplicate("6", 64),
-      "successor_accountable_id" => "accountable-gen2", "successor_responsible_id" => current_claim["responsibleDelegationId"],
-      "successor_accountable_digest" => String.duplicate("7", 64), "successor_responsible_digest" => String.duplicate("8", 64),
-      "manifest_sha256" => String.duplicate("9", 64), "signer_key_sha256" => String.duplicate("a", 64),
+      "active_process" => "absent",
+      "evidence_ref" => "sha256:" <> String.duplicate("1", 64),
+      "generation" => 1,
+      "issue_id" => @issue,
+      "linear_state" => "In Progress",
+      "local_claim" => "absent",
+      "provider_claim" => "absent",
+      "provider_projection_id" => "projection-gen1",
+      "retired_at_ms" => @now_ms - 100_000,
+      "workspace" => "absent",
+      "type" => "unsubmitted_successor",
+      "repository_ref" => @repository,
+      "managed_project_profile_id" => @profile,
+      "prior_accountable_id" => "accountable-gen1",
+      "prior_responsible_id" => "responsible-gen1",
+      "prior_accountable_digest" => String.duplicate("5", 64),
+      "prior_responsible_digest" => String.duplicate("6", 64),
+      "successor_accountable_id" => "accountable-gen2",
+      "successor_responsible_id" => current_claim["responsibleDelegationId"],
+      "successor_accountable_digest" => String.duplicate("7", 64),
+      "successor_responsible_digest" => String.duplicate("8", 64),
+      "manifest_sha256" => String.duplicate("9", 64),
+      "signer_key_sha256" => String.duplicate("a", 64),
       "observation_sha256" => String.duplicate("b", 64)
     }
+
     session = "worker:#{@issue}:1"
-    lease = %{"issue_id" => @issue, "repository" => @repository, "generation" => 1,
-      "role" => "worker", "session_id" => session, "process_id" => session,
-      "branch" => "codex/hgs736", "worktree" => "C:/absent", "status" => "released",
-      "registered_at_ms" => @now_ms - 200_000, "last_heartbeat_at" => 0,
-      "linear_state" => "In Progress", "pr_state" => nil, "head" => "unobserved",
-      "termination_required" => false, "termination_confirmed_at_ms" => nil,
-      "termination_evidence_ref" => nil, "termination_evidence" => nil,
-      "supervisor_identity" => nil, "release_reason" => "claim_not_submitted"}
-    execution = %{"issue_id" => @issue, "repository" => @repository, "worker_host" => "host-1",
-      "generation" => 1, "branch" => "codex/hgs736", "worktree" => "C:/absent", "status" => "retired",
-      "ownership" => "reconciled", "leases" => %{session => lease}, "terminal" => nil, "retirement" => receipt,
-      "cleanup" => "cleaned", "cleanup_receipt" => nil, "termination_unconfirmed" => false,
-      "admitted_at_ms" => @now_ms - 200_000, "cleaned_at_ms" => @now_ms - 100_000}
+
+    lease = %{
+      "issue_id" => @issue,
+      "repository" => @repository,
+      "generation" => 1,
+      "role" => "worker",
+      "session_id" => session,
+      "process_id" => session,
+      "branch" => "codex/hgs736",
+      "worktree" => "C:/absent",
+      "status" => "released",
+      "registered_at_ms" => @now_ms - 200_000,
+      "last_heartbeat_at" => 0,
+      "linear_state" => "In Progress",
+      "pr_state" => nil,
+      "head" => "unobserved",
+      "termination_required" => false,
+      "termination_confirmed_at_ms" => nil,
+      "termination_evidence_ref" => nil,
+      "termination_evidence" => nil,
+      "supervisor_identity" => nil,
+      "release_reason" => "claim_not_submitted"
+    }
+
+    execution = %{
+      "issue_id" => @issue,
+      "repository" => @repository,
+      "worker_host" => "host-1",
+      "generation" => 1,
+      "branch" => "codex/hgs736",
+      "worktree" => "C:/absent",
+      "status" => "retired",
+      "ownership" => "reconciled",
+      "leases" => %{session => lease},
+      "terminal" => nil,
+      "retirement" => receipt,
+      "cleanup" => "cleaned",
+      "cleanup_receipt" => nil,
+      "termination_unconfirmed" => false,
+      "admitted_at_ms" => @now_ms - 200_000,
+      "cleaned_at_ms" => @now_ms - 100_000
+    }
+
     %{"execution" => execution, "claim" => old_claim, "receipt" => receipt}
   end
 end

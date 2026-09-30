@@ -145,18 +145,22 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
     with true <- is_map(service_units) and Enum.sort(Map.keys(service_units)) == Enum.sort(@pools),
          true <- is_map(witness_units) and Enum.sort(Map.keys(witness_units)) == Enum.sort(expected_witness_units),
-         true <- Enum.all?(@pools, fn pool ->
-           unit = Map.get(service_units, pool)
-           is_map(unit) and exact_keys?(unit, ~w(unit mainPID activeState masked cgroupProcessCount)) and
-             unit["unit"] == "dahlia-symphony@#{pool}.service" and unit["mainPID"] == 0 and
-             unit["activeState"] in ["inactive", "failed"] and unit["masked"] == true and
-             unit["cgroupProcessCount"] == 0
-         end),
-         true <- Enum.all?(expected_witness_units, fn name ->
-           unit = Map.get(witness_units, name)
-           is_map(unit) and exact_keys?(unit, ~w(activeState masked)) and
-             unit["activeState"] == "inactive" and unit["masked"] == true
-         end) do
+         true <-
+           Enum.all?(@pools, fn pool ->
+             unit = Map.get(service_units, pool)
+
+             is_map(unit) and exact_keys?(unit, ~w(unit mainPID activeState masked cgroupProcessCount)) and
+               unit["unit"] == "dahlia-symphony@#{pool}.service" and unit["mainPID"] == 0 and
+               unit["activeState"] in ["inactive", "failed"] and unit["masked"] == true and
+               unit["cgroupProcessCount"] == 0
+           end),
+         true <-
+           Enum.all?(expected_witness_units, fn name ->
+             unit = Map.get(witness_units, name)
+
+             is_map(unit) and exact_keys?(unit, ~w(activeState masked)) and
+               unit["activeState"] == "inactive" and unit["masked"] == true
+           end) do
       :ok
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}
@@ -166,11 +170,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   defp validate_witness_history(witnesses, log_hashes) do
     with true <- is_list(witnesses) and length(witnesses) == 2,
          true <- Enum.map(witnesses, &Map.get(&1, "generation")) == [1, 2],
-         true <- Enum.all?(witnesses, fn row ->
-           is_map(row) and exact_keys?(row, ~w(generation sequence hash source acceptedBuildReceiptSHA256)) and
-             is_integer(row["sequence"]) and row["sequence"] > 0 and digest?(row["hash"]) and
-             digest?(row["acceptedBuildReceiptSHA256"]) and valid_source?(row["source"])
-         end),
+         true <-
+           Enum.all?(witnesses, fn row ->
+             is_map(row) and exact_keys?(row, ~w(generation sequence hash source acceptedBuildReceiptSHA256)) and
+               is_integer(row["sequence"]) and row["sequence"] > 0 and digest?(row["hash"]) and
+               digest?(row["acceptedBuildReceiptSHA256"]) and valid_source?(row["source"])
+           end),
          true <- is_map(log_hashes) and Enum.sort(Map.keys(log_hashes)) == Enum.sort(@pools),
          true <- Enum.all?(Map.values(log_hashes), &digest?/1) do
       :ok
@@ -216,34 +221,44 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          true <- exact_keys?(claim, @claim_fields),
          true <- exact_keys?(receipt, @retirement_fields),
          true <- execution["issue_id"] == payload["issueId"] and execution["generation"] == 1,
-         true <- execution["repository"] == current_claim["repositoryRef"] and
-           execution["status"] == "retired" and execution["cleanup"] == "cleaned" and
-           execution["ownership"] in ["reconciled", "unknown"] and is_nil(execution["terminal"]) and
-           is_nil(execution["cleanup_receipt"]) and execution["termination_unconfirmed"] == false and
-           execution["retirement"] == receipt,
-         true <- claim["issueId"] == payload["issueId"] and claim["generation"] == 1 and
-           claim["repositoryRef"] == current_claim["repositoryRef"] and
-           claim["managedProjectProfileId"] == current_claim["managedProjectProfileId"] and
-           claim["runnerId"] == current_claim["runnerId"] and claim["workspaceId"] == current_claim["workspaceId"] and
-           claim["companyId"] == current_claim["companyId"] and
-           claim["responsibleDelegationId"] == receipt["prior_responsible_id"] and
-           claim["executionFenceToken"] == "#{payload["issueId"]}:1" and
-           claim["runtimeLeaseId"] == claim["sessionId"] and digest?(claim["nonceHash"]),
-         true <- receipt["type"] == "unsubmitted_successor" and receipt["issue_id"] == payload["issueId"] and
-           receipt["generation"] == 1 and receipt["repository_ref"] == current_claim["repositoryRef"] and
-           receipt["managed_project_profile_id"] == current_claim["managedProjectProfileId"] and
-           receipt["provider_projection_id"] == claim["projectionId"],
-         true <- receipt["active_process"] == "absent" and receipt["local_claim"] == "absent" and
-           receipt["provider_claim"] == "absent" and receipt["workspace"] == "absent",
+         true <-
+           execution["repository"] == current_claim["repositoryRef"] and
+             execution["status"] == "retired" and execution["cleanup"] == "cleaned" and
+             execution["ownership"] in ["reconciled", "unknown"] and is_nil(execution["terminal"]) and
+             is_nil(execution["cleanup_receipt"]) and execution["termination_unconfirmed"] == false and
+             execution["retirement"] == receipt,
+         true <-
+           claim["issueId"] == payload["issueId"] and claim["generation"] == 1 and
+             claim["repositoryRef"] == current_claim["repositoryRef"] and
+             claim["managedProjectProfileId"] == current_claim["managedProjectProfileId"] and
+             claim["runnerId"] == current_claim["runnerId"] and claim["workspaceId"] == current_claim["workspaceId"] and
+             claim["companyId"] == current_claim["companyId"] and
+             claim["responsibleDelegationId"] == receipt["prior_responsible_id"] and
+             claim["executionFenceToken"] == "#{payload["issueId"]}:1" and
+             claim["runtimeLeaseId"] == claim["sessionId"] and digest?(claim["nonceHash"]),
+         true <-
+           receipt["type"] == "unsubmitted_successor" and receipt["issue_id"] == payload["issueId"] and
+             receipt["generation"] == 1 and receipt["repository_ref"] == current_claim["repositoryRef"] and
+             receipt["managed_project_profile_id"] == current_claim["managedProjectProfileId"] and
+             receipt["provider_projection_id"] == claim["projectionId"],
+         true <-
+           receipt["active_process"] == "absent" and receipt["local_claim"] == "absent" and
+             receipt["provider_claim"] == "absent" and receipt["workspace"] == "absent",
          true <- text?(receipt["provider_projection_id"]) and is_integer(receipt["retired_at_ms"]) and receipt["retired_at_ms"] > 0,
-         true <- Enum.all?(~w(prior_accountable_digest prior_responsible_digest successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256), &digest?(receipt[&1])),
-         true <- Regex.match?(~r/\Asha256:[0-9a-f]{64}\z/, receipt["evidence_ref"]) and
-           text?(receipt["linear_state"]) and receipt["successor_responsible_id"] == current_claim["responsibleDelegationId"],
+         true <-
+           Enum.all?(
+             ~w(prior_accountable_digest prior_responsible_digest successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256),
+             &digest?(receipt[&1])
+           ),
+         true <-
+           Regex.match?(~r/\Asha256:[0-9a-f]{64}\z/, receipt["evidence_ref"]) and
+             text?(receipt["linear_state"]) and receipt["successor_responsible_id"] == current_claim["responsibleDelegationId"],
          true <- receipt["prior_responsible_id"] == claim["responsibleDelegationId"],
-         true <- receipt["prior_accountable_id"] != receipt["prior_responsible_id"] and
-           receipt["successor_accountable_id"] != receipt["successor_responsible_id"] and
-           receipt["prior_accountable_id"] != receipt["successor_accountable_id"] and
-           receipt["prior_responsible_id"] != receipt["successor_responsible_id"],
+         true <-
+           receipt["prior_accountable_id"] != receipt["prior_responsible_id"] and
+             receipt["successor_accountable_id"] != receipt["successor_responsible_id"] and
+             receipt["prior_accountable_id"] != receipt["successor_accountable_id"] and
+             receipt["prior_responsible_id"] != receipt["successor_responsible_id"],
          true <- retired_execution_lease?(execution, claim) do
       :ok
     else
@@ -275,13 +290,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   defp validate_provider_readback(readback, payload, bindings) do
     with true <- is_map(readback) and exact_keys?(readback, @provider_fields),
          true <- readback["sourceIdentity"] == "provider-core:postgres" and readback["mutationState"] == "applied",
-         true <- readback["projectionState"] == "active" and readback["reservationState"] == "claimed" and
-           readback["executionCapacityState"] == "held" and readback["scopeState"] == "held",
+         true <-
+           readback["projectionState"] == "active" and readback["reservationState"] == "claimed" and
+             readback["executionCapacityState"] == "held" and readback["scopeState"] == "held",
          true <- digest?(readback["assignmentDigest"]) and readback["assignmentDigest"] == tuple_digest(readback["expected"]),
          true <- readback["assignmentDigest"] == tuple_digest(payload["observation"]["expected"]),
          true <- readback["expected"] == payload["observation"]["expected"],
-         true <- readback["expected"]["issueId"] == bindings.issue_id and
-           readback["expected"]["generation"] == 2 and readback["expected"]["reservationId"] == bindings.reservation_id,
+         true <-
+           readback["expected"]["issueId"] == bindings.issue_id and
+             readback["expected"]["generation"] == 2 and readback["expected"]["reservationId"] == bindings.reservation_id,
          {:ok, observed_at_ms} <- timestamp_ms(readback["observedAt"]),
          true <- fresh?(observed_at_ms, bindings.now_ms),
          {:ok, observation_at_ms} <- timestamp_ms(payload["observation"]["observedAt"]),
@@ -307,9 +324,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   def tuple_digest(_claim), do: nil
 
   defp encode_ordered_claim(claim) do
-    fields = ["projectionId", "reservationId", "workspaceId", "companyId", "issueId", "runnerId",
-      "managedProjectProfileId", "repositoryRef", "scopeKeys", "generation", "sessionId", "processId",
-      "responsibleDelegationId", "executionFenceToken", "runtimeLeaseId", "nonceHash"]
+    fields = [
+      "projectionId",
+      "reservationId",
+      "workspaceId",
+      "companyId",
+      "issueId",
+      "runnerId",
+      "managedProjectProfileId",
+      "repositoryRef",
+      "scopeKeys",
+      "generation",
+      "sessionId",
+      "processId",
+      "responsibleDelegationId",
+      "executionFenceToken",
+      "runtimeLeaseId",
+      "nonceHash"
+    ]
 
     values = Map.put(claim, "scopeKeys", Enum.sort(claim["scopeKeys"]))
 
