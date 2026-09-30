@@ -457,6 +457,29 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
              Enum.count(state.events, &(&1 == {:change_owner, run_root, 0, 0}))
            end) == owner_changes_before_denial
 
+    Agent.update(fixture.vfs, fn state ->
+      %{state | dir_meta: Map.put(state.dir_meta, run_ancestor, %{uid: 1001, gid: 1001, mode: 0o750})}
+    end)
+
+    applying_marker = Map.put(decoded_marker, "status", "applying")
+    Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(applying_marker)))
+    replay_event_count = Agent.get(fixture.vfs, &length(&1.events))
+
+    assert {:error, _reason} = Transaction.apply_with_test_context(context)
+
+    replay_events =
+      fixture.vfs
+      |> Agent.get(&Enum.reverse(&1.events))
+      |> Enum.drop(replay_event_count)
+
+    assert {:read, Path.join(Path.dirname(fixture.marker_path), "candidate.json")} in replay_events
+    assert {:read, Path.join(Path.dirname(fixture.marker_path), "confirmed-root-envelope.json")} in replay_events
+    assert :signed_evidence_verified in replay_events
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+    assert %{"status" => "applying"} = Jason.decode!(Map.fetch!(Agent.get(fixture.vfs, & &1.files), fixture.marker_path))
+
+    Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(decoded_marker)))
+
     Agent.stop(fixture.vfs)
   end
 
@@ -558,6 +581,33 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     assert {:error, _reason} =
              ConfirmedRecoveryRootHost.verify_signed_evidence(fixture.proof_bytes, fixture.bindings)
+
+    Agent.stop(fixture.vfs)
+  end
+
+  test "Core startup verifies the exact local receipt and holds a local-applied marker" do
+    fixture = positive_apply_fixture()
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+
+    files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+    completion_fixture = install_completion_evidence(fixture, marker, files)
+    event_count = Agent.get(fixture.vfs, &length(&1.events))
+    context = completion_fixture.context
+
+    assert {:error, :hgs740_startup_held_closed} =
+             Transaction.verify_startup_with_test_context(context)
+
+    startup_events =
+      fixture.vfs
+      |> Agent.get(&Enum.reverse(&1.events))
+      |> Enum.drop(event_count)
+
+    assert {:read, fixture.marker_path} in startup_events
+    assert {:read, completion_fixture.receipt_path} in startup_events
+    assert {:read, fixture.local_candidate_path} in startup_events
+    assert Enum.count(startup_events, &(&1 == :public_key_read)) == 1
+    refute {:read, completion_fixture.provider_path} in startup_events
 
     Agent.stop(fixture.vfs)
   end
@@ -1194,8 +1244,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
             :error -> {:error, :enoent}
           end
         end,
+        ls: fn path ->
+          Agent.update(vfs, fn state -> %{state | events: [{:ls, path} | state.events]} end)
+
+          if path == evidence_root do
+            {:ok, [issue_id]}
+          else
+            {:error, :enoent}
+          end
+        end,
         now_ms: fn -> now_ms end,
-        verify_signed_evidence: verify_signed_evidence,
+        verify_signed_evidence: fn bytes, bindings ->
+          Agent.update(vfs, fn state -> %{state | events: [:signed_evidence_verified | state.events]} end)
+          verify_signed_evidence.(bytes, bindings)
+        end,
         raw_open: fn path, _modes -> {:ok, {:raw_file, path}} end,
         raw_write: fn {:raw_file, path}, bytes -> vfs_raw_write(vfs, path, bytes, marker_path) end,
         raw_sync: fn _file -> :ok end,
