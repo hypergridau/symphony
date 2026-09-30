@@ -96,7 +96,6 @@ defmodule SymphonyElixir.ManagedLauncherLock do
       end
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :pool_launcher_lock_unavailable}
     end
   rescue
     _error -> {:error, :pool_launcher_lock_unavailable}

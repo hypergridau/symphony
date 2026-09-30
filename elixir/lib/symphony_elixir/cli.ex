@@ -35,6 +35,7 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  @spec dispatch_regular([String.t()]) :: no_return()
   defp dispatch_regular(args) do
     case args do
       ["--assignment-json" | _worker_args] ->
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
+  @spec dispatch_or_start([String.t()]) :: no_return()
   defp dispatch_or_start(args) do
     case dispatch_unsubmitted_successor_retirement(
            args,

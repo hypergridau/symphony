@@ -74,10 +74,7 @@ defmodule SymphonyElixir.UnsubmittedSuccessorRetirement do
            ) do
       {:ok, result}
     else
-      :missing -> {:error, :required_state_missing}
-      :disabled -> {:error, :managed_runtime_disabled}
       {:error, _reason} = error -> error
-      other -> {:error, {:unexpected_result, other}}
     end
   end
 
@@ -136,8 +133,6 @@ defmodule SymphonyElixir.UnsubmittedSuccessorRetirement do
       _ -> {:error, :untrusted_workflow_file}
     end
   end
-
-  defp trusted_workflow_file(_path), do: {:error, :untrusted_workflow_file}
 
   defp digest(bytes) when is_binary(bytes) do
     bytes

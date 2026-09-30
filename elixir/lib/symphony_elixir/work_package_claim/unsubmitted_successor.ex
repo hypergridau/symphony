@@ -33,7 +33,6 @@ defmodule SymphonyElixir.WorkPackageClaim.UnsubmittedSuccessor do
       {:ok, next_fence, next_graph, retirement_result(graph_result, fence_result)}
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :unsubmitted_successor_not_proven}
     end
   rescue
     _error -> {:error, :unsubmitted_successor_not_proven}
