@@ -240,22 +240,34 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert Transaction.marker_directory("issue") == "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/issue/generation-2"
   end
 
-  test "Core rejects an unverified context before asking for canonical runtime paths" do
-    parent = self()
+  test "production Core independently authorizes every entry point before host callbacks" do
+    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    pool = "unknown-pool"
+    workflow_path = "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/midgard.md"
+    nonce = "test-nonce"
 
-    context =
-      core_context(
-        %{
-          fixed_runtime_paths: fn _pool ->
-            send(parent, :runtime_paths_must_not_be_read)
-            {:error, :should_not_run}
-          end
-        },
-        verified?: false
-      )
+    # The synthetic context used by policy tests is never accepted by a production
+    # entry point. Every call reaches the fixed RootHost authorization sequence;
+    # whether this process is root changes which first gate denies the request.
+    assert {:error, reason} = Transaction.apply(issue_id, pool, workflow_path, nonce)
+    assert reason in [:root_privilege_required, :invalid_pool]
+    assert {:error, ^reason} = Transaction.complete(issue_id, pool, workflow_path)
+    assert {:error, ^reason} = Transaction.verify_startup(workflow_path, pool)
+    assert {:error, ^reason} = Facade.apply(issue_id, pool, workflow_path, nonce)
+  end
 
-    assert {:error, :invalid_verified_recovery_context} = Transaction.verify_startup(context)
-    refute_received :runtime_paths_must_not_be_read
+  test "systemctl always targets the system manager and ignores inherited bus overrides" do
+    assert {"/usr/bin/systemctl", ["--system", "show", "dahlia-symphony@midgard.service"], options} =
+             ConfirmedRecoveryRootHost.systemctl_invocation_for_test(["show", "dahlia-symphony@midgard.service"])
+
+    assert Keyword.fetch!(options, :stderr_to_stdout)
+
+    assert Keyword.fetch!(options, :env) == [
+             {"DBUS_SYSTEM_BUS_ADDRESS", nil},
+             {"DBUS_SESSION_BUS_ADDRESS", nil},
+             {"SYSTEMD_BUS_ADDRESS", nil},
+             {"XDG_RUNTIME_DIR", nil}
+           ]
   end
 
   test "Core startup admits an untouched evidence root and short-circuits an unsafe root" do
@@ -267,8 +279,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         lstat: fn ^evidence_root -> {:error, :enoent} end
       })
 
-    assert :ok = Transaction.validate_context(untouched)
-    assert :ok = Transaction.verify_startup(untouched)
+    assert :ok = Transaction.validate_test_context(untouched)
+    assert :ok = Transaction.verify_startup_with_test_context(untouched)
 
     parent = self()
 
@@ -284,7 +296,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         end
       })
 
-    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup(writable_root)
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(writable_root)
     assert_received :evidence_root_checked
     refute_received :directory_must_not_be_listed
     assert runtime.journal_path == "/srv/dahlia-runner-state/run/pools/midgard/work-package.json"
@@ -313,15 +325,49 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         end
       })
 
-    assert :ok = Transaction.validate_context(context)
+    assert :ok = Transaction.validate_test_context(context)
 
     assert {:error, :pool_service_not_proven_stopped} =
-             Transaction.apply(context)
+             Transaction.apply_with_test_context(context)
 
     assert_received {:service_gate, "midgard"}
     refute_received :later_gate_must_not_run
     refute_received :evidence_must_not_be_read
     refute_received :signature_must_not_be_verified
+  end
+
+  test "Core apply short-circuits each admission gate before reading marker evidence" do
+    {:ok, calls} = Agent.start_link(fn -> [] end)
+
+    cases = [
+      {:service_stopped, :pool_service_not_proven_stopped, [:service_stopped]},
+      {:services_quiescent, :managed_services_not_quiescent, [:service_stopped, :services_quiescent]},
+      {:paused_gate, :global_gate_not_paused, [:service_stopped, :services_quiescent, :paused_gate]}
+    ]
+
+    for {failed_gate, expected_error, expected_calls} <- cases do
+      callback = fn gate ->
+        Agent.update(calls, &[gate | &1])
+        if gate == failed_gate, do: {:error, expected_error}, else: :ok
+      end
+
+      context =
+        core_context(%{
+          require_service_stopped: fn _pool -> callback.(:service_stopped) end,
+          require_services_quiescent: fn -> callback.(:services_quiescent) end,
+          require_paused_gate: fn -> callback.(:paused_gate) end,
+          lstat: fn _path ->
+            Agent.update(calls, &[:marker_read | &1])
+            {:error, :enoent}
+          end
+        })
+
+      assert {:error, ^expected_error} = Transaction.apply_with_test_context(context)
+      assert Enum.reverse(Agent.get(calls, & &1)) == expected_calls
+      Agent.update(calls, fn _ -> [] end)
+    end
+
+    Agent.stop(calls)
   end
 
   test "Core completion preserves its held-closed result and stops after the service gate" do
@@ -343,9 +389,39 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         end
       })
 
-    assert :ok = Transaction.validate_context(context)
-    assert {:error, :hgs740_completion_held_closed} = Transaction.complete(context)
+    assert :ok = Transaction.validate_test_context(context)
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
     assert_received :service_gate
+    refute_received :later_gate_must_not_run
+    refute_received :marker_must_not_be_read
+  end
+
+  test "Core completion collapses quiescence denial before inspecting the marker" do
+    parent = self()
+
+    context =
+      core_context(%{
+        require_service_stopped: fn _pool ->
+          send(parent, :service_gate)
+          :ok
+        end,
+        require_services_quiescent: fn ->
+          send(parent, :quiescence_gate)
+          {:error, :managed_services_not_quiescent}
+        end,
+        require_paused_gate: fn ->
+          send(parent, :later_gate_must_not_run)
+          :ok
+        end,
+        lstat: fn _path ->
+          send(parent, :marker_must_not_be_read)
+          {:error, :enoent}
+        end
+      })
+
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
+    assert_received :service_gate
+    assert_received :quiescence_gate
     refute_received :later_gate_must_not_run
     refute_received :marker_must_not_be_read
   end
@@ -513,7 +589,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     marker = %{"issueId" => issue_id, "status" => "applying"}
     encoded_marker = Jason.encode!(marker)
 
-    assert :ok = Transaction.persist_initial_marker(marker_path, marker, runtime)
+    assert :ok = Transaction.persist_initial_marker_with_test_context(marker_path, marker, runtime)
     assert_received {:marker_io, {:open, ^marker_path, [:write, :binary, :raw, :exclusive, :sync]}}
     assert_received {:marker_io, {:write, :marker_file, ^encoded_marker}}
     assert_received {:marker_io, {:sync, :marker_file}}
@@ -532,7 +608,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     marker_path = Path.join([context.host_ops.paths.evidence_root, issue_id, "generation-2", "transaction.json"])
 
     assert {:error, :untrusted_hgs740_path} =
-             Transaction.persist_initial_marker(marker_path, %{"issueId" => issue_id}, runtime)
+             Transaction.persist_initial_marker_with_test_context(marker_path, %{"issueId" => issue_id}, runtime)
 
     refute_received {:marker_io, _}
   end
@@ -816,7 +892,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
              )
   end
 
-  defp core_context(overrides, opts \\ []) do
+  defp core_context(overrides) do
     pool = "midgard"
     {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths(pool)
 
@@ -828,8 +904,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       nonce: "test-nonce",
       workflow_path: "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/midgard.md",
       runtime: runtime,
-      host_ops: host_ops,
-      verified?: Keyword.get(opts, :verified?, true)
+      host_ops: host_ops
     }
   end
 

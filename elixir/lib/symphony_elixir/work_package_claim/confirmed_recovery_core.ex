@@ -37,9 +37,96 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @state_names ~w(claimJournal fence responsibilityGraph)
   @type result :: {:ok, :applied | :already_applied} | {:error, term()}
 
-  @doc "Applies or resumes the exact signed confirmed-claim transition in verified context."
-  @spec apply(ConfirmedRecoveryContext.t()) :: result()
-  def apply(%ConfirmedRecoveryContext{} = context) do
+  @doc "Applies or resumes the exact signed confirmed-claim transition as root."
+  @spec apply(String.t(), String.t(), String.t(), String.t()) :: result()
+  def apply(issue_id, pool, workflow_path, nonce)
+      when is_binary(issue_id) and is_binary(pool) and is_binary(workflow_path) and is_binary(nonce) do
+    with {:ok, context} <- ConfirmedRecoveryRootHost.authorize_apply(issue_id, pool, workflow_path, nonce),
+         {:ok, {:ok, result}} <-
+           ConfirmedRecoveryRootHost.with_pool_lock(context, fn -> apply_authorized_context(context) end) do
+      {:ok, result}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :confirmed_recovery_held_closed}
+    end
+  rescue
+    _ -> {:error, :confirmed_recovery_held_closed}
+  catch
+    _, _ -> {:error, :confirmed_recovery_held_closed}
+  end
+
+  def apply(_issue_id, _pool, _workflow_path, _nonce), do: {:error, :invalid_confirmed_recovery_request}
+
+  @doc "Completes a locally applied recovery after exact provider release and fresh no-Job/no-Pod readback."
+  @spec complete(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
+  def complete(issue_id, pool, workflow_path)
+      when is_binary(issue_id) and is_binary(pool) and is_binary(workflow_path) do
+    with {:ok, context} <- ConfirmedRecoveryRootHost.authorize_completion(issue_id, pool, workflow_path),
+         {:ok, :ok} <-
+           ConfirmedRecoveryRootHost.with_pool_lock(context, fn -> complete_authorized_context(context) end) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :hgs740_completion_held_closed}
+    end
+  rescue
+    _ -> {:error, :hgs740_completion_held_closed}
+  catch
+    _, _ -> {:error, :hgs740_completion_held_closed}
+  end
+
+  def complete(_issue_id, _pool, _workflow_path), do: {:error, :invalid_hgs740_completion_request}
+
+  @doc "Verifies all durable HGS-740 markers before a pool service starts."
+  @spec verify_startup(String.t(), String.t()) :: :ok | {:error, term()}
+  def verify_startup(workflow_path, pool) when is_binary(workflow_path) and is_binary(pool) do
+    with {:ok, context} <- ConfirmedRecoveryRootHost.authorize_startup(workflow_path, pool),
+         :ok <- verify_startup_authorized_context(context) do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :hgs740_startup_held_closed}
+    end
+  rescue
+    _ -> {:error, :hgs740_startup_held_closed}
+  catch
+    _, _ -> {:error, :hgs740_startup_held_closed}
+  end
+
+  def verify_startup(_workflow_path, _pool), do: {:error, :invalid_hgs740_startup_request}
+
+  if Mix.env() == :test do
+    @doc false
+    def apply_with_test_context(%ConfirmedRecoveryContext{} = context), do: apply_authorized_context(context)
+
+    @doc false
+    def apply_with_test_context(_context), do: {:error, :confirmed_recovery_held_closed}
+
+    @doc false
+    def complete_with_test_context(%ConfirmedRecoveryContext{} = context), do: complete_authorized_context(context)
+
+    @doc false
+    def complete_with_test_context(_context), do: {:error, :hgs740_completion_held_closed}
+
+    @doc false
+    def verify_startup_with_test_context(%ConfirmedRecoveryContext{} = context),
+      do: verify_startup_authorized_context(context)
+
+    @doc false
+    def verify_startup_with_test_context(_context), do: {:error, :hgs740_startup_held_closed}
+
+    @doc false
+    def validate_test_context(%ConfirmedRecoveryContext{} = context), do: validate_context(context)
+
+    @doc false
+    def validate_test_context(_context), do: {:error, :invalid_verified_recovery_context}
+
+    @doc false
+    def persist_initial_marker_with_test_context(marker_path, marker, runtime),
+      do: persist_initial_marker(marker_path, marker, runtime)
+  end
+
+  defp apply_authorized_context(%ConfirmedRecoveryContext{} = context) do
     runtime = runtime_with_host(context)
 
     with :ok <- validate_context(context),
@@ -55,11 +142,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     _, _ -> {:error, :confirmed_recovery_held_closed}
   end
 
-  def apply(_context), do: {:error, :confirmed_recovery_held_closed}
+  defp apply_authorized_context(_context), do: {:error, :confirmed_recovery_held_closed}
 
-  @doc "Completes a locally applied recovery after exact provider release and fresh no-Job/no-Pod readback."
-  @spec complete(ConfirmedRecoveryContext.t()) :: :ok | {:error, term()}
-  def complete(%ConfirmedRecoveryContext{} = context) do
+  defp complete_authorized_context(%ConfirmedRecoveryContext{} = context) do
     runtime = runtime_with_host(context)
 
     with :ok <- validate_context(context),
@@ -75,11 +160,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     _, _ -> {:error, :hgs740_completion_held_closed}
   end
 
-  def complete(_context), do: {:error, :hgs740_completion_held_closed}
+  defp complete_authorized_context(_context), do: {:error, :hgs740_completion_held_closed}
 
-  @doc "Verifies all durable HGS-740 markers before a pool service starts."
-  @spec verify_startup(ConfirmedRecoveryContext.t()) :: :ok | {:error, term()}
-  def verify_startup(%ConfirmedRecoveryContext{} = context) do
+  defp verify_startup_authorized_context(%ConfirmedRecoveryContext{} = context) do
     runtime = runtime_with_host(context)
 
     with :ok <- validate_context(context),
@@ -95,7 +178,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     _, _ -> {:error, :hgs740_startup_held_closed}
   end
 
-  def verify_startup(_context), do: {:error, :hgs740_startup_held_closed}
+  defp verify_startup_authorized_context(_context), do: {:error, :hgs740_startup_held_closed}
 
   @doc false
   @spec marker_directory(String.t()) :: Path.t()
@@ -104,19 +187,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp runtime_with_host(%ConfirmedRecoveryContext{runtime: runtime, host_ops: host_ops}),
     do: Map.put(runtime, :host_ops, host_ops)
 
-  @doc false
   @spec validate_context(ConfirmedRecoveryContext.t()) :: :ok | {:error, :invalid_verified_recovery_context}
-  def validate_context(%ConfirmedRecoveryContext{
-        verified?: true,
-        issue_id: issue_id,
-        pool: pool,
-        nonce: nonce,
-        workflow_path: workflow_path,
-        runtime: runtime,
-        host_ops: host_ops
-      })
-      when is_binary(issue_id) and is_binary(pool) and is_binary(nonce) and
-             is_binary(workflow_path) and is_map(runtime) and is_map(host_ops) do
+  defp validate_context(%ConfirmedRecoveryContext{
+         issue_id: issue_id,
+         pool: pool,
+         nonce: nonce,
+         workflow_path: workflow_path,
+         runtime: runtime,
+         host_ops: host_ops
+       })
+       when is_binary(issue_id) and is_binary(pool) and is_binary(nonce) and
+              is_binary(workflow_path) and is_map(runtime) and is_map(host_ops) do
     with :ok <- require_pool(pool),
          :ok <- require_issue_id(issue_id),
          true <- runtime.pool_key == pool,
@@ -128,7 +209,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
-  def validate_context(_context), do: {:error, :invalid_verified_recovery_context}
+  defp validate_context(_context), do: {:error, :invalid_verified_recovery_context}
 
   defp runtime_paths_match?(runtime, expected) when is_map(expected) do
     Enum.all?([:pool_key, :journal_path, :execution_fence_path, :responsibility_graph_path], fn key ->
@@ -639,14 +720,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
-  @doc false
-  @spec persist_initial_marker(Path.t(), map(), map()) :: :ok | {:error, term()}
-  def persist_initial_marker(marker_path, marker, runtime) when is_map(marker) and is_map(runtime) do
+  defp persist_initial_marker(marker_path, marker, runtime) when is_map(marker) and is_map(runtime) do
     with :ok <- trusted_evidence_directory(Path.dirname(marker_path), runtime),
          do: durable_create(marker_path, Jason.encode!(marker), runtime)
   end
 
-  def persist_initial_marker(_marker_path, _marker, _runtime), do: {:error, :untrusted_hgs740_path}
+  defp persist_initial_marker(_marker_path, _marker, _runtime), do: {:error, :untrusted_hgs740_path}
 
   defp validate_resumable_marker(%{"status" => "applying"} = marker, runtime) do
     with :ok <- validate_current_pre_or_post(marker, runtime),

@@ -1,8 +1,8 @@
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext do
   @moduledoc false
 
-  @enforce_keys [:issue_id, :pool, :nonce, :workflow_path, :runtime, :host_ops, :verified?]
-  defstruct [:issue_id, :pool, :nonce, :workflow_path, :runtime, :host_ops, :verified?]
+  @enforce_keys [:issue_id, :pool, :nonce, :workflow_path, :runtime, :host_ops]
+  defstruct [:issue_id, :pool, :nonce, :workflow_path, :runtime, :host_ops]
 
   @type runtime :: %{
           required(:pool_key) => String.t(),
@@ -19,7 +19,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext do
           nonce: String.t(),
           workflow_path: Path.t(),
           runtime: runtime(),
-          host_ops: host_ops(),
-          verified?: boolean()
+          host_ops: host_ops()
         }
 end

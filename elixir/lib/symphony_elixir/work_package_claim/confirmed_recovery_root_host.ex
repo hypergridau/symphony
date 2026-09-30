@@ -179,8 +179,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
        nonce: nonce,
        workflow_path: workflow_path,
        runtime: runtime,
-       host_ops: operations(),
-       verified?: true
+       host_ops: operations()
      }}
   end
 
@@ -389,7 +388,30 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     end
   end
 
-  defp system_cmd(args), do: System.cmd("/usr/bin/systemctl", args, stderr_to_stdout: true)
+  if Mix.env() == :test do
+    @doc false
+    @spec systemctl_invocation_for_test([String.t()]) :: {String.t(), [String.t()], keyword()}
+    def systemctl_invocation_for_test(args), do: systemctl_invocation(args)
+  end
+
+  defp system_cmd(args) do
+    {executable, arguments, options} = systemctl_invocation(args)
+    System.cmd(executable, arguments, options)
+  end
+
+  defp systemctl_invocation(args) do
+    {"/usr/bin/systemctl", ["--system" | args],
+     [
+       stderr_to_stdout: true,
+       env: [
+         {"DBUS_SYSTEM_BUS_ADDRESS", nil},
+         {"DBUS_SESSION_BUS_ADDRESS", nil},
+         {"SYSTEMD_BUS_ADDRESS", nil},
+         {"XDG_RUNTIME_DIR", nil}
+       ]
+     ]}
+  end
+
   defp save_state(:claim_journal, path, state), do: Journal.save(path, state)
   defp save_state(:fence, path, state), do: FencePersistence.save(path, state)
   defp save_state(:responsibility_graph, path, state), do: GraphPersistence.save(path, state)
