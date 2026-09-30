@@ -323,6 +323,11 @@ replays current claim and root authority, checks the assignment and allocation b
 and reads the pause gate again. A held guard or uncertain activation retains the claim,
 Job, and lease for reconciliation. No disposable runner has been qualified.
 
+If host allocation context preparation fails before Job allocation, the dispatcher uses the
+existing paused-recovery transition to durably mark the confirmed claim `recovery_pending`
+and release its local execution lease. The provider claim remains held until signed host
+preflight proves the exact retained history and complete, current Job/Pod absence.
+
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the

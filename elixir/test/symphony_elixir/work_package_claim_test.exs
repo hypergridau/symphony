@@ -1781,6 +1781,41 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.allocation_id == allocation_id
   end
 
+  test "host allocation context failure durably enters recovery before Job allocation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Host allocation context unavailable",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    host_config = %{
+      repository_ref: @repository,
+      client_context_fun: fn _assignment, :allocate, _key, _config ->
+        {:error, :synthetic_host_allocation_context_unavailable}
+      end
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_host_config: host_config)
+
+    refute_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "rke2_host_allocation_context_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    assert reservation.dispatch.allocation_id == nil
+    assert reservation.reservation_id == "reservation-349"
+  end
+
   test "signed dispatch composes trusted host context before suspended allocation" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)

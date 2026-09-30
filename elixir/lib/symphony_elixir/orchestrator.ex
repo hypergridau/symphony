@@ -2624,13 +2624,30 @@ defmodule SymphonyElixir.Orchestrator do
     case SuspendedController.preflight(dispatch.assignment_bundle, input, %{claim_binding: dispatch.claim_binding}) do
       :ok ->
         case disposable_context(dispatch, context_source) do
-          {:ok, context} -> create_disposable_allocation(state, issue, dispatch, context, input, context_source)
-          {:held, reason} -> block_claim_recovery(state, issue, {:disposable_rke2_context_unavailable, reason})
+          {:ok, context} ->
+            create_disposable_allocation(state, issue, dispatch, context, input, context_source)
+
+          {:held, reason} ->
+            handle_disposable_context_failure(state, issue, dispatch, context_source, reason)
         end
 
       {:error, reason} ->
         block_claim_recovery(state, issue, {:disposable_rke2_claim_not_admissible, reason})
     end
+  end
+
+  defp handle_disposable_context_failure(
+         state,
+         issue,
+         dispatch,
+         {:host, _host_config},
+         :rke2_host_allocation_context_unavailable
+       ) do
+    recover_post_claim_spawn_failure(state, issue, dispatch, :rke2_host_allocation_context_unavailable)
+  end
+
+  defp handle_disposable_context_failure(state, issue, _dispatch, _context_source, reason) do
+    block_claim_recovery(state, issue, {:disposable_rke2_context_unavailable, reason})
   end
 
   defp disposable_context(dispatch, {:prepared, context}) do
