@@ -60,6 +60,28 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
 
   def allocate(_assignment, _claim_input, _context), do: {:error, :invalid_suspended_controller_input}
 
+  @doc "Performs the first create call after the caller durably records and locks allocation_pending."
+  @spec allocate_pending(map(), map(), map()) :: result()
+  def allocate_pending(assignment, claim_input, context)
+      when is_map(assignment) and is_map(claim_input) and is_map(context) do
+    with :ok <- validate_inputs(assignment, claim_input, context),
+         :ok <- WorkPackageClaim.record_pending_assignment_snapshot(claim_input, assignment),
+         {:ok, adapter} <- adapter(context),
+         {:ok, allocation} <-
+           adapter.allocate_or_reconcile(
+             assignment,
+             operation_key(assignment, :allocation),
+             context
+           ) do
+      case WorkPackageClaim.record_suspended_allocation(claim_input, allocation) do
+        :ok -> {:ok, allocation}
+        {:error, reason} -> {:held, {:suspended_allocation_journal_failed, allocation.id, reason}}
+      end
+    end
+  end
+
+  def allocate_pending(_assignment, _claim_input, _context), do: {:error, :invalid_suspended_controller_input}
+
   @doc "Validates the exact signed claim and journal before host side effects."
   @spec preflight(map(), map(), map()) :: :ok | {:error, term()}
   def preflight(assignment, claim_input, context)

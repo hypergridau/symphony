@@ -2520,6 +2520,28 @@ defmodule SymphonyElixir.Orchestrator do
     block_claim_recovery(state, issue, {reason, recovery})
   end
 
+  defp recover_pre_allocation_failure(state, issue, dispatch, reason) do
+    recovery = WorkPackageClaim.begin_pre_allocation_recovery(claim_input(state, issue))
+
+    state =
+      if recovery == :ok do
+        release_execution_lease(
+          state,
+          %{
+            execution_token: dispatch.token,
+            execution_session_id: dispatch.session_id,
+            responsibility_delegation_id: dispatch.delegation_id,
+            responsibility_runtime_lease: dispatch.runtime_lease
+          },
+          :spawn_failed
+        )
+      else
+        state
+      end
+
+    block_claim_recovery(state, issue, {reason, recovery})
+  end
+
   defp spawn_fenced_issue_with_bundle(
          %State{} = state,
          issue,
@@ -2643,7 +2665,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:host, _host_config},
          :rke2_host_allocation_context_unavailable
        ) do
-    recover_post_claim_spawn_failure(state, issue, dispatch, :rke2_host_allocation_context_unavailable)
+    recover_pre_allocation_failure(state, issue, dispatch, :rke2_host_allocation_context_unavailable)
   end
 
   defp handle_disposable_context_failure(state, issue, _dispatch, _context_source, reason) do
@@ -2659,7 +2681,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp create_disposable_allocation(state, issue, dispatch, context, input, context_source) do
-    case SuspendedController.allocate(dispatch.assignment_bundle, input, context) do
+    allocation =
+      WorkPackageClaim.allocate_suspended(input, fn ->
+        SuspendedController.allocate_pending(dispatch.assignment_bundle, input, context)
+      end)
+
+    case allocation do
       {:ok, %{id: allocation_id}} ->
         if match?({:host, _config}, context_source) do
           activate_disposable_allocation(state, issue, dispatch, context, input, allocation_id)
@@ -2674,7 +2701,7 @@ defmodule SymphonyElixir.Orchestrator do
         block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
 
       {:error, reason} ->
-        block_claim_recovery(state, issue, {:disposable_rke2_allocation_uncertain, reason})
+        block_claim_recovery(state, issue, {:disposable_rke2_allocation_not_admissible, reason})
     end
   end
 

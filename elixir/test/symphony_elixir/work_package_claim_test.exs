@@ -1739,7 +1739,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
     assert {:ok, journal} = Journal.load(path)
     [reservation] = Map.values(journal.reservations)
-    assert reservation.dispatch.phase == "confirmed"
+    assert reservation.dispatch.phase == "allocation_pending"
     assert reservation.reservation_id == "reservation-349"
   end
 
@@ -1814,6 +1814,75 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.phase == "recovery_pending"
     assert reservation.dispatch.allocation_id == nil
     assert reservation.reservation_id == "reservation-349"
+  end
+
+  test "pre-allocation recovery cannot release the lease after a concurrent Job allocation wins" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    parent = self()
+
+    allocation =
+      Task.async(fn ->
+        WorkPackageClaim.allocate_suspended(input, fn ->
+          send(parent, :allocation_entered_locked_section)
+          receive do: (:continue_allocation -> :ok)
+          {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}}
+        end)
+      end)
+
+    assert_receive :allocation_entered_locked_section
+    assert {:ok, pending_journal} = Journal.load(path)
+    [pending_reservation] = Map.values(pending_journal.reservations)
+    assert pending_reservation.dispatch.phase == "allocation_pending"
+
+    recovery = Task.async(fn -> WorkPackageClaim.begin_pre_allocation_recovery(input) end)
+    send(allocation.pid, :continue_allocation)
+
+    assert {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}} = Task.await(allocation)
+    assert {:error, :preallocation_claim_state_changed} = Task.await(recovery)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == "rke2job:v1:race-allocation"
+  end
+
+  test "uncertain first allocation remains held and cannot enter pre-allocation recovery" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assert {:held, :allocation_response_uncertain} =
+             WorkPackageClaim.allocate_suspended(input, fn -> {:held, :allocation_response_uncertain} end)
+
+    assert {:error, :preallocation_claim_state_changed} = WorkPackageClaim.begin_pre_allocation_recovery(input)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_pending"
+    assert is_nil(reservation.dispatch.allocation_id)
   end
 
   test "signed dispatch composes trusted host context before suspended allocation" do
