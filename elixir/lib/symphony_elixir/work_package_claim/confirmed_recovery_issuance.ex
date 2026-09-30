@@ -134,12 +134,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
     kube = observation["kubernetes"]
     claim = observation["expected"]
 
-    with true <- is_map(kube) and is_map(claim),
-         cluster when is_map(cluster) <- kube["cluster"],
+    with %{} = kube <- kube,
+         %{} = claim <- claim,
+         %{} = cluster <- kube["cluster"],
          {:ok, snapshot} <- observe.(Map.put(claim, "assignmentSHA256", assignment_sha), cluster),
          fresh_kube <- kubernetes_contract(kube, claim, snapshot, assignment_sha),
-         observation <- Map.put(observation, "kubernetes", fresh_kube),
-         {:ok, _} <- validate_kubernetes_shape(fresh_kube) do
+         observation <- Map.put(observation, "kubernetes", fresh_kube) do
       {:ok, observation}
     else
       _ -> {:error, :kubernetes_observation_unavailable}
@@ -178,13 +178,5 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
         "claimAbsent" => snapshot["pods"]["claimAbsent"]
       }
     }
-  end
-
-  defp validate_kubernetes_shape(kube) do
-    if is_map(kube) and is_map(kube["jobs"]) and is_map(kube["pods"]) do
-      {:ok, kube}
-    else
-      {:error, :invalid_kubernetes_snapshot}
-    end
   end
 end

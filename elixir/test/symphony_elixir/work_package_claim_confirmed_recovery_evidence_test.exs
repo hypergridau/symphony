@@ -141,6 +141,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
              Issuer.issue(Evidence.canonical_json(Map.put(bundle, "extra", true)), @pool, @issue, @nonce, bindings(), fn _ -> <<0::512>> end, fn _, _ -> {:error, :denied} end)
   end
 
+  test "issuer fails closed on signing and independent verification denials" do
+    bundle_bytes = Evidence.canonical_json(issuer_test_bundle())
+    bindings = bindings()
+    denied = fn _, _ -> {:error, :denied} end
+
+    assert {:error, :invalid_confirmed_recovery_evidence} =
+             Issuer.issue(bundle_bytes, @pool, @issue, @nonce, bindings, fn _ -> {:error, :signer_unavailable} end, denied)
+
+    assert {:error, :invalid_confirmed_recovery_evidence} =
+             Issuer.issue(bundle_bytes, @pool, @issue, @nonce, bindings, fn _ -> {:ok, <<0::256>>} end, denied)
+
+    assert {:error, :invalid_confirmed_recovery_evidence} =
+             Issuer.issue(bundle_bytes, @pool, @issue, @nonce, bindings, fn _ -> {:ok, <<0::512>>} end, fn _, _ -> {:ok, %{}} end)
+  end
+
   test "issuance binds exact local preimages, refreshes complete Kubernetes absence, and writes verified bytes" do
     source = issuer_test_bundle()
     state_bytes = %{"journal" => "claim-journal", "fence" => "execution-fence", "graph" => "responsibility-graph"}
@@ -324,6 +339,40 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     assert updated["kubernetes"]["jobs"]["resourceVersion"] == "12"
     assert updated["kubernetes"]["pods"]["resourceVersion"] == "13"
     assert updated["observedAt"] == observation["observedAt"]
+  end
+
+  test "fresh Kubernetes refresh fails closed on malformed inputs, denial, and observer failure" do
+    bundle = issuer_test_bundle()
+    observation = bundle["observation"]
+    unavailable = fn _claim, _cluster -> {:error, :api_unavailable} end
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+               nil,
+               bundle["assignmentSHA256"],
+               fn _, _ -> flunk("malformed observation must not reach Kubernetes") end
+             )
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+               Map.put(observation, "kubernetes", nil),
+               bundle["assignmentSHA256"],
+               fn _, _ -> flunk("missing Kubernetes context must not make a request") end
+             )
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+               observation,
+               bundle["assignmentSHA256"],
+               unavailable
+             )
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryIssuance.fresh_kubernetes_with_test_observer(
+               observation,
+               bundle["assignmentSHA256"],
+               fn _, _ -> raise "observer failure" end
+             )
   end
 
   test "malformed signed-input types and claim-bound nested fields fail closed" do

@@ -32,11 +32,88 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
     end
   end
 
+  test "writes issuer output exclusively with private mode and synced bytes" do
+    if :os.type() == {:unix, :linux} do
+      directory = Path.join(System.tmp_dir!(), "hgs740-issuer-write-#{System.unique_integer([:positive])}")
+      path = Path.join(directory, "candidate.json")
+      bytes = "canonical candidate bytes"
+      File.mkdir!(directory)
+      on_exit(fn -> File.rm_rf!(directory) end)
+
+      result = ConfirmedRecoveryRootHost.exclusive_durable_write_for_test(path, bytes)
+
+      expected_result =
+        if match?({:ok, %File.Stat{uid: 0}}, File.stat("/proc/self")),
+          do: :ok,
+          else: {:error, :issuer_output_conflict}
+
+      assert result == expected_result
+      assert {:ok, %File.Stat{type: :regular, mode: mode, links: 1, size: size}} = File.lstat(path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+      assert size == byte_size(bytes)
+      assert File.read!(path) == bytes
+
+      assert {:error, :issuer_output_conflict} =
+               ConfirmedRecoveryRootHost.exclusive_durable_write_for_test(path, "replacement bytes")
+
+      assert File.read!(path) == bytes
+    end
+  end
+
   test "checks trusted Linux ancestors without following symlinks" do
     if :os.type() == {:unix, :linux} do
       assert :ok = ConfirmedRecoveryRootHost.trusted_root_directory_for_test("/usr")
       assert {:error, :untrusted_root_directory} = ConfirmedRecoveryRootHost.trusted_root_directory_for_test("/tmp")
+
+      link = Path.join(System.tmp_dir!(), "hgs740-untrusted-link-#{System.unique_integer([:positive])}")
+      File.ln_s!("/usr", link)
+      on_exit(fn -> File.rm!(link) end)
+
+      assert {:error, :untrusted_root_directory} = ConfirmedRecoveryRootHost.trusted_root_directory_for_test(link)
     end
+  end
+
+  test "accepts trusted state ancestors and rejects a state path below a writable ancestor" do
+    if :os.type() == {:unix, :linux} do
+      assert ConfirmedRecoveryRootHost.trusted_state_ancestors_for_test("/usr", 0)
+
+      directory = Path.join(System.tmp_dir!(), "hgs740-state-ancestor-#{System.unique_integer([:positive])}")
+      File.mkdir!(directory)
+      File.chmod!(directory, 0o700)
+      on_exit(fn -> File.rm_rf!(directory) end)
+      assert {:ok, %File.Stat{uid: owner}} = File.stat(directory)
+
+      refute ConfirmedRecoveryRootHost.trusted_state_ancestors_for_test(directory, owner)
+      refute ConfirmedRecoveryRootHost.trusted_state_ancestors_for_test(Path.join(directory, "missing"), owner)
+    end
+
+    assert {:error, :untrusted_pool_state_directory} =
+             ConfirmedRecoveryRootHost.trusted_runtime_directories_for_test(
+               %{journal_path: "/untrusted", execution_fence_path: "/untrusted", responsibility_graph_path: "/untrusted"},
+               "midgard",
+               1001
+             )
+  end
+
+  test "process ownership and systemd parsing fail closed on ambiguous host state" do
+    if :os.type() == {:unix, :linux} do
+      operations = ConfirmedRecoveryRootHost.operations()
+      assert {:ok, %File.Stat{uid: current_uid}} = File.stat("/proc/self")
+      assert {:error, :state_owner_process_present} = operations.no_processes_for_uid.(current_uid)
+      assert :ok = operations.no_processes_for_uid.(4_294_967_294)
+    end
+
+    assert {:ok, %{"ActiveState" => "inactive", "ControlGroup" => "", "MainPID" => "0"}} =
+             ConfirmedRecoveryRootHost.parse_systemd_properties_for_test("ActiveState=inactive\nControlGroup=\nMainPID=0\n")
+
+    assert {:error, :invalid_systemd_properties} =
+             ConfirmedRecoveryRootHost.parse_systemd_properties_for_test("ActiveState=inactive\nActiveState=failed\nControlGroup=\nMainPID=0\n")
+
+    assert {:error, :invalid_systemd_properties} =
+             ConfirmedRecoveryRootHost.parse_systemd_properties_for_test("ActiveState=inactive\nControlGroup=\nUnknown=value\nMainPID=0\n")
+
+    assert {:error, :invalid_systemd_properties} =
+             ConfirmedRecoveryRootHost.parse_systemd_properties_for_test("ActiveState=inactive\n")
   end
 
   test "wires root host operations and rejects invalid issuer identities before IO" do
@@ -189,6 +266,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
     assert_received {:attempted_first_output, "candidate.json"}
     refute_received {:attempted_first_output, "confirmed-root-envelope.json"}
     refute_received :unexpected_sync
+  end
+
+  test "normalizes an unexpected host callback result to a closed issuer conflict" do
+    issue_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    operations = %{
+      validate_issue: fn ^issue_id -> :unexpected_result end,
+      validate_directory: fn _issue_id -> flunk("directory validation must not run") end,
+      write: fn _path, _bytes -> flunk("issuer outputs must not be written") end,
+      sync_directory: fn _directory -> flunk("issuer directory must not be synced") end
+    }
+
+    assert {:error, :issuer_output_conflict} =
+             ConfirmedRecoveryRootHost.persist_issuer_outputs_for_test(issue_id, "candidate", "envelope", operations)
   end
 
   test "reports directory sync failure after retaining both immutable outputs" do

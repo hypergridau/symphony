@@ -267,6 +267,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     _, _ -> {:error, :untrusted_issuer_bundle}
   end
 
+  @spec persist_issuer_outputs_with(
+          String.t(),
+          binary(),
+          binary(),
+          (String.t() -> term()),
+          (String.t() -> term()),
+          (String.t(), binary() -> term()),
+          (String.t() -> term())
+        ) :: :ok | {:error, term()}
   defp persist_issuer_outputs_with(issue_id, candidate, envelope, validate_issue, validate_directory, write, sync) do
     directory = marker_directory(issue_id)
 
@@ -277,14 +286,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- sync.(directory) do
       :ok
     else
-      {:error, _reason} = error -> error
-      _ -> {:error, :issuer_output_conflict}
+      result -> normalize_issuer_output_result(result)
     end
   rescue
     _ -> {:error, :issuer_output_conflict}
   catch
     _, _ -> {:error, :issuer_output_conflict}
   end
+
+  @spec normalize_issuer_output_result(term()) :: {:error, term()}
+  def normalize_issuer_output_result({:error, _reason} = error), do: error
+  def normalize_issuer_output_result(_unexpected), do: {:error, :issuer_output_conflict}
 
   defp validate_issuer_input_directory(issue_id, lstat, ls, trusted_directory)
        when is_function(lstat, 1) and is_function(ls, 1) and is_function(trusted_directory, 1) do
@@ -315,16 +327,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     do: {:error, :untrusted_issuer_bundle}
 
   defp validate_issuer_entry_names(entries) do
-    names = MapSet.new(entries)
-
     cond do
-      Enum.any?(@issuer_denial_files, &MapSet.member?(names, &1)) ->
+      Enum.any?(@issuer_denial_files, &Enum.member?(entries, &1)) ->
         {:error, :provider_readback_denied}
 
-      Enum.any?(@issuer_blocked_outputs, &MapSet.member?(names, &1)) ->
+      Enum.any?(@issuer_blocked_outputs, &Enum.member?(entries, &1)) ->
         {:error, :issuer_output_conflict}
 
-      Enum.all?(@issuer_input_files, &MapSet.member?(names, &1)) ->
+      Enum.all?(@issuer_input_files, &Enum.member?(entries, &1)) ->
         :ok
 
       true ->
@@ -333,7 +343,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   defp validate_issuer_entries(directory, entries, lstat) do
-    required = MapSet.new(@issuer_input_files)
+    required = @issuer_input_files
     results = Enum.map(entries, &validate_issuer_entry(directory, &1, required, lstat))
 
     if Enum.all?(results, &(&1 == :ok)), do: :ok, else: {:error, :untrusted_issuer_bundle}
@@ -342,7 +352,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   defp validate_issuer_entry(directory, name, required, lstat) do
     case lstat.(Path.join(directory, name)) do
       {:ok, %File.Stat{type: :regular, uid: 0, gid: 0, mode: mode, links: 1, size: size}} ->
-        required_file? = MapSet.member?(required, name)
+        required_file? = Enum.member?(required, name)
         if secure_issuer_file?(mode, size, required_file?), do: :ok, else: {:error, :untrusted_issuer_bundle}
 
       {:ok, %File.Stat{type: :directory, uid: 0, mode: mode}} ->
@@ -477,6 +487,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     def sync_directory_for_test(path), do: sync_directory(path)
 
     @doc false
+    @spec exclusive_durable_write_for_test(String.t(), binary()) :: :ok | {:error, :issuer_output_conflict}
+    def exclusive_durable_write_for_test(path, bytes), do: exclusive_durable_write(path, bytes)
+
+    @doc false
     @spec issuer_input_directory_for_test(String.t(), map()) :: :ok | {:error, term()}
     def issuer_input_directory_for_test(issue_id, operations) when is_map(operations),
       do: validate_issuer_input_directory(issue_id, operations.lstat, operations.ls, operations.trusted_root_directory)
@@ -503,6 +517,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     @doc false
     @spec trusted_root_directory_for_test(String.t()) :: :ok | {:error, :untrusted_root_directory}
     def trusted_root_directory_for_test(path), do: trusted_root_directory(path)
+
+    @doc false
+    @spec parse_systemd_properties_for_test(binary()) :: {:ok, map()} | {:error, :invalid_systemd_properties}
+    def parse_systemd_properties_for_test(output), do: parse_systemd_properties(output)
+
+    @doc false
+    @spec trusted_state_ancestors_for_test(String.t(), non_neg_integer()) :: boolean()
+    def trusted_state_ancestors_for_test(path, owner), do: trusted_state_ancestors?(path, owner)
+
+    @doc false
+    @spec trusted_runtime_directories_for_test(map(), String.t(), non_neg_integer()) ::
+            :ok | {:error, :untrusted_pool_state_directory}
+    def trusted_runtime_directories_for_test(runtime, pool, owner), do: trusted_runtime_directories(runtime, pool, owner)
   end
 
   defp exclusive_durable_write(path, bytes) do
