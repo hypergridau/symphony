@@ -13,7 +13,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
   @entry_keys ~w(issue_id identifier owner_id accountable responsible)
   @v2_entry_keys @entry_keys ++ ["assignment_context"]
   @prior_unsubmitted_authority_keys ~w(issue_id generation repository_ref managed_project_profile_id accountable_id responsible_id accountable_digest responsible_digest)
-  @unsubmitted_observation_keys ~w(issue_id generation repository_ref managed_project_profile_id journal_path execution_fence_path responsibility_graph_path provider_projection_id provider_reservation_state provider_claimed_at provider_claim_generation provider_execution_fence_token provider_observed_at_ms provider_evidence_ref kubernetes_namespace kubernetes_job_issue_matches kubernetes_pod_issue_matches kubernetes_jobs_resource_version kubernetes_pods_resource_version kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref kubernetes_observed_at_ms process_unit process_load_state process_active_state process_control_group process_main_pid process_count process_observed_at_ms process_evidence_ref workspace_absent workspace_observed_at_ms workspace_evidence_ref)
+  @unsubmitted_observation_keys ~w(issue_id generation repository_ref managed_project_profile_id workflow_sha256 journal_path execution_fence_path responsibility_graph_path provider_projection_id provider_reservation_state provider_claimed_at provider_claim_generation provider_execution_fence_token provider_observed_at_ms provider_evidence_ref kubernetes_namespace kubernetes_job_issue_matches kubernetes_pod_issue_matches kubernetes_jobs_resource_version kubernetes_pods_resource_version kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref kubernetes_observed_at_ms process_unit process_load_state process_active_state process_control_group process_main_pid process_count process_observed_at_ms process_evidence_ref workspace_absent workspace_observed_at_ms workspace_evidence_ref)
   @observation_timestamp_keys ~w(provider_observed_at_ms kubernetes_observed_at_ms process_observed_at_ms workspace_observed_at_ms)
   @observation_digest_keys ~w(provider_evidence_ref kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref process_evidence_ref workspace_evidence_ref)
   @base_ref "refs/remotes/origin/main"
@@ -249,6 +249,7 @@ defmodule SymphonyElixir.ManagedResponsibility do
          true <- raw["generation"] == prior.generation,
          true <- raw["repository_ref"] == context.repository_ref and raw["repository_ref"] == prior.repository_ref,
          true <- raw["managed_project_profile_id"] == context.managed_project_profile_id,
+         true <- valid_sha256?(raw["workflow_sha256"]),
          true <- valid_unsubmitted_state_paths?(raw, context.pool_key),
          true <- raw["provider_projection_id"] == responsible.scope.work_package_id,
          true <- raw["provider_reservation_state"] == "reserved",

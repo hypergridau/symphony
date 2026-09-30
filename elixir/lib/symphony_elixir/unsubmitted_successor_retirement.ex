@@ -15,12 +15,13 @@ defmodule SymphonyElixir.UnsubmittedSuccessorRetirement do
   @spec execute(String.t(), String.t() | nil) :: {:ok, :retired | :already_retired} | {:error, term()}
   def execute(identifier, workflow_path) when is_binary(identifier) and is_binary(workflow_path) do
     with :ok <- require_paused_gate(),
-         :ok <- trusted_workflow_file(workflow_path),
-         :ok <- Workflow.set_workflow_file_path(workflow_path),
          {:ok, _started} <- Application.ensure_all_started(:crypto),
+         {:ok, workflow_sha256} <- trusted_workflow_file(workflow_path),
+         :ok <- Workflow.set_workflow_file_path(workflow_path),
          {:ok, runtime} <- WorkPackageRuntime.configuration(),
          runtime <-
            Map.merge(runtime, %{
+             workflow_sha256: workflow_sha256,
              execution_fence_path: Config.execution_fence_state_path(),
              responsibility_graph_path: Config.responsibility_graph_state_path()
            }),
@@ -106,6 +107,7 @@ defmodule SymphonyElixir.UnsubmittedSuccessorRetirement do
     observation = entry.unsubmitted_observation
 
     with true <- is_map(observation),
+         true <- observation["workflow_sha256"] == runtime.workflow_sha256,
          true <- observation["journal_path"] == runtime.journal_path,
          true <- observation["execution_fence_path"] == runtime.execution_fence_path,
          true <- observation["responsibility_graph_path"] == runtime.responsibility_graph_path,
@@ -124,20 +126,24 @@ defmodule SymphonyElixir.UnsubmittedSuccessorRetirement do
   end
 
   defp trusted_workflow_file(path) when is_binary(path) do
-    if Path.type(path) == :absolute and Path.expand(path) == path do
-      case File.lstat(path) do
-        {:ok, %File.Stat{type: :regular, uid: 0, mode: mode}} when band(mode, 0o022) == 0 ->
-          plain_trusted_ancestors(Path.dirname(path))
-
-        _ ->
-          {:error, :untrusted_workflow_file}
-      end
+    with true <- Path.type(path) == :absolute and Path.expand(path) == path,
+         {:ok, %File.Stat{type: :regular, uid: 0, mode: mode, links: 1}} <- File.lstat(path),
+         true <- band(mode, 0o022) == 0,
+         :ok <- plain_trusted_ancestors(Path.dirname(path)),
+         {:ok, bytes} <- File.read(path) do
+      {:ok, digest(bytes)}
     else
-      {:error, :untrusted_workflow_file}
+      _ -> {:error, :untrusted_workflow_file}
     end
   end
 
   defp trusted_workflow_file(_path), do: {:error, :untrusted_workflow_file}
+
+  defp digest(bytes) when is_binary(bytes) do
+    bytes
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
+  end
 
   defp plain_trusted_ancestors(path) do
     case File.lstat(path) do

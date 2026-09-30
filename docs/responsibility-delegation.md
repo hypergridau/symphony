@@ -159,13 +159,16 @@ and its base/environment fields; normal admission rechecks that context against 
 This extension does not rewrite the old signed grant or make a provider reservation claimable.
 
 The observation is root-attested in the exact signed manifest and each source reference is a
-lowercase SHA-256 of retained raw evidence. Provider, Job/Pod, process and workspace observations
+lowercase SHA-256 of retained raw evidence. `workflow_sha256` binds the root-owned workflow bytes
+used by the task. Provider, Job/Pod, process and workspace observations
 must all be no more than 60 seconds old when the one-shot task first runs. The task also checks the
 local journal, fence, exact graph pair and absent canonical workspace itself. It rejects
 every same-issue journal generation, any claim or process evidence, stale or mismatched identity,
 and any graph or fence conflict. Signed state paths must match the configured paths, the expected
 `/srv/dahlia-runner-state` pool layout, and the workflow's pool identity. Journal, fence, graph and
-launcher lock must be regular files with no symlink ancestors.
+launcher lock must be runner-owned, mode `0600`, single-link regular files. Their directories must
+belong to root or the runner and must not be group/world writable; the root-owned workflow and its
+directory ancestors must also be non-writable by group or other users.
 
 With the exact global admission gate paused, stop the Symphony system service. Run the reviewed
 candidate escript as the service identity with the normal trusted runtime environment. This command

@@ -274,8 +274,15 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
         [Map.put(first, "unsubmitted_observation", observation) | rest]
       end)
 
+    missing_workflow_digest =
+      update_in(raw_payload["entries"], fn [first | rest] ->
+        observation = Map.delete(first["unsubmitted_observation"], "workflow_sha256")
+        [Map.put(first, "unsubmitted_observation", observation) | rest]
+      end)
+
     assert {:error, _} = ManagedResponsibility.decode(wrong_projection, Fixture.context(), context.now)
     assert {:error, _} = ManagedResponsibility.decode(wrong_state_path, Fixture.context(), context.now)
+    assert {:error, _} = ManagedResponsibility.decode(missing_workflow_digest, Fixture.context(), context.now)
     assert entry.issue_id == context.issue.id
     assert runtime.managed_delegations.entries |> Enum.any?(&(&1 == entry))
   end
@@ -365,6 +372,7 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
       "generation" => context.execution.generation,
       "repository_ref" => context.execution.repository,
       "managed_project_profile_id" => "profile-test",
+      "workflow_sha256" => String.duplicate("6", 64),
       "journal_path" => "/srv/dahlia-runner-state/run/pools/test-pool/work-package.json",
       "execution_fence_path" => "/srv/dahlia-runner-state/workspaces/pools/test-pool/.symphony/execution-fence.json",
       "responsibility_graph_path" => "/srv/dahlia-runner-state/workspaces/pools/test-pool/.symphony/responsibility-graph.json",

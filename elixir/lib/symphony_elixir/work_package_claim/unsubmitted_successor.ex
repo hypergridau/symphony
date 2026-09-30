@@ -352,6 +352,7 @@ defmodule SymphonyElixir.WorkPackageClaim.UnsubmittedSuccessor do
   defp validate_observation_static(observation, entry, prior) do
     predicates = [
       observation_identity?(observation, entry, prior),
+      valid_sha256?(observation["workflow_sha256"]),
       provider_is_unclaimed?(observation),
       kubernetes_is_empty?(observation),
       process_is_absent?(observation),

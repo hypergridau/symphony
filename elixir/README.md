@@ -502,8 +502,10 @@ For an active or exact restart-reconciliation-blocked pair whose old signed scop
 only a distinct signed v2 successor with exact old IDs/digests and a fresh, root-attested
 provider/Kubernetes/systemd/workspace observation can authorize retirement. Expired grants are retired
 directly and never reactivated. The signed observation includes the exact journal, execution fence,
-and responsibility graph paths under `/srv/dahlia-runner-state`; runtime config and workflow pool
-identity must match those paths, and all state and lock files must be regular with no symlink ancestors.
+responsibility graph paths under `/srv/dahlia-runner-state`, and a digest of the root-owned workflow
+bytes. Runtime config and workflow pool identity must match those signed values, and all state and
+lock files must be runner-owned mode `0600`, single-link regular files with no symlink ancestors;
+their directories must be root- or runner-owned and not group/world writable.
 It rejects any claim-journal row for the issue, any observed or
 supervised lease, a present workspace, changed authority, or conflicting graph or fence state. The
 graph does not retain the predecessor's `assignment_context`; normal admission checks the successor's
@@ -522,6 +524,12 @@ restart. The task writes the graph receipt first, then the execution fence; afte
 rerun the same command. Replay completes only from that exact persisted graph receipt and its original
 observation. The signed `work_package_id` must be the provider's canonical projection ID. Never
 hand-edit the graph or fence snapshots.
+
+`UnsubmittedSuccessorRetirement` is excluded from the generic statement-coverage threshold because
+its successful path requires root-owned host configuration, runner-owned production state files, a
+real systemd unit, and the production launcher lock. CI tests its early fail-closed paths and covers
+the pure manifest, custody predicates, graph/fence transitions, and replay separately. This exclusion
+is not live evidence; the paused host run still requires its own review and readback.
 
 To enable this managed runtime on a Linux runner, the host must provide the complete tuple below;
 the service rejects a partial tuple during supervisor startup and leaves the adapter disabled when

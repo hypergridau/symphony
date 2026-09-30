@@ -37,6 +37,36 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
     refute ManagedLauncherLock.stopped_unit_properties?("LoadState=loaded\nActiveState=inactive\nControlGroup=\nMainPID=0\nMainPID=0\n")
   end
 
+  @tag skip: :os.type() != {:unix, :linux}
+  test "state custody requires runner-owned private single-link files and protected directories" do
+    root = Path.expand(System.tmp_dir!())
+    directory = Path.join(root, "symphony-custody-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf(directory) end)
+
+    path = Path.join(directory, "state.json")
+    File.write!(path, "{}")
+    File.chmod!(path, 0o600)
+    stat = File.lstat!(path)
+    runner_uid = stat.uid
+
+    assert ManagedLauncherLock.trusted_regular_metadata?(stat, runner_uid)
+    refute ManagedLauncherLock.trusted_regular_metadata?(stat, runner_uid + 1)
+
+    File.chmod!(path, 0o640)
+    refute ManagedLauncherLock.trusted_regular_metadata?(File.lstat!(path), runner_uid)
+    File.chmod!(path, 0o600)
+
+    linked_path = Path.join(directory, "state-hardlink.json")
+    File.ln!(path, linked_path)
+    refute ManagedLauncherLock.trusted_regular_metadata?(File.lstat!(path), runner_uid)
+
+    directory_stat = File.lstat!(directory)
+    assert ManagedLauncherLock.trusted_directory_metadata?(directory_stat, runner_uid)
+    File.chmod!(directory, 0o777)
+    refute ManagedLauncherLock.trusted_directory_metadata?(File.lstat!(directory), runner_uid)
+  end
+
   if :os.type() == {:unix, :linux} and File.regular?("/usr/bin/flock") do
     test "the OS lock excludes a second migration and releases after completion" do
       root = Path.expand(System.tmp_dir!())
@@ -45,6 +75,7 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
       on_exit(fn -> File.rm_rf(directory) end)
       path = Path.join(directory, "pool.lock")
       File.write!(path, "")
+      File.chmod!(path, 0o600)
       parent = self()
 
       holder =
@@ -65,6 +96,11 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
       send(holder.pid, :release_launcher_lock)
       assert :released = Task.await(holder, 2_000)
       assert :ok = ManagedLauncherLock.with_exclusive_lock(path, fn -> :ok end)
+
+      File.chmod!(path, 0o644)
+
+      assert {:error, :pool_launcher_lock_file_untrusted} =
+               ManagedLauncherLock.with_exclusive_lock(path, fn -> flunk("unsafe lock file entered") end)
     end
   end
 end

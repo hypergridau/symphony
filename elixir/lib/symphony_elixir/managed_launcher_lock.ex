@@ -44,9 +44,10 @@ defmodule SymphonyElixir.ManagedLauncherLock do
          true <- journal_path == Path.join([@trusted_pools_root, pool_key, "work-package.json"]),
          true <- fence_path == expected_fence,
          true <- graph_path == expected_graph,
-         :ok <- trusted_regular_file(journal_path),
-         :ok <- trusted_regular_file(fence_path),
-         :ok <- trusted_regular_file(graph_path) do
+         {:ok, runner_uid} <- effective_uid(),
+         :ok <- trusted_regular_file(journal_path, runner_uid),
+         :ok <- trusted_regular_file(fence_path, runner_uid),
+         :ok <- trusted_regular_file(graph_path, runner_uid) do
       :ok
     else
       _ -> {:error, :untrusted_pool_state_path}
@@ -55,6 +56,26 @@ defmodule SymphonyElixir.ManagedLauncherLock do
 
   def trusted_state_files(_journal_path, _fence_path, _graph_path, _pool_key),
     do: {:error, :untrusted_pool_state_path}
+
+  @doc false
+  @spec trusted_regular_metadata?(File.Stat.t(), non_neg_integer()) :: boolean()
+  def trusted_regular_metadata?(%File.Stat{type: :regular, uid: uid, mode: mode, links: 1}, uid)
+      when band(mode, 0o077) == 0,
+      do: true
+
+  def trusted_regular_metadata?(_stat, _runner_uid), do: false
+
+  @doc false
+  @spec trusted_directory_metadata?(File.Stat.t(), non_neg_integer()) :: boolean()
+  def trusted_directory_metadata?(%File.Stat{type: :directory, uid: uid, mode: mode}, runner_uid)
+      when uid in [0, runner_uid] and band(mode, 0o022) == 0,
+      do: true
+
+  def trusted_directory_metadata?(%File.Stat{type: :directory, uid: 0, mode: mode}, _runner_uid)
+      when band(mode, 0o1000) != 0,
+      do: true
+
+  def trusted_directory_metadata?(_stat, _runner_uid), do: false
 
   @doc "Runs a callback while the derived existing pool lock is held exclusively by the OS."
   @spec with_exclusive_lock(Path.t(), (-> term())) :: term()
@@ -167,8 +188,10 @@ defmodule SymphonyElixir.ManagedLauncherLock do
 
   defp trusted_lock_file(path) do
     if Path.type(path) == :absolute and Path.expand(path) == path and not String.starts_with?(path, ["//", "\\\\"]) do
-      with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
-           :ok <- plain_directory_ancestors(Path.dirname(path)) do
+      with {:ok, runner_uid} <- effective_uid(),
+           {:ok, stat} <- File.lstat(path),
+           true <- trusted_regular_metadata?(stat, runner_uid),
+           :ok <- trusted_directory_ancestors(Path.dirname(path), runner_uid) do
         :ok
       else
         _ -> {:error, :pool_launcher_lock_file_untrusted}
@@ -178,10 +201,11 @@ defmodule SymphonyElixir.ManagedLauncherLock do
     end
   end
 
-  defp trusted_regular_file(path) do
+  defp trusted_regular_file(path, runner_uid) do
     if Path.type(path) == :absolute and Path.expand(path) == path do
-      with {:ok, %File.Stat{type: :regular}} <- File.lstat(path),
-           :ok <- plain_directory_ancestors(Path.dirname(path)) do
+      with {:ok, stat} <- File.lstat(path),
+           true <- trusted_regular_metadata?(stat, runner_uid),
+           :ok <- trusted_directory_ancestors(Path.dirname(path), runner_uid) do
         :ok
       else
         _ -> {:error, :untrusted_pool_state_path}
@@ -191,14 +215,29 @@ defmodule SymphonyElixir.ManagedLauncherLock do
     end
   end
 
-  defp plain_directory_ancestors(path) do
+  defp trusted_directory_ancestors(path, runner_uid) do
     case File.lstat(path) do
-      {:ok, %File.Stat{type: :directory}} ->
-        parent = Path.dirname(path)
-        if parent == path, do: :ok, else: plain_directory_ancestors(parent)
+      {:ok, stat} ->
+        if trusted_directory_metadata?(stat, runner_uid) do
+          trusted_directory_parent(path, runner_uid)
+        else
+          {:error, :pool_launcher_lock_file_untrusted}
+        end
 
       _ ->
         {:error, :pool_launcher_lock_file_untrusted}
+    end
+  end
+
+  defp trusted_directory_parent(path, runner_uid) do
+    parent = Path.dirname(path)
+    if parent == path, do: :ok, else: trusted_directory_ancestors(parent, runner_uid)
+  end
+
+  defp effective_uid do
+    case File.stat("/proc/self") do
+      {:ok, %File.Stat{uid: uid}} when is_integer(uid) and uid >= 0 -> {:ok, uid}
+      _ -> {:error, :pool_launcher_lock_unsupported}
     end
   end
 
