@@ -21,17 +21,43 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
   @doc "Reads fresh complete Jobs and Pods and proves the exact issue generation absent."
   @spec observe(map(), map()) :: {:ok, map()} | {:error, :claim_resources_present | :kubernetes_observation_unavailable}
   def observe(claim, expected_cluster) when is_map(claim) and is_map(expected_cluster) do
+    observe_with(
+      claim,
+      expected_cluster,
+      &client_context/1,
+      &HTTPClient.list_jobs_complete/2,
+      &HTTPClient.list_pods_complete/2
+    )
+  end
+
+  def observe(_claim, _expected_cluster), do: {:error, :kubernetes_observation_unavailable}
+
+  if Mix.env() == :test do
+    @doc false
+    @spec observe_with_test_adapter(
+            map(),
+            map(),
+            (map() -> term()),
+            (String.t(), term() -> term()),
+            (String.t(), term() -> term())
+          ) ::
+            {:ok, map()} | {:error, :kubernetes_observation_unavailable}
+    def observe_with_test_adapter(claim, expected_cluster, context, jobs, pods),
+      do: observe_with(claim, expected_cluster, context, jobs, pods)
+  end
+
+  defp observe_with(claim, expected_cluster, context_loader, list_jobs, list_pods) do
     with true <- claim["generation"] == 2,
          true <- expected_cluster["apiServer"] == @api_server,
          true <- is_binary(claim["issueId"]) and is_binary(claim["assignmentSHA256"]),
          true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, claim["assignmentSHA256"]),
-         {:ok, context, ca_sha256} <- client_context(claim),
+         {:ok, context, ca_sha256} <- context_loader.(claim),
          true <- ca_sha256 == expected_cluster["caSha256"],
-         {:ok, jobs} <- HTTPClient.list_jobs_complete(@namespace, context),
+         {:ok, jobs} <- list_jobs.(@namespace, context),
          :ok <- complete_resources_absent(jobs.items, claim, :job),
-         {:ok, pods} <- HTTPClient.list_pods_complete(@namespace, context),
+         {:ok, pods} <- list_pods.(@namespace, context),
          :ok <- complete_resources_absent(pods.items, claim, :pod),
-         {:ok, final_jobs} <- HTTPClient.list_jobs_complete(@namespace, context),
+         {:ok, final_jobs} <- list_jobs.(@namespace, context),
          :ok <- complete_resources_absent(final_jobs.items, claim, :job),
          true <- valid_resources(jobs.items, :job) and valid_resources(pods.items, :pod) and valid_resources(final_jobs.items, :job) do
       {:ok,
@@ -60,8 +86,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
   catch
     _, _ -> {:error, :kubernetes_observation_unavailable}
   end
-
-  def observe(_claim, _expected_cluster), do: {:error, :kubernetes_observation_unavailable}
 
   @doc false
   @spec complete_resources_absent([map()], map(), :job | :pod) :: :ok | {:error, :claim_resources_present}

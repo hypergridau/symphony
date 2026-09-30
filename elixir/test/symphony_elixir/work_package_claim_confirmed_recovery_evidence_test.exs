@@ -107,6 +107,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(envelope, public, bindings())
   end
 
+  test "malformed signed-input types and claim-bound nested fields fail closed" do
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(nil, <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify("{}", "short", bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify_test_envelope(nil, <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify_test_envelope("{}", <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.validate_payload(nil, bindings())
+    assert nil == Evidence.tuple_digest(nil)
+    assert nil == Evidence.retirement_evidence_ref(nil)
+
+    payload = payload()
+    refute_valid(Map.put(payload, "issuedAt", nil))
+    refute_valid(Map.put(payload, "issuedAt", "2026-09-30T11:59:50+02:00"))
+    refute_valid(put_in(payload, ["observation", "expected", "scopeKeys"], nil))
+    refute_valid(put_in(payload, ["observation", "kubernetes", "cluster", "apiServer"], nil))
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement", "receipt"], nil))
+    refute_valid(put_in(payload, ["observation", "witnesses", Access.at(0), "source", "sourceHead"], "bad"))
+  end
+
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
 
   defp bindings do

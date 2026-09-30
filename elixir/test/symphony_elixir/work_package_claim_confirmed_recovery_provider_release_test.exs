@@ -55,6 +55,32 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryProviderReleaseTest d
     refute :ok == ProviderRelease.validate_operation(files, marker, payload, envelope_bytes, <<0::256>>)
   end
 
+  test "malformed final receipts and operation envelopes remain held closed" do
+    {marker, payload} = final_payload_fixture()
+    assert nil == ProviderRelease.canonical_payload(nil)
+    assert {:error, :provider_final_proof_invalid} = ProviderRelease.validate_final_payload(nil, marker, "hash")
+
+    assert {:error, :provider_final_proof_invalid} =
+             ProviderRelease.validate_final_payload(payload, marker, payload["journalSHA256"] <> "x")
+
+    assert {:error, :provider_final_proof_invalid} =
+             ProviderRelease.validate_final_payload(Map.put(payload, "receipt", nil), marker, payload["journalSHA256"])
+
+    invalid_timestamp = put_in(payload, ["receipt", "confirmedAt"], nil)
+
+    assert {:error, :provider_final_proof_invalid} =
+             ProviderRelease.validate_final_payload(invalid_timestamp, marker, payload["journalSHA256"])
+
+    assert {:error, :provider_confirmation_receipt_mismatch} =
+             ProviderRelease.validate_receipt_binding(nil, %{}, "id", %{}, "digest", "revision", "proof")
+
+    assert {:error, :provider_final_operation_mismatch} =
+             ProviderRelease.validate_operation(nil, marker, payload, "", <<0::256>>)
+
+    assert {:error, :provider_proof_invalid} = ProviderRelease.canonical_proof(nil)
+    assert {:error, :provider_proof_invalid} = ProviderRelease.canonical_proof(%{"extra" => true})
+  end
+
   defp final_payload_fixture do
     expected = expected_claim()
     receipt = release_receipt(expected, "hgs719-midgard-#{ConfirmedRecoveryEvidence.tuple_digest(expected)}")

@@ -3,6 +3,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryStateMachineTest do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryStateMachine, as: StateMachine
 
+  test "malformed markers and requests hold every recovery phase closed" do
+    assert {:error, :hgs740_transaction_marker_missing} = StateMachine.no_marker_startup_policy(nil, "protected", false)
+    refute StateMachine.valid_completed_postconditions?(nil, %{}, ["midgard"])
+    refute StateMachine.valid_marker_images?(nil, "contract.v1", [], fn _ -> true end, fn _ -> "" end, fn _ -> "" end)
+    assert {:error, :hgs740_transaction_incomplete} = StateMachine.apply(nil, [], %{})
+    assert {:error, :hgs740_completion_held_closed} = StateMachine.complete(%{"status" => "applying"}, "issue", "midgard", %{})
+    assert {:error, :hgs740_completion_held_closed} = StateMachine.complete(nil, "issue", "midgard", %{})
+    assert {:error, :hgs740_startup_held_closed} = StateMachine.verify_completed(nil, %{})
+  end
+
   test "apply orders custody, exact image replay, postimage verification, and marker phase" do
     parent = self()
     postimage = "journal-after"

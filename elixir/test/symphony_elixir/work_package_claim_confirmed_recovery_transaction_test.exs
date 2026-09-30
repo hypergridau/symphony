@@ -82,6 +82,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     refute_received {:persist_must_not_run, _name}
   end
 
+  test "WAL rejects malformed images and uncertain read or finalization results" do
+    persist = fn _name, _bytes, _already? -> flunk("malformed image must not persist") end
+    assert {:error, :invalid_replay_request} = ConfirmedRecoveryWAL.apply_images(nil, fn _ -> "" end, persist)
+    assert {:error, :invalid_replay_request} = ConfirmedRecoveryWAL.apply_images([%{}], fn _ -> "" end, persist)
+
+    image = %{name: :journal, preimage_sha256: sha256("before"), postimage_bytes: "after"}
+
+    assert {:error, :transaction_target_conflict} =
+             ConfirmedRecoveryWAL.apply_images([image], fn _ -> nil end, persist)
+
+    assert {:error, :invalid_finalization_request} = ConfirmedRecoveryWAL.commit_then_release(nil, fn -> :ok end)
+  end
+
   test "production WAL sequencer stops after the first failed state write" do
     parent = self()
 
@@ -354,6 +367,56 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert_received :evidence_root_checked
     refute_received :directory_must_not_be_listed
     assert runtime.journal_path == "/srv/dahlia-runner-state/run/pools/midgard/work-package.json"
+  end
+
+  test "Core rejects a context whose fixed runtime paths no longer match before host I/O" do
+    parent = self()
+
+    context =
+      core_context(%{
+        fixed_runtime_paths: fn _pool -> {:ok, %{pool_key: "foreign"}} end,
+        lstat: fn _path ->
+          send(parent, :must_not_read)
+          {:error, :enoent}
+        end
+      })
+
+    assert {:error, :invalid_verified_recovery_context} = Transaction.validate_test_context(context)
+    assert {:error, :invalid_verified_recovery_context} = Transaction.apply_with_test_context(context)
+    assert {:error, :invalid_verified_recovery_context} = Transaction.complete_with_test_context(context)
+    assert {:error, :invalid_verified_recovery_context} = Transaction.verify_startup_with_test_context(context)
+    refute_received :must_not_read
+  end
+
+  test "startup and completion hold orphan or applying evidence closed" do
+    fixture = positive_apply_fixture()
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+    marker = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+    Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(Map.put(marker, "status", "applying"))))
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(fixture.context)
+
+    Agent.update(fixture.vfs, fn state ->
+      %{state | files: Map.delete(state.files, fixture.marker_path)}
+    end)
+
+    evidence_root = fixture.context.host_ops.paths.evidence_root
+    evidence_directory = Path.dirname(fixture.marker_path)
+    parent = self()
+
+    list_evidence = fn
+      ^evidence_root ->
+        {:ok, [fixture.context.issue_id]}
+
+      ^evidence_directory ->
+        send(parent, :orphan_evidence_listed)
+        {:ok, ["candidate.json", "confirmed-root-envelope.json"]}
+    end
+
+    context = %{fixture.context | host_ops: Map.put(fixture.context.host_ops, :ls, list_evidence)}
+
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(context)
+    assert_received :orphan_evidence_listed
+    Agent.stop(fixture.vfs)
   end
 
   test "Core apply stops at the service gate before evidence, signer, or state callbacks" do
