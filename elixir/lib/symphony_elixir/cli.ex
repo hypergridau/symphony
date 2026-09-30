@@ -3,9 +3,9 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
-  alias SymphonyElixir.{LogFile, ResponsibilityBootstrap}
-  alias SymphonyElixir.UnsubmittedSuccessorRetirement
+  alias SymphonyElixir.{LogFile, ResponsibilityBootstrap, UnsubmittedSuccessorRetirement}
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @activation_switch :activate_responsibility_graph
@@ -28,12 +28,74 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    if "--retire-unsubmitted-successor" in args do
-      dispatch_or_start(args)
+    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery"])) do
+      dispatch_hgs740(args)
     else
-      dispatch_regular(args)
+      if "--retire-unsubmitted-successor" in args do
+        dispatch_or_start(args)
+      else
+        dispatch_regular(args)
+      end
     end
   end
+
+  @spec dispatch_hgs740([String.t()]) :: no_return()
+  defp dispatch_hgs740(args) do
+    case evaluate_hgs740(
+           args,
+           &ConfirmedRecoveryTransaction.verify_startup/2,
+           &ConfirmedRecoveryTransaction.apply/4,
+           &ConfirmedRecoveryTransaction.complete/3
+         ) do
+      :ok ->
+        System.halt(0)
+
+      {:error, reason} ->
+        IO.puts(:stderr, "HGS-740 recovery guard held closed: #{safe_hgs740_reason(reason)}")
+        System.halt(1)
+    end
+  end
+
+  @doc false
+  @spec evaluate_hgs740(
+          [String.t()],
+          (String.t(), String.t() -> :ok | {:error, term()}),
+          (String.t(), String.t(), String.t(), String.t() -> term()),
+          (String.t(), String.t(), String.t() -> term())
+        ) ::
+          :ok | {:ok, term()} | {:error, String.t()}
+  def evaluate_hgs740(args, verify_startup, apply_recovery, complete_recovery)
+      when is_list(args) and is_function(verify_startup, 2) and is_function(apply_recovery, 4) and
+             is_function(complete_recovery, 3) do
+    case args do
+      ["--verify-hgs740-startup", "--workflow", workflow_path, pool] ->
+        normalize_hgs740_result(verify_startup.(workflow_path, pool))
+
+      ["--apply-hgs740-confirmed-recovery", "--workflow", workflow_path, "--nonce", nonce, issue_id, pool] ->
+        normalize_hgs740_result(apply_recovery.(issue_id, pool, workflow_path, nonce))
+
+      ["--complete-hgs740-recovery", "--workflow", workflow_path, issue_id, pool] ->
+        normalize_hgs740_result(complete_recovery.(issue_id, pool, workflow_path))
+
+      _ ->
+        {:error,
+         "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+    end
+  end
+
+  def evaluate_hgs740(_args, _verify_startup, _apply_recovery, _complete_recovery),
+    do:
+      {:error,
+       "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+
+  defp normalize_hgs740_result(:ok), do: :ok
+  defp normalize_hgs740_result({:ok, _value}), do: :ok
+  defp normalize_hgs740_result({:error, reason}), do: {:error, safe_hgs740_reason(reason)}
+  defp normalize_hgs740_result(_other), do: {:error, "invalid_result"}
+
+  defp safe_hgs740_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_hgs740_reason({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_hgs740_reason(_reason), do: "invalid_authority_or_evidence"
 
   @spec dispatch_regular([String.t()]) :: no_return()
   defp dispatch_regular(args) do

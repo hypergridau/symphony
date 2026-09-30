@@ -108,6 +108,84 @@ defmodule SymphonyElixir.RKE2Job.HTTPClientTest do
              HTTPClient.list_pods_snapshot(@namespace, context())
   end
 
+  test "complete Kubernetes lists preserve resource version across every page" do
+    first_job = %{"metadata" => %{"name" => "job-one", "uid" => "job-uid-one"}}
+    second_job = %{"metadata" => %{"name" => "job-two", "uid" => "job-uid-two"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.request_path == "/apis/batch/v1/namespaces/#{@namespace}/jobs"
+      assert conn.query_string == "limit=500"
+
+      json_response(conn, 200, %{
+        "apiVersion" => "batch/v1",
+        "kind" => "JobList",
+        "metadata" => %{"resourceVersion" => "120", "continue" => "next/page"},
+        "items" => [first_job]
+      })
+    end)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      assert conn.request_path == "/apis/batch/v1/namespaces/#{@namespace}/jobs"
+      assert URI.decode_query(conn.query_string) == %{"limit" => "500", "continue" => "next/page"}
+
+      json_response(conn, 200, %{
+        "apiVersion" => "batch/v1",
+        "kind" => "JobList",
+        "metadata" => %{"resourceVersion" => "120"},
+        "items" => [second_job]
+      })
+    end)
+
+    assert {:ok, %{items: [^first_job, ^second_job], resource_version: "120"}} =
+             HTTPClient.list_jobs_complete(@namespace, context())
+
+    pod = %{"metadata" => %{"name" => "pod-one", "uid" => "pod-uid-one"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{
+        "apiVersion" => "v1",
+        "kind" => "PodList",
+        "metadata" => %{"resourceVersion" => "121", "continue" => "more"},
+        "items" => [pod]
+      })
+    end)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{
+        "apiVersion" => "v1",
+        "kind" => "PodList",
+        "metadata" => %{"resourceVersion" => "122"},
+        "items" => []
+      })
+    end)
+
+    assert {:error, :incomplete_kubernetes_list} = HTTPClient.list_pods_complete(@namespace, context())
+  end
+
+  test "complete Kubernetes lists reject duplicate identity and missing resource versions" do
+    job = %{"metadata" => %{"name" => "job-one", "uid" => "same-uid"}}
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{
+        "apiVersion" => "batch/v1",
+        "kind" => "JobList",
+        "metadata" => %{"resourceVersion" => "120", "continue" => "next"},
+        "items" => [job]
+      })
+    end)
+
+    Req.Test.expect(__MODULE__, fn conn ->
+      json_response(conn, 200, %{
+        "apiVersion" => "batch/v1",
+        "kind" => "JobList",
+        "metadata" => %{"resourceVersion" => "120"},
+        "items" => [job]
+      })
+    end)
+
+    assert {:error, :incomplete_kubernetes_list} = HTTPClient.list_jobs_complete(@namespace, context())
+  end
+
   test "delete uses the server UID and foreground cascading cleanup" do
     Req.Test.expect(__MODULE__, fn conn ->
       assert conn.method == "DELETE"

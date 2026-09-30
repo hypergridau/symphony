@@ -225,13 +225,22 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   def save(path, %{schema_version: @schema_version, reservations: reservations} = state)
       when is_binary(path) and is_map(reservations) do
     with :ok <- validate(state),
-         {:ok, encoded} <- Jason.encode(encode_state(state)),
+         {:ok, encoded} <- encode_bytes(state),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- atomic_write(path, encoded) do
       _ = File.chmod(path, 0o600)
       :ok
     end
   end
+
+  @doc "Encodes a validated journal without writing it to disk."
+  @spec encode_bytes(state()) :: {:ok, binary()} | {:error, term()}
+  def encode_bytes(%{schema_version: @schema_version, reservations: reservations} = state)
+      when is_map(reservations) do
+    with :ok <- validate(state), do: Jason.encode(encode_state(state))
+  end
+
+  def encode_bytes(_state), do: {:error, :invalid_journal}
 
   @doc "Runs one claim-journal transition under a process-wide lock for its exact path."
   @spec with_lock(Path.t(), (-> result)) :: result | {:error, :claim_journal_lock_unavailable}

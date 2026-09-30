@@ -62,6 +62,14 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     end
   end
 
+  @doc "Returns the complete namespace JobList across stable-RV pages."
+  @spec list_jobs_complete(String.t(), term()) :: {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
+  def list_jobs_complete(namespace, context), do: list_complete(:jobs, namespace, context)
+
+  @doc "Returns the complete namespace PodList across stable-RV pages."
+  @spec list_pods_complete(String.t(), term()) :: {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
+  def list_pods_complete(namespace, context), do: list_complete(:pods, namespace, context)
+
   @doc "Reads the named PVC from the exact configured namespace for OAuth slot identity checks."
   @spec get_pvc(String.t(), String.t(), term()) :: {:ok, map()} | {:error, term()}
   def get_pvc(namespace, name, context) do
@@ -143,6 +151,58 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
     end
   end
 
+  defp list_complete(kind, namespace, context) when kind in [:jobs, :pods] do
+    path = if kind == :jobs, do: jobs_path(namespace), else: @pod_api_path <> namespace <> "/pods"
+    response_kind = if kind == :jobs, do: :job_list, else: :pod_list
+
+    with {:ok, settings} <- settings(context, namespace) do
+      list_pages(path, response_kind, settings, nil, nil, [], MapSet.new(), 0)
+    end
+  end
+
+  defp list_pages(_path, _kind, _settings, _continue, _resource_version, _items, _identities, page)
+       when page >= 100 do
+    {:error, :incomplete_kubernetes_list}
+  end
+
+  defp list_pages(path, kind, settings, continuation, resource_version, items, identities, page) do
+    query = if continuation, do: "?limit=500&continue=" <> URI.encode_www_form(continuation), else: "?limit=500"
+
+    with {:ok, %{items: next_items, resource_version: next_version, continue: next_continue}} <-
+           request(:get, path <> query, nil, settings, kind),
+         true <- is_nil(resource_version) or resource_version == next_version,
+         true <- length(next_items) <= 500,
+         true <- byte_size(Jason.encode!(next_items)) <= 8_388_608,
+         {:ok, next_identities} <- unique_list_identities(next_items, identities),
+         combined = items ++ next_items,
+         true <- byte_size(Jason.encode!(combined)) <= 16_777_216 do
+      if next_continue in [nil, ""] do
+        {:ok, %{items: combined, resource_version: next_version}}
+      else
+        list_pages(path, kind, settings, next_continue, next_version, combined, next_identities, page + 1)
+      end
+    else
+      _ -> {:error, :incomplete_kubernetes_list}
+    end
+  end
+
+  defp unique_list_identities(items, identities) do
+    Enum.reduce_while(items, {:ok, identities}, fn item, {:ok, seen} ->
+      metadata = item["metadata"]
+      uid = if is_map(metadata), do: metadata["uid"], else: nil
+      name = if is_map(metadata), do: metadata["name"], else: nil
+      uid_identity = {:uid, uid}
+      name_identity = {:name, name}
+
+      if is_binary(uid) and uid != "" and is_binary(name) and name != "" and
+           not MapSet.member?(seen, uid_identity) and not MapSet.member?(seen, name_identity) do
+        {:cont, {:ok, seen |> MapSet.put(uid_identity) |> MapSet.put(name_identity)}}
+      else
+        {:halt, {:error, :duplicate_or_invalid_kubernetes_identity}}
+      end
+    end)
+  end
+
   defp http_response(_method, response_kind, %{status: status, body: body}) when status in 200..299,
     do: decode_success(response_kind, status, body)
 
@@ -183,9 +243,34 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
   end
 
   defp decode_success(:pod_snapshot, _status, _body), do: {:error, :invalid_kubernetes_pod_list_response}
+
   defp decode_success(:delete, 204, _body), do: :ok
   defp decode_success(:delete, _status, %{"kind" => "Status", "status" => "Success"}), do: :ok
   defp decode_success(:delete, _status, _body), do: {:error, :invalid_kubernetes_delete_response}
+
+  defp decode_success(:job_list, _status, %{"apiVersion" => "batch/v1", "kind" => "JobList", "metadata" => metadata, "items" => items})
+       when is_map(metadata) and is_list(items),
+       do: decode_list(metadata, items, &is_map/1, :job)
+
+  defp decode_success(:job_list, _status, _body), do: {:error, :invalid_kubernetes_job_list_response}
+
+  defp decode_success(:pod_list, _status, %{"apiVersion" => "v1", "kind" => "PodList", "metadata" => metadata, "items" => items})
+       when is_map(metadata) and is_list(items),
+       do: decode_list(metadata, items, &is_map/1, :pod)
+
+  defp decode_success(:pod_list, _status, _body), do: {:error, :invalid_kubernetes_pod_list_response}
+
+  defp decode_list(metadata, items, valid_item?, resource) do
+    resource_version = metadata["resourceVersion"]
+    continuation = metadata["continue"]
+
+    if is_binary(resource_version) and resource_version != "" and
+         (is_nil(continuation) or is_binary(continuation)) and Enum.all?(items, valid_item?) do
+      {:ok, %{items: items, resource_version: resource_version, continue: continuation}}
+    else
+      {:error, {:invalid_kubernetes_list_response, resource}}
+    end
+  end
 
   defp request_options(method, path, body, settings) do
     content_type = if method == :patch, do: [{"content-type", "application/json-patch+json"}], else: []

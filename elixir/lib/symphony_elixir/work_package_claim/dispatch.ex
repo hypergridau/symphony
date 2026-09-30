@@ -114,6 +114,20 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   def begin_recovery(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
 
+  @doc "Moves only an exact confirmed, never-allocated claim into paused recovery."
+  @spec begin_confirmed_recovery(map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def begin_confirmed_recovery(journal, key) when is_binary(key) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "confirmed", allocation_id: nil} = dispatch} = reservation ->
+        Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "recovery_pending"}})
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def begin_confirmed_recovery(_journal, _key), do: {:error, :invalid_claim_dispatch_transition}
+
   @doc "Persists the first Job allocation intent before the external create call."
   @spec begin_suspended_allocation(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
   def begin_suspended_allocation(journal, key, input) when is_map(input) do

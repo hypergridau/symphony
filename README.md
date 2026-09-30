@@ -78,6 +78,37 @@ For retained pre-spawn incidents, the host may supply a signed provider recovery
 runtime verifies the old journal, complete unstarted history and released scope before normal
 admission advances the generation; it preserves the original evidence and never invents cleanup.
 
+### Paused confirmed-claim recovery
+
+HGS-740 handles a confirmed generation-2 provider claim when no RKE2 Job was allocated. The
+source-only root commands are:
+
+```text
+symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key>
+symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>
+symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key>
+```
+
+The installed runner calls startup verification from a root `ExecStartPre` with an empty
+environment. Before an apply marker exists, startup is allowed only when that issue has no HGS-740
+evidence directory; once candidate evidence exists without its durable transaction marker, startup
+fails closed until root applies or investigates it. `applying` markers always deny startup.
+`local_applied` markers require the global pause to remain set, the root-signed local-transition
+receipt, and exact journal, fence, and graph postimages. The complete command accepts only the
+pinned HGS-485 final release receipt and fresh full Frigga Job/Pod snapshots; it also checks the
+released journal/fence/graph invariants. A completed marker rechecks those signed receipts,
+claim-scoped Job/Pod absence, and released local authority at every startup.
+
+Evidence is stored root-only under
+`/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
+`candidate.json`, `confirmed-root-envelope.json`, `transaction.json`,
+`local-transition-candidate.json`, and `local-transition-receipt.json`. The transaction marker is
+written and synced before any of the three domain persistence APIs update local state. A retry
+replays only exact saved postimages from exact preimages; contradictory bytes, missing evidence,
+uncertain Kubernetes pagination, an absent signer, or an unpaused gate keep the transition held.
+The completion command does not unpause admission. This source change does not install the
+ExecStartPre hook, run on a host, or qualify a live recovery.
+
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
 _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._
