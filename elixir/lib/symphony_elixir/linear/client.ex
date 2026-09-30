@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Linear.Client do
 
   require Logger
   alias SymphonyElixir.Config
+  alias SymphonyElixir.Linear.Adapter
   alias SymphonyElixir.Linear.RateLimiter
   alias SymphonyElixir.Tracker.Issue
 
@@ -29,6 +30,7 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        project { slugId }
         assignee {
           id
         }
@@ -74,6 +76,7 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        project { slugId }
         assignee {
           id
         }
@@ -112,32 +115,34 @@ defmodule SymphonyElixir.Linear.Client do
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
+    fetch_states(normalized_states)
+  end
 
-    case normalized_states do
-      [] ->
-        {:ok, []}
+  defp fetch_states([]), do: {:ok, []}
 
-      states ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
-             {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_by_states(tracker.project_slug, states, assignee_filter)
-        end
+  defp fetch_states(states) do
+    with {:ok, tracker} <- configured_tracker_for_read(),
+         {:ok, assignee_filter} <- routing_assignee_filter() do
+      fetch_across_projects(project_slugs(tracker), fn slug ->
+        do_fetch_by_states(slug, states, assignee_filter)
+      end)
     end
   end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
+    fetch_ids(ids)
+  end
 
-    case ids do
-      [] ->
-        {:ok, []}
+  defp fetch_ids([]), do: {:ok, []}
 
-      ids ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
-             {:ok, assignee_filter} <- routing_assignee_filter() do
-          do_fetch_issue_states(ids, tracker.project_slug, assignee_filter)
-        end
+  defp fetch_ids(ids) do
+    with {:ok, tracker} <- configured_tracker_for_read(),
+         {:ok, assignee_filter} <- routing_assignee_filter() do
+      fetch_across_projects(project_slugs(tracker), fn slug ->
+        do_fetch_issue_states(ids, slug, assignee_filter)
+      end)
     end
   end
 
@@ -207,6 +212,20 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
+  @spec fetch_issues_across_projects_for_test(
+          [String.t()],
+          [String.t()],
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) ::
+          {:ok, [Issue.t()]} | {:error, term()}
+  def fetch_issues_across_projects_for_test(slugs, state_names, graphql_fun)
+      when is_list(slugs) and is_list(state_names) and is_function(graphql_fun, 2) do
+    fetch_across_projects(slugs, fn slug ->
+      do_fetch_by_states_page(slug, state_names, nil, nil, [], 1, strict_project_graphql(slug, graphql_fun))
+    end)
+  end
+
+  @doc false
   @spec normalize_issue_for_test(map()) :: Issue.t() | nil
   def normalize_issue_for_test(issue) when is_map(issue) do
     normalize_issue(issue, nil)
@@ -259,7 +278,53 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], 1, &graphql/2)
+    graphql_fun = strict_project_graphql(project_slug, &graphql/2)
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], 1, graphql_fun)
+  end
+
+  defp strict_project_graphql(project_slug, graphql_fun) do
+    fn query, variables ->
+      with {:ok, body} <- graphql_fun.(query, variables),
+           :ok <- validate_project_response(body, project_slug) do
+        {:ok, body}
+      end
+    end
+  end
+
+  defp validate_project_response(%{"data" => %{"issues" => %{"nodes" => nodes}}}, project_slug)
+       when is_list(nodes) do
+    if Enum.all?(nodes, fn node -> is_map(node) and get_in(node, ["project", "slugId"]) == project_slug end),
+      do: :ok,
+      else: {:error, :linear_project_identity_mismatch}
+  end
+
+  defp validate_project_response(_body, _project_slug), do: {:error, :linear_project_identity_mismatch}
+
+  defp project_slugs(tracker) do
+    Map.get(tracker.provider, "project_slugs", [tracker.project_slug])
+  end
+
+  defp fetch_across_projects(slugs, fetch) do
+    Enum.reduce_while(slugs, {:ok, [], MapSet.new()}, fn slug, {:ok, acc, seen} ->
+      case fetch.(slug) do
+        {:ok, issues} -> merge_project_issues(issues, acc, seen)
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, issues, _seen} -> {:ok, Enum.reverse(issues)}
+      error -> error
+    end
+  end
+
+  defp merge_project_issues(issues, acc, seen) do
+    ids = Enum.map(issues, & &1.id)
+
+    if length(ids) != length(Enum.uniq(ids)) or Enum.any?(ids, &MapSet.member?(seen, &1)) do
+      {:halt, {:error, :linear_project_issue_duplicate}}
+    else
+      {:cont, {:ok, Enum.reverse(issues, acc), Enum.reduce(ids, seen, &MapSet.put(&2, &1))}}
+    end
   end
 
   defp do_fetch_by_states_page(_project_slug, _state_names, _assignee_filter, _after_cursor, _acc_issues, page_count, _graphql_fun)
@@ -307,7 +372,7 @@ defmodule SymphonyElixir.Linear.Client do
   defp finalize_paginated_issues(acc_issues) when is_list(acc_issues), do: Enum.reverse(acc_issues)
 
   defp do_fetch_issue_states(ids, project_slug, assignee_filter) do
-    do_fetch_issue_states(ids, project_slug, assignee_filter, &graphql/2)
+    do_fetch_issue_states(ids, project_slug, assignee_filter, strict_project_graphql(project_slug, &graphql/2))
   end
 
   defp do_fetch_issue_states(ids, project_slug, assignee_filter, graphql_fun)
@@ -616,9 +681,17 @@ defmodule SymphonyElixir.Linear.Client do
     tracker = Config.settings!().tracker
 
     cond do
-      is_nil(tracker.api_key) -> {:error, :missing_linear_api_token}
-      is_nil(tracker.project_slug) -> {:error, :missing_linear_project_slug}
-      true -> {:ok, tracker}
+      is_nil(tracker.api_key) ->
+        {:error, :missing_linear_api_token}
+
+      is_nil(tracker.project_slug) ->
+        {:error, :missing_linear_project_slug}
+
+      true ->
+        case Adapter.validate_config(tracker) do
+          :ok -> {:ok, tracker}
+          error -> error
+        end
     end
   end
 

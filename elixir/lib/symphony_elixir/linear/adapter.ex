@@ -20,11 +20,30 @@ defmodule SymphonyElixir.Linear.Adapter do
       not present_string?(tracker_settings.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      not valid_project_slugs?(tracker_settings) ->
+        {:error, :invalid_linear_project_slugs}
+
       not is_nil(tracker_settings.assignee) and not present_string?(tracker_settings.assignee) ->
         {:error, :invalid_linear_assignee}
 
       true ->
         :ok
+    end
+  end
+
+  defp valid_project_slugs?(tracker_settings) do
+    provider = tracker_settings.provider
+
+    case if(is_map(provider), do: Map.get(provider, "project_slugs"), else: :invalid) do
+      nil ->
+        true
+
+      slugs when is_list(slugs) ->
+        slugs == ["224f14ff3a24", "frigga-712f8a45bf36"] and
+          tracker_settings.project_slug == "224f14ff3a24"
+
+      _ ->
+        false
     end
   end
 
