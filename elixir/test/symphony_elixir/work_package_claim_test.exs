@@ -1457,6 +1457,119 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     refute_receive {:activation_requested, _, _, _}
   end
 
+  test "restart ignores only fully released historical disposable generations" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{id: @issue_id, identifier: "HGS-736", state: "Todo", assignee_id: "owner", dispatchable: true}
+
+    context = %{
+      adapter: SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter,
+      test_pid: self(),
+      claim_journal_path: path
+    }
+
+    {blocked, _runtime} = post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
+    {:ok, journal} = Journal.load(path)
+    [{key, reservation}] = Map.to_list(journal.reservations)
+    allocation_id = "rke2job:v1:historical-allocation"
+    reservation = %{reservation | dispatch: %{reservation.dispatch | phase: "spawn_started", allocation_id: allocation_id}}
+    {:ok, journal} = Journal.put(journal, key, reservation)
+    head = String.duplicate("a", 40)
+
+    journal =
+      Enum.reduce(["termination_confirmed", "repository_cleanup_verified"], journal, fn kind, current ->
+        receipt = %{
+          receipt_id: "#{kind}-1",
+          receipt_kind: kind,
+          generation: 1,
+          evidence_ref: "sha256:" <> String.duplicate("b", 64),
+          accepted_head: head
+        }
+
+        {:ok, current} = Journal.put_cleanup_receipt(current, key, kind, receipt)
+
+        ack = %{
+          projection_id: reservation.projection_id,
+          reservation_id: reservation.reservation_id,
+          receipt_id: receipt.receipt_id,
+          receipt_kind: kind,
+          execution_capacity_state: "released",
+          scope_state: "released",
+          reservation_state: "released",
+          generation: 1,
+          evidence_ref: receipt.evidence_ref,
+          accepted_head: head,
+          replayed: false
+        }
+
+        {:ok, current} = Journal.put_cleanup_receipt_ack(current, key, kind, ack)
+        current
+      end)
+
+    complete_journal = journal
+    :ok = Journal.save(path, journal)
+    execution = blocked.execution_fence.executions[@issue_id]
+    historical = terminal_cleaned_execution(execution, 1, head)
+    current = terminal_cleaned_execution(execution, 2, head)
+    fence = %{blocked.execution_fence | executions: %{@issue_id => current}, history: [historical]}
+    restarted = %{blocked | blocked: %{}, claimed: MapSet.new(), execution_fence: fence}
+
+    released = Orchestrator.restore_retained_disposable_claims_for_test(restarted)
+    assert released.retained_claim_journal_ready?
+    refute MapSet.member?(released.claimed, @issue_id)
+    refute Map.has_key?(released.blocked, @issue_id)
+
+    repository_receipt = Map.fetch!(complete_journal.reservations[key].cleanup_receipts, "repository_cleanup_verified")
+    repository_ack = repository_receipt.acknowledgement
+    mismatched_ack = Map.put(repository_ack, :accepted_head, String.duplicate("c", 40))
+    mismatched_receipt = Map.put(repository_receipt, :acknowledgement, mismatched_ack)
+    reservation = Map.put(complete_journal.reservations[key], :cleanup_receipts, Map.put(complete_journal.reservations[key].cleanup_receipts, "repository_cleanup_verified", mismatched_receipt))
+    :ok = Journal.save(path, %{complete_journal | reservations: Map.put(complete_journal.reservations, key, reservation)})
+    refute Orchestrator.restore_retained_disposable_claims_for_test(restarted).retained_claim_journal_ready?
+
+    :ok = Journal.save(path, complete_journal)
+    reservation = Map.fetch!(complete_journal.reservations, key)
+    receipts = Map.delete(reservation.cleanup_receipts, "repository_cleanup_verified")
+    journal = %{complete_journal | reservations: Map.put(complete_journal.reservations, key, Map.put(reservation, :cleanup_receipts, receipts))}
+    :ok = Journal.save(path, journal)
+    refute Orchestrator.restore_retained_disposable_claims_for_test(restarted).retained_claim_journal_ready?
+
+    :ok = Journal.save(path, complete_journal)
+    no_history = %{restarted | execution_fence: %{fence | history: []}}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(no_history).retained_claim_journal_ready?
+
+    active_current = %{restarted | execution_fence: %{fence | executions: %{@issue_id => %{current | status: :active}}}}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(active_current).retained_claim_journal_ready?
+
+    missing_current = %{restarted | execution_fence: %{fence | executions: %{}}}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(missing_current).retained_claim_journal_ready?
+  end
+
+  defp terminal_cleaned_execution(execution, generation, head) do
+    leases =
+      Map.new(execution.leases, fn {session_id, lease} ->
+        released_lease =
+          lease
+          |> Map.put(:generation, generation)
+          |> Map.put(:status, :released)
+          |> Map.put(:termination_confirmed_at_ms, 1)
+
+        {session_id, released_lease}
+      end)
+
+    %{
+      execution
+      | generation: generation,
+        status: :terminal,
+        ownership: :reconciled,
+        cleanup: :cleaned,
+        terminal: %{state: "Done", accepted_head: head},
+        leases: leases,
+        termination_unconfirmed: false
+    }
+  end
+
   test "poll owns terminal reconciliation only for the exact started disposable Job" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -2844,9 +2957,19 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
           lease
         )
       else
-        Orchestrator.spawn_claimed_issue_for_test(state, issue, dispatch, fn [@issue_id] ->
-          {:ok, [refreshed_issue]}
-        end)
+        required_labels = SymphonyElixir.Config.settings!().tracker.required_labels
+
+        routable_refreshed_issue = %{
+          refreshed_issue
+          | labels: Enum.uniq(refreshed_issue.labels ++ required_labels)
+        }
+
+        Orchestrator.spawn_claimed_issue_for_test(
+          state,
+          issue,
+          dispatch,
+          fn [@issue_id] -> {:ok, [routable_refreshed_issue]} end
+        )
       end
 
     {after_preflight, runtime}

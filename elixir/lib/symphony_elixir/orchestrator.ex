@@ -719,8 +719,8 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(path) do
     case Journal.load(path) do
       {:ok, journal} ->
-        Enum.reduce(journal.reservations, %{state | retained_claim_journal_ready?: true}, fn {_key, reservation}, current ->
-          restore_retained_disposable_claim(current, reservation)
+        Enum.reduce(journal.reservations, %{state | retained_claim_journal_ready?: true}, fn {key, reservation}, current ->
+          restore_retained_disposable_claim(current, journal, key, reservation)
         end)
 
       :missing ->
@@ -736,28 +736,94 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp restore_retained_disposable_claims(state), do: state
 
-  defp restore_retained_disposable_claim(state, %{issue_id: issue_id, generation: generation} = reservation)
+  defp restore_retained_disposable_claim(
+         state,
+         journal,
+         key,
+         %{issue_id: issue_id, generation: generation} = reservation
+       )
        when is_binary(issue_id) and is_integer(generation) do
     dispatch = Map.get(reservation, :dispatch, %{})
     execution = Map.get(state.execution_fence.executions, issue_id)
 
-    if dispatch[:phase] in ["allocation_suspended", "spawn_started"] do
-      if is_binary(dispatch[:allocation_id]) and
-           match?(%{generation: ^generation}, execution) and
-           reservation.runner_id == get_in(state.work_package_runtime, [:runner_id]) and
-           reservation.repository_ref == execution.repository do
-        state
-        |> restore_verified_retained_disposable_claim(issue_id, generation, dispatch.allocation_id)
-        |> reconcile_retained_disposable_terminal(reservation)
-      else
-        %{state | retained_claim_journal_ready?: false}
-      end
-    else
+    if dispatch[:phase] in ["allocation_suspended", "spawn_started"],
+      do: restore_matching_or_historical_retained_claim(state, journal, key, reservation, dispatch, execution),
+      else: state
+  end
+
+  defp restore_retained_disposable_claim(state, _journal, _key, _reservation), do: state
+
+  defp restore_matching_or_historical_retained_claim(state, journal, key, reservation, dispatch, execution) do
+    generation = reservation.generation
+
+    if is_binary(dispatch[:allocation_id]) and
+         match?(%{generation: ^generation}, execution) and
+         reservation.runner_id == get_in(state.work_package_runtime, [:runner_id]) and
+         reservation.repository_ref == execution.repository do
       state
+      |> restore_verified_retained_disposable_claim(
+        reservation.issue_id,
+        reservation.generation,
+        dispatch.allocation_id
+      )
+      |> reconcile_retained_disposable_terminal(reservation)
+    else
+      preserve_or_block_historical_retained_claim(state, journal, key, reservation, execution)
     end
   end
 
-  defp restore_retained_disposable_claim(state, _reservation), do: state
+  defp preserve_or_block_historical_retained_claim(state, journal, key, reservation, execution) do
+    case historical_disposable_claim_released?(state, journal, key, reservation, execution) do
+      true -> state
+      false -> %{state | retained_claim_journal_ready?: false}
+    end
+  end
+
+  defp historical_disposable_claim_released?(state, journal, key, reservation, current_execution)
+       when is_map(current_execution) do
+    issue_id = reservation.issue_id
+    generation = reservation.generation
+
+    with true <- reservation.dispatch[:phase] == "spawn_started",
+         true <- is_binary(reservation.dispatch[:allocation_id]),
+         true <- current_execution.generation > generation,
+         true <- fully_cleaned_terminal_execution?(current_execution),
+         historical when is_map(historical) <-
+           Enum.find(state.execution_fence.history, fn execution ->
+             execution.issue_id == issue_id and execution.generation == generation
+           end),
+         true <- historical.repository == reservation.repository_ref,
+         true <- fully_cleaned_terminal_execution?(historical),
+         true <- is_binary(historical.terminal[:accepted_head]),
+         true <- valid_historical_cleanup_receipt?(journal, key, reservation, "termination_confirmed", historical.terminal.accepted_head),
+         true <- valid_historical_cleanup_receipt?(journal, key, reservation, "repository_cleanup_verified", historical.terminal.accepted_head) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp historical_disposable_claim_released?(_state, _journal, _key, _reservation, _current_execution), do: false
+
+  defp fully_cleaned_terminal_execution?(%{status: :terminal, cleanup: :cleaned, ownership: :reconciled} = execution) do
+    Map.get(execution, :termination_unconfirmed, false) == false and map_size(execution.leases) > 0 and
+      Enum.all?(execution.leases, fn {_session_id, lease} ->
+        lease.status == :released and is_integer(Map.get(lease, :termination_confirmed_at_ms))
+      end)
+  end
+
+  defp fully_cleaned_terminal_execution?(_execution), do: false
+
+  defp valid_historical_cleanup_receipt?(journal, key, reservation, receipt_kind, accepted_head) do
+    with {:ok, semantic} <- Journal.cleanup_receipt(journal, key, receipt_kind),
+         {:ok, acknowledgement} <- Journal.cleanup_receipt_ack(journal, key, receipt_kind),
+         true <- semantic.accepted_head == accepted_head,
+         true <- valid_replayed_ack?(semantic, acknowledgement, reservation, receipt_kind) do
+      true
+    else
+      _ -> false
+    end
+  end
 
   defp reconcile_retained_disposable_terminal(state, %{dispatch: %{phase: "spawn_started", allocation_id: allocation_id}} = reservation) do
     runtime = state.work_package_runtime || %{}
