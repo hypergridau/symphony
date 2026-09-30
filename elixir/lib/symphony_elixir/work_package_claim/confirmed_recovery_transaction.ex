@@ -20,6 +20,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     ConfirmedRecoveryEvidence,
     ConfirmedRecoveryKubernetes,
     ConfirmedRecoveryLineage,
+    ConfirmedRecoveryProviderRelease,
     ConfirmedRecoveryStateMachine,
     ConfirmedRecoveryWAL,
     Dispatch,
@@ -32,9 +33,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   @identity_root "/srv/dahlia-runner-state/identity/claim-recovery-hgs485"
   @pause_path "/srv/dahlia-runner-state/control/global-mutable-pause.state"
   @provider_receipt_root "/etc/dahlia-managed-claim-recovery/hgs485-20260909"
-  @provider_claim_fields ~w(projectionId reservationId workspaceId companyId issueId runnerId managedProjectProfileId repositoryRef scopeKeys generation sessionId processId responsibleDelegationId executionFenceToken runtimeLeaseId nonceHash)
-  @provider_receipt_fields ~w(recoveryId projectionId fenceRevision oldTupleDigest oldNonceHash nextGenerationFloor confirmedAt proofDigest projectionState reservationState executionCapacityState scopeState)
-  @provider_proof_fields ~w(contractVersion recoveryId projectionId fenceRevision oldTupleDigest runnerId hostIdentity bootId observedAt evidenceRef globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent localGenerationMax fenceSHA256 claimJournalSHA256)
   @local_receipt_fields ~w(assignmentDigest assignmentSHA256 completedAt contractVersion evidenceRef expected generation issueId nonce observationSHA256 pool postconditions postimages preimages proofSHA256 reservationId transactionId)
   @state_file_metadata [:major_device, :minor_device, :inode, :uid, :gid, :mode, :links, :size, :mtime, :ctime]
   @transaction_writable_roots [
@@ -241,17 +239,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
           :ok | {:error, :provider_confirmation_receipt_mismatch}
   def validate_hgs719_receipt_binding(receipt, confirmed, recovery_id, expected, old_tuple_digest, fence_revision, proof_bytes)
       when is_map(receipt) and is_map(confirmed) and is_map(expected) and is_binary(proof_bytes) do
-    with true <- exact_keys?(confirmed, @provider_receipt_fields),
-         true <- confirmed == receipt,
-         true <- receipt["recoveryId"] == recovery_id,
-         true <- receipt["projectionId"] == expected["projectionId"],
-         true <- receipt["oldTupleDigest"] == old_tuple_digest,
-         true <- receipt["fenceRevision"] == fence_revision,
-         true <- receipt["proofDigest"] == digest(proof_bytes) do
-      :ok
-    else
-      _ -> {:error, :provider_confirmation_receipt_mismatch}
-    end
+    ConfirmedRecoveryProviderRelease.validate_receipt_binding(
+      receipt,
+      confirmed,
+      recovery_id,
+      expected,
+      old_tuple_digest,
+      fence_revision,
+      proof_bytes
+    )
   end
 
   def validate_hgs719_receipt_binding(_receipt, _confirmed, _recovery_id, _expected, _old_tuple_digest, _fence_revision, _proof_bytes),
@@ -362,7 +358,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          true <- Jason.encode!(envelope) == bytes,
          true <- :crypto.verify(:eddsa, :none, payload_bytes, signature, [public_key, :ed25519]),
          {:ok, payload} when is_map(payload) <- Jason.decode(payload_bytes),
-         true <- canonical_provider_final_payload(payload) == payload_bytes,
+         true <- ConfirmedRecoveryProviderRelease.canonical_payload(payload) == payload_bytes,
          :ok <- validate_provider_final_payload(payload, marker, runtime, require_current_journal?),
          :ok <- verify_hgs719_operation(marker, payload, bytes, public_key) do
       {:ok, bytes, payload}
@@ -375,9 +371,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp validate_provider_final_payload(payload, marker, runtime, require_current_journal?) do
     with {:ok, journal_sha256} <- provider_journal_sha256(marker, runtime, require_current_journal?),
-         :ok <- validate_provider_final_payload_shape(payload),
-         :ok <- validate_provider_final_claim(payload, marker, journal_sha256),
-         :ok <- validate_provider_release_receipt(payload["receipt"], marker) do
+         :ok <- ConfirmedRecoveryProviderRelease.validate_final_payload(payload, marker, journal_sha256) do
       :ok
     else
       _ -> {:error, :provider_final_proof_invalid}
@@ -395,85 +389,26 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     end
   end
 
-  defp validate_provider_final_payload_shape(payload) do
-    if Enum.sort(Map.keys(payload)) == Enum.sort(~w(contractVersion expected receipt localGenerationMax journalSHA256 neverSpawned)) and
-         payload["contractVersion"] == "work-package-pre-spawn-recovery.v1" do
-      :ok
-    else
-      {:error, :provider_final_proof_invalid}
-    end
-  end
-
-  defp validate_provider_final_claim(payload, marker, journal_sha256) do
-    if payload["expected"] == marker["expected"] and payload["localGenerationMax"] == 2 and
-         payload["neverSpawned"] == true and digest?(journal_sha256) and payload["journalSHA256"] == journal_sha256 do
-      :ok
-    else
-      {:error, :provider_final_proof_invalid}
-    end
-  end
-
-  defp validate_provider_release_receipt(receipt, marker) when is_map(receipt) do
-    expected = marker["expected"]
-
-    with true <- Enum.sort(Map.keys(receipt)) == Enum.sort(@provider_receipt_fields),
-         true <- receipt["oldTupleDigest"] == ConfirmedRecoveryEvidence.tuple_digest(expected),
-         true <- receipt["oldNonceHash"] == expected["nonceHash"],
-         true <- receipt["projectionId"] == expected["projectionId"],
-         true <- receipt["projectionState"] == "queued",
-         true <- Enum.all?(~w(reservationState executionCapacityState scopeState), &(receipt[&1] == "released")),
-         true <- receipt["nextGenerationFloor"] == 3,
-         true <- Enum.all?(~w(recoveryId fenceRevision), &text?(receipt[&1])),
-         true <- digest?(receipt["proofDigest"]),
-         true <- timestamp?(receipt["confirmedAt"]) do
-      :ok
-    else
-      _ -> {:error, :provider_final_proof_invalid}
-    end
-  end
-
-  defp validate_provider_release_receipt(_receipt, _marker),
-    do: {:error, :provider_final_proof_invalid}
-
   defp verify_hgs719_operation(marker, payload, final_envelope_bytes, public_key) do
-    expected = marker["expected"]
-    old_tuple_digest = ConfirmedRecoveryEvidence.tuple_digest(expected)
-    recovery_id = "hgs719-#{marker["pool"]}-#{old_tuple_digest}"
-
     directory =
       Path.join([
         "/srv/dahlia-runner-state",
         "evidence",
         "claim-recovery-hgs719",
         marker["pool"],
-        recovery_id
+        "hgs719-#{marker["pool"]}-#{ConfirmedRecoveryEvidence.tuple_digest(marker["expected"])}"
       ])
 
     with :ok <- exact_private_operation_directory(directory),
          {:ok, files} <- read_hgs719_operation_files(directory),
-         :ok <- validate_hgs719_observations(files, expected, payload),
-         :ok <- validate_hgs719_prepare(files, recovery_id, expected, old_tuple_digest),
-         {:ok, proof_bytes} <- canonical_hgs719_proof(files.confirmation["proof"]),
          :ok <-
-           validate_hgs719_confirmation(
+           ConfirmedRecoveryProviderRelease.validate_operation(
              files,
-             recovery_id,
-             expected,
-             old_tuple_digest,
-             proof_bytes,
-             public_key,
-             marker
-           ),
-         :ok <-
-           validate_hgs719_receipt(
-             files,
-             payload["receipt"],
-             recovery_id,
-             expected,
-             old_tuple_digest,
-             proof_bytes
-           ),
-         true <- files.signed_envelope_bytes == final_envelope_bytes do
+             marker,
+             payload,
+             final_envelope_bytes,
+             public_key
+           ) do
       :ok
     else
       _ -> {:error, :provider_final_operation_mismatch}
@@ -512,99 +447,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp decode_operation_file(_key, bytes), do: decode_candidate_bytes(bytes)
 
-  defp validate_hgs719_observations(files, expected, payload) do
-    with true <- files.prepare_observation["expected"] == expected,
-         true <- files.confirm_observation["expected"] == expected,
-         true <- files.prepare_observation["localGenerationMax"] == 2,
-         true <- files.confirm_observation["localGenerationMax"] == 2,
-         true <- files.confirm_observation["claimJournalSHA256"] == payload["journalSHA256"],
-         true <- timestamp?(files.prepare_observation["observedAt"]),
-         true <- timestamp?(files.confirm_observation["observedAt"]) do
-      :ok
-    else
-      _ -> {:error, :provider_operation_observation_mismatch}
-    end
-  end
-
-  defp validate_hgs719_prepare(files, recovery_id, expected, old_tuple_digest) do
-    request = files.prepare_request
-    response = files.prepare_response["data"]
-
-    with true <- exact_keys?(request, ~w(recoveryId expected reason evidenceRef)),
-         true <- request["recoveryId"] == recovery_id and request["expected"] == expected,
-         true <- request["evidenceRef"] == "sha256:" <> digest(files.prepare_observation_bytes),
-         true <-
-           exact_keys?(
-             response,
-             ~w(recoveryId projectionId fenceRevision oldTupleDigest preparedAt state reservationState executionCapacityState scopeState)
-           ),
-         true <- response["recoveryId"] == recovery_id and response["projectionId"] == expected["projectionId"],
-         true <- response["oldTupleDigest"] == old_tuple_digest,
-         true <- response["state"] == "prepared" and response["reservationState"] == "claimed",
-         true <- response["executionCapacityState"] == "held" and response["scopeState"] == "held",
-         true <- text?(response["fenceRevision"]) and timestamp?(response["preparedAt"]) do
-      :ok
-    else
-      _ -> {:error, :provider_prepare_mismatch}
-    end
-  end
-
-  defp canonical_hgs719_proof(proof) when is_map(proof) do
-    with :ok <- exact_keys_result(proof, @provider_proof_fields),
-         {:ok, bytes} <- encode_ordered_object(proof, @provider_proof_fields) do
-      {:ok, bytes}
-    else
-      _ -> {:error, :provider_proof_invalid}
-    end
-  end
-
-  defp canonical_hgs719_proof(_proof), do: {:error, :provider_proof_invalid}
-
-  defp validate_hgs719_confirmation(files, recovery_id, expected, old_tuple_digest, proof_bytes, public_key, marker) do
-    confirmation = files.confirmation
-    proof = confirmation["proof"]
-    prepared = files.prepare_response["data"]
-
-    with true <- exact_keys?(confirmation, ~w(recoveryId proof signature)),
-         true <- confirmation["recoveryId"] == recovery_id,
-         true <- proof["recoveryId"] == recovery_id and proof["projectionId"] == expected["projectionId"],
-         true <- proof["fenceRevision"] == prepared["fenceRevision"],
-         true <- proof["oldTupleDigest"] == old_tuple_digest and proof["runnerId"] == expected["runnerId"],
-         true <- proof["localGenerationMax"] == 2,
-         true <- proof["fenceSHA256"] == marker["postimages"]["fence"]["sha256"],
-         true <- proof["claimJournalSHA256"] == marker["postimages"]["claimJournal"]["sha256"],
-         true <- proof["globalPause"] == true and proof["runnerStopped"] == true and proof["neverSpawned"] == true,
-         true <- proof["supervisedWorkerAbsent"] == true and proof["workspaceAbsent"] == true and proof["processCount"] == 0,
-         true <- proof["evidenceRef"] == "sha256:" <> digest(files.confirm_observation_bytes),
-         {:ok, signature} <- Base.url_decode64(confirmation["signature"], padding: false),
-         true <- byte_size(signature) == 64,
-         true <- :crypto.verify(:eddsa, :none, proof_bytes, signature, [public_key, :ed25519]) do
-      :ok
-    else
-      _ -> {:error, :provider_confirmation_mismatch}
-    end
-  end
-
-  defp validate_hgs719_receipt(files, receipt, recovery_id, expected, old_tuple_digest, proof_bytes) do
-    confirmed = files.confirm_response["data"]
-
-    validate_hgs719_receipt_binding(
-      receipt,
-      confirmed,
-      recovery_id,
-      expected,
-      old_tuple_digest,
-      files.prepare_response["data"]["fenceRevision"],
-      proof_bytes
-    )
-  end
-
   defp exact_keys?(value, keys) when is_map(value), do: Enum.sort(Map.keys(value)) == Enum.sort(keys)
   defp exact_keys?(_value, _keys), do: false
-
-  defp exact_keys_result(value, keys) do
-    if exact_keys?(value, keys), do: :ok, else: {:error, :invalid_exact_keyset}
-  end
 
   defp exact_private_operation_directory(path) do
     root = Path.join(["/srv/dahlia-runner-state", "evidence", "claim-recovery-hgs719"])
@@ -646,56 +490,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
       {:ok, bytes}
     else
       _ -> {:error, :untrusted_provider_operation_file}
-    end
-  end
-
-  defp canonical_provider_final_payload(payload) do
-    with {:ok, expected} <- encode_ordered_object(payload["expected"], @provider_claim_fields),
-         {:ok, receipt} <- encode_ordered_object(payload["receipt"], @provider_receipt_fields),
-         fields = [
-           {"contractVersion", payload["contractVersion"]},
-           {"expected", {:raw, expected}},
-           {"receipt", {:raw, receipt}},
-           {"localGenerationMax", payload["localGenerationMax"]},
-           {"journalSHA256", payload["journalSHA256"]},
-           {"neverSpawned", payload["neverSpawned"]}
-         ],
-         {:ok, bytes} <- encode_ordered_fields(fields) do
-      bytes
-    else
-      _ -> nil
-    end
-  end
-
-  defp encode_ordered_object(value, fields) when is_map(value) do
-    if Enum.sort(Map.keys(value)) == Enum.sort(fields) do
-      fields
-      |> Enum.map(fn key -> {key, value[key]} end)
-      |> encode_ordered_fields()
-    else
-      {:error, :invalid_ordered_object}
-    end
-  end
-
-  defp encode_ordered_object(_value, _fields), do: {:error, :invalid_ordered_object}
-
-  defp encode_ordered_fields(fields) do
-    fields
-    |> Enum.reduce_while({:ok, []}, fn {key, value}, {:ok, parts} ->
-      encoded =
-        case value do
-          {:raw, raw_json} when is_binary(raw_json) -> {:ok, raw_json}
-          other -> Jason.encode(other)
-        end
-
-      case encoded do
-        {:ok, json} -> {:cont, {:ok, [parts, Jason.encode!(key), ":", json, ","]}}
-        _ -> {:halt, {:error, :invalid_ordered_value}}
-      end
-    end)
-    |> case do
-      {:ok, parts} -> {:ok, ["{", String.trim_trailing(IO.iodata_to_binary(parts), ","), "}"] |> IO.iodata_to_binary()}
-      error -> error
     end
   end
 
@@ -2304,8 +2098,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
-  defp digest?(value), do: is_binary(value) and Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
-  defp text?(value), do: is_binary(value) and value != ""
   defp timestamp?(value) when is_binary(value), do: match?({:ok, _, _}, DateTime.from_iso8601(value))
   defp timestamp?(_value), do: false
 
