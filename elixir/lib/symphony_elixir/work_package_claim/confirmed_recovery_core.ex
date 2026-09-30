@@ -403,7 +403,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
 
   defp completion_operations(issue_id, runtime) do
     %{
-      verify_receipt: fn marker -> verify_signed_local_receipt(marker, issue_id, runtime) end,
+      verify_receipt: fn marker, receipt_issue_id ->
+        verify_signed_local_receipt(marker, receipt_issue_id, runtime)
+      end,
       verify_postimages: fn marker -> verify_postimages(marker, runtime) end,
       provider_final: fn marker, require_current? ->
         verify_provider_final_proof(marker, runtime, require_current?)
@@ -978,19 +980,37 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp state_directories_match?(actual, expected, :frozen, runtime) do
     writable_roots = transaction_writable_roots(runtime)
 
-    Enum.all?(expected, fn {path, original} ->
-      expected_record =
-        if path in writable_roots do
-          %{original | "uid" => 0, "gid" => 0, "mode" => 0o700}
-        else
-          original
-        end
+    state_directory_keys_match?(actual, expected) and
+      Enum.all?(expected, fn {path, original} ->
+        expected_record =
+          if path in writable_roots do
+            %{original | "uid" => 0, "gid" => 0, "mode" => 0o700}
+          else
+            original
+          end
 
-      actual[path] == expected_record
-    end)
+        actual[path] == expected_record
+      end)
+  end
+
+  defp state_directories_match?(actual, expected, :freeze_preflight, runtime) do
+    writable_roots = transaction_writable_roots(runtime)
+
+    state_directory_keys_match?(actual, expected) and
+      Enum.all?(expected, fn {path, original} ->
+        if path in writable_roots do
+          directory_transition_allowed?(actual[path], original, :freeze)
+        else
+          actual[path] == original
+        end
+      end)
   end
 
   defp state_directories_match?(_actual, _expected, _state, _runtime), do: false
+
+  defp state_directory_keys_match?(actual, expected) do
+    actual |> Map.keys() |> Enum.sort() == expected |> Map.keys() |> Enum.sort()
+  end
 
   defp transaction_writable_roots(runtime) do
     root = runtime.host_ops.paths.state_root
@@ -1003,6 +1023,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     owner = ownership["claimJournal"]["uid"]
 
     with :ok <- validate_freezable_directories(directories, runtime),
+         :ok <- validate_state_directories_for_freeze(marker, runtime),
          :ok <- change_transaction_directories(directories, :freeze, runtime),
          :ok <- validate_state_directories(marker, runtime, :frozen),
          :ok <- host(runtime, :no_processes_for_uid, [owner]) do
@@ -1031,6 +1052,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp validate_freezable_directories(_directories, _runtime), do: {:error, :transaction_state_directory_missing}
+
+  defp validate_state_directories_for_freeze(marker, runtime) do
+    ownership = marker["stateOwnership"]
+    expected = ownership["directories"]
+    owner = ownership["claimJournal"]["uid"]
+
+    with true <- is_map(expected),
+         {:ok, actual} <- state_directory_identity(runtime_state_paths(runtime), owner, runtime),
+         true <- state_directories_match?(actual, expected, :freeze_preflight, runtime) do
+      :ok
+    else
+      _ -> {:error, :state_directory_identity_changed}
+    end
+  end
 
   defp change_transaction_directories(directories, action, runtime) do
     Enum.reduce_while(transaction_writable_roots(runtime), :ok, fn path, :ok ->
@@ -1566,7 +1601,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       current in [
         original,
         %{original | "uid" => 0, "gid" => 0},
-        %{original | "mode" => 0o700}
+        %{original | "mode" => 0o700},
+        %{original | "uid" => 0, "gid" => 0, "mode" => 0o700}
       ]
   end
 

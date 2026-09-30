@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
+  @receipt_domain "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v1\0"
+
   alias SymphonyElixir.ExecutionFence
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph
@@ -8,7 +10,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes, as: Kubernetes
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryProviderRelease, as: ProviderRelease
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Facade
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
@@ -375,7 +379,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     Agent.stop(calls)
   end
 
-  test "Core applies a real ephemeral signed gen2 transition from persisted preimages" do
+  test "Core persists the marker before applying a real ephemeral signed gen2 transition" do
     fixture = positive_apply_fixture()
     context = fixture.context
 
@@ -405,6 +409,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert decoded_marker["postimages"]["claimJournal"]["sha256"] != decoded_marker["preimages"]["claimJournalSHA256"]
     assert Agent.get(fixture.vfs, &{&1.mutation_gate_calls, &1.state_write_calls}) == {10, 3}
 
+    events = Agent.get(fixture.vfs, &Enum.reverse(&1.events))
+    marker_index = Enum.find_index(events, &(&1 == {:marker_status, "applying"}))
+    first_state_write_index = Enum.find_index(events, &match?({:state_write, _kind}, &1))
+    assert is_integer(marker_index)
+    assert is_integer(first_state_write_index)
+    assert marker_index < first_state_write_index
+
     final_files = Agent.get(fixture.vfs, & &1.files)
 
     for {name, path} <- [
@@ -421,6 +432,30 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     assert {:error, _reason} =
              ConfirmedRecoveryRootHost.verify_signed_evidence(fixture.proof_bytes, fixture.bindings)
+
+    assert {:ok, :already_applied} = Transaction.apply_with_test_context(context)
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+
+    run_root = "/srv/dahlia-runner-state/run"
+    run_ancestor = Path.join(run_root, "pools")
+    frozen_run = %{uid: 0, gid: 0, mode: 0o700}
+    assert Agent.get(fixture.vfs, &Map.fetch!(&1.dir_meta, run_root)) == frozen_run
+
+    Agent.update(fixture.vfs, fn state ->
+      %{state | dir_meta: Map.put(state.dir_meta, run_ancestor, %{uid: 0, gid: 1001, mode: 0o750})}
+    end)
+
+    owner_changes_before_denial =
+      Agent.get(fixture.vfs, fn state ->
+        Enum.count(state.events, &(&1 == {:change_owner, run_root, 0, 0}))
+      end)
+
+    assert {:error, _reason} = Transaction.apply_with_test_context(context)
+    assert Agent.get(fixture.vfs, &Map.fetch!(&1.dir_meta, run_root)) == frozen_run
+
+    assert Agent.get(fixture.vfs, fn state ->
+             Enum.count(state.events, &(&1 == {:change_owner, run_root, 0, 0}))
+           end) == owner_changes_before_denial
 
     Agent.stop(fixture.vfs)
   end
@@ -479,6 +514,52 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert_received :quiescence_gate
     refute_received :later_gate_must_not_run
     refute_received :marker_must_not_be_read
+  end
+
+  test "Core completion validates ephemeral receipts and provider proof before Kubernetes can deny it" do
+    fixture = positive_apply_fixture()
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+
+    files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+    completion_fixture = install_completion_evidence(fixture, marker, files)
+    observation = Jason.decode!(Map.fetch!(files, Path.join(Path.dirname(fixture.marker_path), "candidate.json")))
+    claim = Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
+
+    # The synthetic endpoint fails observe/2's first fixed-endpoint guard before credentials or HTTP.
+    assert {:error, :kubernetes_observation_unavailable} =
+             Kubernetes.observe(claim, observation["kubernetes"]["cluster"])
+
+    event_count = Agent.get(fixture.vfs, &length(&1.events))
+    context = completion_fixture.context
+
+    assert :ok = Transaction.validate_test_context(context)
+
+    assert {:error, :hgs740_completion_held_closed} =
+             Transaction.complete_with_test_context(context)
+
+    final_marker = Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path))
+    assert %{"status" => "local_applied"} = Jason.decode!(final_marker)
+
+    completion_events =
+      fixture.vfs
+      |> Agent.get(&Enum.reverse(&1.events))
+      |> Enum.drop(event_count)
+
+    assert Enum.count(completion_events, &(&1 == :public_key_read)) == 2
+
+    assert {:read, completion_fixture.receipt_path} in completion_events
+    assert {:read, completion_fixture.provider_path} in completion_events
+    assert {:read, fixture.local_candidate_path} in completion_events
+
+    assert Enum.all?(completion_fixture.operation_paths, fn path ->
+             {:read, path} in completion_events
+           end)
+
+    assert {:error, _reason} =
+             ConfirmedRecoveryRootHost.verify_signed_evidence(fixture.proof_bytes, fixture.bindings)
+
+    Agent.stop(fixture.vfs)
   end
 
   test "candidate decoder accepts only exact insertion-order Python JSON bytes" do
@@ -807,12 +888,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     }
 
     frozen = %{original | "uid" => 0, "gid" => 0}
+    fully_frozen = %{frozen | "mode" => 0o700}
 
     assert Transaction.directory_transition_allowed?(original, original, :freeze)
     assert Transaction.directory_transition_allowed?(frozen, original, :freeze)
+    assert Transaction.directory_transition_allowed?(fully_frozen, original, :freeze)
     assert Transaction.directory_transition_allowed?(frozen, original, :restore)
+    assert Transaction.directory_transition_allowed?(fully_frozen, original, :restore)
     refute Transaction.directory_transition_allowed?(%{original | "inode" => 9999}, original, :freeze)
     refute Transaction.directory_transition_allowed?(%{original | "mode" => 0o755}, original, :freeze)
+    refute Transaction.directory_transition_allowed?(%{fully_frozen | "inode" => 9999}, original, :freeze)
+    refute Transaction.directory_transition_allowed?(%{fully_frozen | "uid" => 1}, original, :freeze)
+    refute Transaction.directory_transition_allowed?(%{fully_frozen | "mode" => 0o755}, original, :freeze)
     refute Transaction.directory_transition_allowed?(original, original, :restore)
   end
 
@@ -989,7 +1076,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
           "processCount" => 0,
           "workspaceAbsent" => true,
           "turnsAbsent" => true,
-          "dispatchPhase" => "confirmed"
+          "dispatchPhase" => "confirmed",
+          "kubernetes" => %{
+            "cluster" => %{
+              "apiServer" => "https://synthetic.invalid",
+              "caSha256" => String.duplicate("c", 64)
+            }
+          }
         },
         expected_hashes
       )
@@ -1051,7 +1144,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     {:ok, vfs} =
       Agent.start_link(fn ->
-        %{files: files, file_meta: file_meta, dir_meta: %{}, mutation_gate_calls: 0, state_write_calls: 0}
+        %{
+          files: files,
+          file_meta: file_meta,
+          dir_meta: %{},
+          events: [],
+          mutation_gate_calls: 0,
+          state_write_calls: 0
+        }
       end)
 
     local_candidate_path = Path.join(evidence_directory, "local-transition-candidate.json")
@@ -1069,8 +1169,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
           :ok
         end,
         fixed_runtime_paths: fn pool -> ConfirmedRecoveryRootHost.fixed_runtime_paths(pool) end,
-        lstat: fn path -> vfs_lstat(vfs, path, paths, evidence_root, issue_id) end,
-        lstat_posix: fn path -> vfs_lstat_posix(vfs, path, paths, evidence_root, issue_id) end,
+        lstat: fn path ->
+          Agent.update(vfs, fn state -> %{state | events: [{:lstat, path} | state.events]} end)
+          vfs_lstat(vfs, path, paths, evidence_root, issue_id)
+        end,
+        lstat_posix: fn path ->
+          Agent.update(vfs, fn state -> %{state | events: [{:lstat_posix, path} | state.events]} end)
+          vfs_lstat_posix(vfs, path, paths, evidence_root, issue_id)
+        end,
         open: fn path, _modes -> vfs_open(vfs, path) end,
         raw_read: fn path, _limit -> Map.fetch(Agent.get(vfs, & &1.files), path) end,
         read_file_info: fn path, _options ->
@@ -1081,6 +1187,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         end,
         close: fn _file -> :ok end,
         read: fn path ->
+          Agent.update(vfs, fn state -> %{state | events: [{:read, path} | state.events]} end)
+
           case Map.fetch(Agent.get(vfs, & &1.files), path) do
             {:ok, bytes} -> {:ok, bytes}
             :error -> {:error, :enoent}
@@ -1089,15 +1197,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         now_ms: fn -> now_ms end,
         verify_signed_evidence: verify_signed_evidence,
         raw_open: fn path, _modes -> {:ok, {:raw_file, path}} end,
-        raw_write: fn {:raw_file, path}, bytes ->
-          Agent.update(vfs, &put_in(&1.files[path], bytes))
-          :ok
-        end,
+        raw_write: fn {:raw_file, path}, bytes -> vfs_raw_write(vfs, path, bytes, marker_path) end,
         raw_sync: fn _file -> :ok end,
         raw_close: fn _file -> :ok end,
         change_owner: fn path, uid, gid -> vfs_change_owner(vfs, path, uid, gid) end,
         chmod: fn path, mode -> vfs_chmod(vfs, path, mode) end,
-        no_processes_for_uid: fn _uid -> :ok end,
+        no_processes_for_uid: fn _uid ->
+          Agent.update(vfs, fn state -> %{state | events: [:no_processes | state.events]} end)
+          :ok
+        end,
         save_state: fn kind, path, state ->
           vfs_save_state(vfs, kind, path, state)
         end,
@@ -1156,6 +1264,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       },
       marker_path: marker_path,
       proof_bytes: proof_bytes,
+      test_public_key: public_key,
+      test_private_key: private_key,
       bindings: %{
         pool: "midgard",
         issue_id: issue_id,
@@ -1202,6 +1312,221 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         _ -> {:error, :invalid_confirmed_recovery_evidence}
       end
     end
+  end
+
+  defp vfs_raw_write(vfs, path, bytes, marker_path) do
+    event =
+      if path == marker_path do
+        case Jason.decode(bytes) do
+          {:ok, %{"status" => status}} -> {:marker_status, status}
+          _ -> {:marker_bytes_written, byte_size(bytes)}
+        end
+      end
+
+    Agent.update(vfs, fn state ->
+      events = if event, do: [event | state.events], else: state.events
+      %{state | files: Map.put(state.files, path, bytes), events: events}
+    end)
+
+    :ok
+  end
+
+  defp install_completion_evidence(fixture, marker, files) do
+    candidate_bytes = Map.fetch!(files, fixture.local_candidate_path)
+    receipt_bytes = signed_local_receipt(candidate_bytes, fixture.test_private_key)
+    provider_fixture = synthetic_provider_fixture(marker, fixture.test_private_key)
+    provider_root = fixture.context.host_ops.paths.provider_receipt_root
+    provider_path = Path.join(provider_root, marker["issueId"] <> ".json")
+    receipt_path = Path.join(Path.dirname(fixture.marker_path), "local-transition-receipt.json")
+
+    new_files =
+      Map.merge(provider_fixture.operation_files, %{
+        receipt_path => receipt_bytes,
+        provider_path => provider_fixture.envelope_bytes
+      })
+
+    directory_meta = completion_directory_metadata(provider_root, provider_fixture.operation_directory)
+
+    Agent.update(fixture.vfs, fn state ->
+      %{state | files: Map.merge(state.files, new_files), dir_meta: Map.merge(state.dir_meta, directory_meta)}
+    end)
+
+    host_ops =
+      Map.put(fixture.context.host_ops, :read_public_key, fn ->
+        Agent.update(fixture.vfs, fn state -> %{state | events: [:public_key_read | state.events]} end)
+        {:ok, fixture.test_public_key}
+      end)
+
+    %{
+      context: %{fixture.context | host_ops: host_ops},
+      operation_paths: Map.keys(provider_fixture.operation_files),
+      provider_path: provider_path,
+      receipt_path: receipt_path
+    }
+  end
+
+  defp signed_local_receipt(candidate_bytes, private_key) do
+    signature =
+      :crypto.sign(:eddsa, :none, @receipt_domain <> candidate_bytes, [private_key, :ed25519])
+      |> Base.url_encode64(padding: false)
+
+    Evidence.canonical_json(%{
+      "payload" => Base.url_encode64(candidate_bytes, padding: false),
+      "signature" => signature
+    })
+  end
+
+  defp completion_directory_metadata(provider_root, operation_directory) do
+    provider_directories = [
+      "/etc",
+      "/etc/dahlia-managed-claim-recovery",
+      provider_root
+    ]
+
+    operation_directories = [
+      "/srv/dahlia-runner-state/evidence/claim-recovery-hgs719",
+      "/srv/dahlia-runner-state/evidence/claim-recovery-hgs719/midgard",
+      operation_directory
+    ]
+
+    provider_meta = %{uid: 0, gid: 0, mode: 0o755}
+    operation_meta = %{uid: 0, gid: 0, mode: 0o700}
+
+    Map.new(provider_directories, &{&1, provider_meta})
+    |> Map.merge(Map.new(operation_directories, &{&1, operation_meta}))
+  end
+
+  defp synthetic_provider_fixture(marker, private_key) do
+    expected = marker["expected"]
+    old_tuple_digest = Evidence.tuple_digest(expected)
+    recovery_id = "hgs719-#{marker["pool"]}-#{old_tuple_digest}"
+    fence_revision = "revision-12"
+
+    prepare_observation = %{
+      "expected" => expected,
+      "localGenerationMax" => 2,
+      "observedAt" => "2026-09-30T12:00:00Z"
+    }
+
+    confirm_observation = %{
+      "expected" => expected,
+      "localGenerationMax" => 2,
+      "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
+      "observedAt" => "2026-09-30T12:00:05Z"
+    }
+
+    prepare_observation_bytes = Evidence.canonical_json(prepare_observation)
+    confirm_observation_bytes = Evidence.canonical_json(confirm_observation)
+    proof = provider_confirmation_proof(marker, recovery_id, fence_revision, confirm_observation_bytes)
+    {:ok, proof_bytes} = ProviderRelease.canonical_proof(proof)
+    proof_signature = :crypto.sign(:eddsa, :none, proof_bytes, [private_key, :ed25519])
+
+    receipt =
+      provider_release_receipt(expected, recovery_id, fence_revision, proof_bytes)
+
+    payload = %{
+      "contractVersion" => "work-package-pre-spawn-recovery.v1",
+      "expected" => expected,
+      "receipt" => receipt,
+      "localGenerationMax" => 2,
+      "journalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
+      "neverSpawned" => true
+    }
+
+    payload_bytes = ProviderRelease.canonical_payload(payload)
+    envelope_signature = :crypto.sign(:eddsa, :none, payload_bytes, [private_key, :ed25519])
+
+    envelope_bytes =
+      Jason.encode!(%{
+        "payload" => Base.url_encode64(payload_bytes, padding: false),
+        "signature" => Base.url_encode64(envelope_signature, padding: false)
+      })
+
+    prepare_response = %{
+      "recoveryId" => recovery_id,
+      "projectionId" => expected["projectionId"],
+      "fenceRevision" => fence_revision,
+      "oldTupleDigest" => old_tuple_digest,
+      "preparedAt" => "2026-09-30T12:00:01Z",
+      "state" => "prepared",
+      "reservationState" => "claimed",
+      "executionCapacityState" => "held",
+      "scopeState" => "held"
+    }
+
+    confirmation = %{
+      "recoveryId" => recovery_id,
+      "proof" => proof,
+      "signature" => Base.url_encode64(proof_signature, padding: false)
+    }
+
+    operation_files = %{
+      "prepare-observation.json" => prepare_observation_bytes,
+      "prepare-request.json" =>
+        Evidence.canonical_json(%{
+          "recoveryId" => recovery_id,
+          "expected" => expected,
+          "reason" => "confirmed allocation failed before Job creation",
+          "evidenceRef" => "sha256:" <> sha256(prepare_observation_bytes)
+        }),
+      "prepare-response.json" => Jason.encode!(%{"data" => prepare_response}),
+      "confirm-observation.json" => confirm_observation_bytes,
+      "confirm-request.json" => Evidence.canonical_json(confirmation),
+      "confirm-response.json" => Jason.encode!(%{"data" => receipt}),
+      "signed-envelope.json" => envelope_bytes
+    }
+
+    state_root = "/srv/dahlia-runner-state"
+
+    operation_directory =
+      Path.join([state_root, "evidence", "claim-recovery-hgs719", marker["pool"], recovery_id])
+
+    %{
+      envelope_bytes: envelope_bytes,
+      operation_directory: operation_directory,
+      operation_files: Map.new(operation_files, fn {name, bytes} -> {Path.join(operation_directory, name), bytes} end)
+    }
+  end
+
+  defp provider_confirmation_proof(marker, recovery_id, fence_revision, observation_bytes) do
+    %{
+      "contractVersion" => "work-package-pre-spawn-recovery.v1",
+      "recoveryId" => recovery_id,
+      "projectionId" => marker["expected"]["projectionId"],
+      "fenceRevision" => fence_revision,
+      "oldTupleDigest" => Evidence.tuple_digest(marker["expected"]),
+      "runnerId" => marker["expected"]["runnerId"],
+      "hostIdentity" => "runner-host",
+      "bootId" => "boot-id",
+      "observedAt" => "2026-09-30T12:00:05Z",
+      "evidenceRef" => "sha256:" <> sha256(observation_bytes),
+      "globalPause" => true,
+      "runnerStopped" => true,
+      "neverSpawned" => true,
+      "supervisedWorkerAbsent" => true,
+      "processCount" => 0,
+      "workspaceAbsent" => true,
+      "localGenerationMax" => 2,
+      "fenceSHA256" => marker["postimages"]["fence"]["sha256"],
+      "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"]
+    }
+  end
+
+  defp provider_release_receipt(expected, recovery_id, fence_revision, proof_bytes) do
+    %{
+      "recoveryId" => recovery_id,
+      "projectionId" => expected["projectionId"],
+      "fenceRevision" => fence_revision,
+      "oldTupleDigest" => Evidence.tuple_digest(expected),
+      "oldNonceHash" => expected["nonceHash"],
+      "nextGenerationFloor" => 3,
+      "confirmedAt" => "2026-09-30T12:00:10Z",
+      "proofDigest" => sha256(proof_bytes),
+      "projectionState" => "queued",
+      "reservationState" => "released",
+      "executionCapacityState" => "released",
+      "scopeState" => "released"
+    }
   end
 
   defp confirmed_preimages(issue_id, now_ms) do
@@ -1550,6 +1875,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       path in [evidence_root, Path.dirname(evidence_directory), evidence_directory] ->
         %{uid: 0, gid: 0, mode: 0o700}
 
+      path in ["/etc", "/etc/dahlia-managed-claim-recovery", "/etc/dahlia-managed-claim-recovery/hgs485-20260909"] ->
+        %{uid: 0, gid: 0, mode: 0o755}
+
+      state_directory?(path, Path.join(state_root, "evidence"), "claim-recovery-hgs719") ->
+        %{uid: 0, gid: 0, mode: 0o700}
+
       state_directory?(path, state_root, "run") ->
         %{uid: 1001, gid: 1001, mode: 0o750}
 
@@ -1568,14 +1899,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
   defp vfs_change_owner(vfs, path, uid, gid) do
     Agent.update(vfs, fn state ->
+      events = [{:change_owner, path, uid, gid} | state.events]
+
       if Map.has_key?(state.files, path) do
         defaults = %{uid: 0, gid: 0, mode: 0o600}
         meta = Map.get(state.file_meta, path, defaults) |> Map.merge(%{uid: uid, gid: gid})
-        %{state | file_meta: Map.put(state.file_meta, path, meta)}
+        %{state | events: events, file_meta: Map.put(state.file_meta, path, meta)}
       else
         defaults = %{uid: 1001, gid: 1001, mode: 0o750}
         meta = Map.get(state.dir_meta, path, defaults) |> Map.merge(%{uid: uid, gid: gid})
-        %{state | dir_meta: Map.put(state.dir_meta, path, meta)}
+        %{state | events: events, dir_meta: Map.put(state.dir_meta, path, meta)}
       end
     end)
 
@@ -1584,12 +1917,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
   defp vfs_chmod(vfs, path, mode) do
     Agent.update(vfs, fn state ->
+      events = [{:chmod, path, mode} | state.events]
+
       if Map.has_key?(state.files, path) do
         meta = Map.get(state.file_meta, path, %{uid: 0, gid: 0, mode: 0o600}) |> Map.put(:mode, mode)
-        %{state | file_meta: Map.put(state.file_meta, path, meta)}
+        %{state | events: events, file_meta: Map.put(state.file_meta, path, meta)}
       else
         meta = Map.get(state.dir_meta, path, %{uid: 1001, gid: 1001, mode: 0o750}) |> Map.put(:mode, mode)
-        %{state | dir_meta: Map.put(state.dir_meta, path, meta)}
+        %{state | events: events, dir_meta: Map.put(state.dir_meta, path, meta)}
       end
     end)
 
@@ -1607,7 +1942,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     case encoded do
       {:ok, bytes} ->
         Agent.update(vfs, fn current ->
-          %{current | files: Map.put(current.files, path, bytes), state_write_calls: current.state_write_calls + 1}
+          %{
+            current
+            | files: Map.put(current.files, path, bytes),
+              events: [{:state_write, kind} | current.events],
+              state_write_calls: current.state_write_calls + 1
+          }
         end)
 
         :ok
