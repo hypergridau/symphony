@@ -11,19 +11,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   import Bitwise, only: [band: 2]
 
   alias SymphonyElixir.{Config, ManagedLauncherLock, Workflow}
-  alias SymphonyElixir.ExecutionFence
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
-  alias SymphonyElixir.ResponsibilityGraph
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
 
   alias SymphonyElixir.WorkPackageClaim.{
+    ConfirmedRecoveryClaimTransition,
     ConfirmedRecoveryEvidence,
     ConfirmedRecoveryKubernetes,
     ConfirmedRecoveryLineage,
     ConfirmedRecoveryProviderRelease,
     ConfirmedRecoveryStateMachine,
     ConfirmedRecoveryWAL,
-    Dispatch,
     Journal
   }
 
@@ -1169,35 +1167,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp prepare_postimages(paths, payload, _runtime, now_ms) do
-    expected = payload["observation"]["expected"]
-    reservation_id = payload["reservationId"]
-    issue_id = payload["issueId"]
-    key = Journal.reservation_key(issue_id, expected["managedProjectProfileId"], expected["repositoryRef"], 2)
+    case ConfirmedRecoveryClaimTransition.prepare_postimages(
+           paths.journal.state,
+           paths.fence.state,
+           paths.graph.state,
+           payload,
+           now_ms
+         ) do
+      {:ok, postimages} ->
+        {:ok,
+         %{
+           "claimJournal" => %{bytes: postimages.claimJournal, path: paths.journal.path},
+           "fence" => %{bytes: postimages.fence, path: paths.fence.path},
+           "responsibilityGraph" => %{bytes: postimages.responsibilityGraph, path: paths.graph.path},
+           "reservationId" => postimages.reservationId
+         }}
 
-    with {:ok, next_journal} <- Dispatch.begin_confirmed_recovery(paths.journal.state, key),
-         {:ok, next_fence, :released} <-
-           ExecutionFence.release(paths.fence.state, %{issue_id: issue_id, generation: 2}, expected["sessionId"], :spawn_failed),
-         runtime_lease <- %{
-           issue_id: issue_id,
-           repository: expected["repositoryRef"],
-           generation: 2,
-           session_id: expected["sessionId"],
-           process_id: expected["processId"]
-         },
-         {:ok, next_graph, :released} <-
-           ResponsibilityGraph.release_runtime_lease(paths.graph.state, expected["responsibleDelegationId"], runtime_lease, now_ms),
-         {:ok, journal_bytes} <- Journal.encode_bytes(next_journal),
-         {:ok, fence_bytes} <- FencePersistence.encode_bytes(next_fence),
-         {:ok, graph_bytes} <- GraphPersistence.encode_bytes(next_graph) do
-      {:ok,
-       %{
-         "claimJournal" => %{bytes: journal_bytes, path: paths.journal.path},
-         "fence" => %{bytes: fence_bytes, path: paths.fence.path},
-         "responsibilityGraph" => %{bytes: graph_bytes, path: paths.graph.path},
-         "reservationId" => reservation_id
-       }}
-    else
-      _ -> {:error, :confirmed_claim_transition_rejected}
+      {:error, _reason} ->
+        {:error, :confirmed_claim_transition_rejected}
     end
   end
 
