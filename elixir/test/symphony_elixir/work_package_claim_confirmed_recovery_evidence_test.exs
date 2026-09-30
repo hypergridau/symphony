@@ -125,6 +125,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_valid(put_in(payload, ["observation", "witnesses", Access.at(0), "source", "sourceHead"], "bad"))
   end
 
+  test "predecessor retirement and claim digests reject missing custody and unrepresentable fields" do
+    payload = payload()
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement"], nil))
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement", "execution", "leases"], %{}))
+    refute_valid(put_in(payload, ["observation", "kubernetes", "cluster", "apiServer"], "http://insecure.invalid"))
+
+    assert nil == Evidence.tuple_digest(Map.put(claim(), "projectionId", self()))
+  end
+
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
 
   defp bindings do

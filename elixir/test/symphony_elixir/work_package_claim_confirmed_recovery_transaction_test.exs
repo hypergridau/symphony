@@ -423,6 +423,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     marker = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
     Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(Map.put(marker, "status", "applying"))))
     assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(fixture.context)
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(fixture.context)
 
     Agent.update(fixture.vfs, fn state ->
       %{state | files: Map.delete(state.files, fixture.marker_path)}
@@ -810,6 +811,74 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
+  test "Core holds completion closed when signed receipt or provider operation custody fails" do
+    failures = [
+      :receipt_read_raises,
+      :provider_read_raises,
+      :operation_file_missing,
+      :operation_directory_writable
+    ]
+
+    for failure <- failures do
+      fixture = positive_apply_fixture()
+      assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+      files = Agent.get(fixture.vfs, & &1.files)
+      marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+      completion = install_completion_evidence(fixture, marker, files)
+      parent = self()
+
+      context =
+        case failure do
+          :receipt_read_raises ->
+            read = completion.context.host_ops.read
+
+            %{
+              completion.context
+              | host_ops:
+                  Map.put(completion.context.host_ops, :read, fn path ->
+                    if path == completion.receipt_path, do: raise("receipt read failed"), else: read.(path)
+                  end)
+            }
+
+          :provider_read_raises ->
+            read = completion.context.host_ops.read
+
+            %{
+              completion.context
+              | host_ops:
+                  Map.put(completion.context.host_ops, :read, fn path ->
+                    if path == completion.provider_path, do: raise("provider read failed"), else: read.(path)
+                  end)
+            }
+
+          :operation_file_missing ->
+            path = Enum.find(completion.operation_paths, &String.ends_with?(&1, "confirm-response.json"))
+            Agent.update(fixture.vfs, &update_in(&1.files, fn files -> Map.delete(files, path) end))
+            completion.context
+
+          :operation_directory_writable ->
+            path = Path.dirname(hd(completion.operation_paths))
+            Agent.update(fixture.vfs, &put_in(&1.dir_meta[path].mode, 0o755))
+            completion.context
+        end
+
+      context = %{
+        context
+        | host_ops:
+            Map.put(context.host_ops, :observe_kubernetes_for_test, fn _, _ ->
+              send(parent, :must_not_observe)
+              {:ok, %{}}
+            end)
+      }
+
+      assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
+      refute_received :must_not_observe
+      assert Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path))) == marker
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+      Agent.stop(fixture.vfs)
+    end
+  end
+
   test "Core holds recovery closed when host callbacks raise or throw" do
     for failure <- [:raise, :throw] do
       fail = fn ->
@@ -906,6 +975,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert :ok = Transaction.complete_with_test_context(replay_context)
     assert_received {:kubernetes_observation, ^claim, ^cluster}
     assert :ok = Transaction.verify_startup_with_test_context(replay_context)
+    assert {:error, :existing_hgs740_marker_conflict} = Transaction.apply_with_test_context(replay_context)
 
     assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
     assert Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path))) == completed

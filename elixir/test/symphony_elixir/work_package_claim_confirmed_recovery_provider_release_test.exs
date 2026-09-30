@@ -58,6 +58,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryProviderReleaseTest d
   test "malformed final receipts and operation envelopes remain held closed" do
     {marker, payload} = final_payload_fixture()
     assert nil == ProviderRelease.canonical_payload(nil)
+    assert nil == ProviderRelease.canonical_payload(Map.put(payload, "expected", nil))
+    assert nil == ProviderRelease.canonical_payload(Map.put(payload, "neverSpawned", self()))
     assert {:error, :provider_final_proof_invalid} = ProviderRelease.validate_final_payload(nil, marker, "hash")
 
     assert {:error, :provider_final_proof_invalid} =
@@ -76,6 +78,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryProviderReleaseTest d
 
     assert {:error, :provider_final_operation_mismatch} =
              ProviderRelease.validate_operation(nil, marker, payload, "", <<0::256>>)
+
+    {files, operation_marker, operation_payload, envelope_bytes, public_key} = operation_fixture()
+
+    assert {:error, :provider_final_operation_mismatch} =
+             ProviderRelease.validate_operation(Map.delete(files, :confirmation), operation_marker, operation_payload, envelope_bytes, public_key)
+
+    assert {:error, :provider_final_operation_mismatch} =
+             ProviderRelease.validate_operation(Map.put(files, :prepare_request, nil), operation_marker, operation_payload, envelope_bytes, public_key)
 
     assert {:error, :provider_proof_invalid} = ProviderRelease.canonical_proof(nil)
     assert {:error, :provider_proof_invalid} = ProviderRelease.canonical_proof(%{"extra" => true})
