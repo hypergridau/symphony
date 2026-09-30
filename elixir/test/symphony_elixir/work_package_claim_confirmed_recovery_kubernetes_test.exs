@@ -56,12 +56,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
       }
     }
 
-    assert {:error, :claim_resources_present} = ConfirmedRecoveryKubernetes.complete_resources_absent([job], @claim, :job)
-    assert {:error, :claim_resources_present} = ConfirmedRecoveryKubernetes.complete_resources_absent([pod], @claim, :pod)
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([job], @claim, :job)
+
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([pod], @claim, :pod)
   end
 
   test "malformed entries and absent data fail closed" do
-    assert {:error, :claim_resources_present} = ConfirmedRecoveryKubernetes.complete_resources_absent([%{}], @claim, :job)
+    assert {:error, :claim_resources_present} =
+             ConfirmedRecoveryKubernetes.complete_resources_absent([%{}], @claim, :job)
+
     assert {:error, :claim_resources_present} = ConfirmedRecoveryKubernetes.complete_resources_absent(nil, @claim, :pod)
   end
 end

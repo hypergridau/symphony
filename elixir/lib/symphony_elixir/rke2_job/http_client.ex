@@ -63,11 +63,13 @@ defmodule SymphonyElixir.RKE2Job.HTTPClient do
   end
 
   @doc "Returns the complete namespace JobList across stable-RV pages."
-  @spec list_jobs_complete(String.t(), term()) :: {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
+  @spec list_jobs_complete(String.t(), term()) ::
+          {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
   def list_jobs_complete(namespace, context), do: list_complete(:jobs, namespace, context)
 
   @doc "Returns the complete namespace PodList across stable-RV pages."
-  @spec list_pods_complete(String.t(), term()) :: {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
+  @spec list_pods_complete(String.t(), term()) ::
+          {:ok, %{items: [map()], resource_version: String.t()}} | {:error, term()}
   def list_pods_complete(namespace, context), do: list_complete(:pods, namespace, context)
 
   @doc "Reads the named PVC from the exact configured namespace for OAuth slot identity checks."

@@ -116,16 +116,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
   end
 
   defp valid_resources(items, kind) do
-    Enum.all?(items, fn item ->
-      metadata = item["metadata"]
-
-      is_map(metadata) and metadata["namespace"] == @namespace and is_binary(metadata["uid"]) and metadata["uid"] != "" and
-        is_binary(metadata["name"]) and metadata["name"] != "" and
-        (is_nil(metadata["labels"]) or is_map(metadata["labels"])) and
-        (is_nil(metadata["annotations"]) or is_map(metadata["annotations"])) and
-        (kind == :pod or item["kind"] in [nil, "Job"])
-    end)
+    Enum.all?(items, &valid_resource?(&1, kind))
   end
+
+  defp valid_resource?(item, kind) do
+    metadata = item["metadata"]
+    valid_resource_metadata?(metadata) and valid_resource_kind?(item, kind)
+  end
+
+  defp valid_resource_metadata?(metadata) do
+    is_map(metadata) and metadata["namespace"] == @namespace and nonempty?(metadata["uid"]) and
+      nonempty?(metadata["name"]) and valid_map_or_nil?(metadata["labels"]) and
+      valid_map_or_nil?(metadata["annotations"])
+  end
+
+  defp valid_resource_kind?(_item, :pod), do: true
+  defp valid_resource_kind?(item, :job), do: item["kind"] in [nil, "Job"]
+  defp nonempty?(value), do: is_binary(value) and value != ""
+  defp valid_map_or_nil?(nil), do: true
+  defp valid_map_or_nil?(value), do: is_map(value)
 
   defp matching_claim_resource?(resource, claim, kind) do
     metadata = resource["metadata"] || %{}

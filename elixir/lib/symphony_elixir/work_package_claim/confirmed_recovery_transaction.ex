@@ -915,19 +915,23 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
       {"responsibilityGraph", runtime.responsibility_graph_path, "responsibilityGraphSHA256"}
     ]
 
-    if Enum.all?(current, fn {name, path, preimage_key} ->
-         case File.read(path) do
-           {:ok, bytes} ->
-             current_sha = digest(bytes)
-             current_sha == marker["preimages"][preimage_key] or current_sha == marker["postimages"][name]["sha256"]
-
-           _ ->
-             false
-         end
-       end) do
+    if Enum.all?(current, &current_image_valid?(&1, marker)) do
       :ok
     else
       {:error, :transaction_preimage_changed}
+    end
+  end
+
+  defp current_image_valid?({name, path, preimage_key}, marker) do
+    case File.read(path) do
+      {:ok, bytes} ->
+        current_sha = digest(bytes)
+        preimage_sha = marker["preimages"][preimage_key]
+        postimage_sha = marker["postimages"][name]["sha256"]
+        current_sha == preimage_sha or current_sha == postimage_sha
+
+      _ ->
+        false
     end
   end
 
@@ -937,15 +941,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          {:ok, state} <- decode.(bytes),
          {:ok, current} <- File.read(path),
          decision <- classify_image(current, marker_preimage_for(marker, name), bytes) do
-      case decision do
-        :already_applied -> :ok
-        :write -> with :ok <- save.(path, state), do: fsync_directory(Path.dirname(path))
-        {:error, _reason} = error -> error
-      end
+      persist_decision(decision, path, state, save)
     else
       _ -> {:error, :invalid_transaction_postimage}
     end
   end
+
+  defp persist_decision(:already_applied, _path, _state, _save), do: :ok
+
+  defp persist_decision(:write, path, state, save) do
+    with :ok <- save.(path, state), do: fsync_directory(Path.dirname(path))
+  end
+
+  defp persist_decision({:error, _reason} = error, _path, _state, _save), do: error
 
   defp marker_preimage_for(marker, "claimJournal"), do: marker["preimages"]["claimJournalSHA256"]
   defp marker_preimage_for(marker, "fence"), do: marker["preimages"]["fenceSHA256"]
@@ -958,15 +966,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
       "responsibilityGraph" => runtime.responsibility_graph_path
     }
 
-    if Enum.all?(paths, fn {name, path} ->
-         case File.read(path) do
-           {:ok, bytes} -> digest(bytes) == marker["postimages"][name]["sha256"]
-           _ -> false
-         end
-       end) do
+    if Enum.all?(paths, &postimage_matches?(&1, marker)) do
       :ok
     else
       {:error, :hgs740_postimage_mismatch}
+    end
+  end
+
+  defp postimage_matches?({name, path}, marker) do
+    case File.read(path) do
+      {:ok, bytes} -> digest(bytes) == marker["postimages"][name]["sha256"]
+      _ -> false
     end
   end
 
@@ -1089,25 +1099,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp verify_issue_markers(issues) do
     Enum.reduce_while(issues, :ok, fn issue_id, :ok ->
-      marker_path = marker_path(issue_id)
-
-      case read_trusted_evidence(marker_path) do
-        {:error, :enoent} ->
-          case no_marker_evidence_policy(issue_id) do
-            :ok -> {:cont, :ok}
-            error -> {:halt, error}
-          end
-
-        {:ok, bytes} ->
-          case verify_startup_marker(issue_id, bytes) do
-            :ok -> {:cont, :ok}
-            error -> {:halt, error}
-          end
-
-        _ ->
-          {:halt, {:error, :hgs740_startup_held_closed}}
+      case verify_issue_marker(issue_id) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
       end
     end)
+  end
+
+  defp verify_issue_marker(issue_id) do
+    case read_trusted_evidence(marker_path(issue_id)) do
+      {:error, :enoent} -> no_marker_evidence_policy(issue_id)
+      {:ok, bytes} -> verify_startup_marker(issue_id, bytes)
+      _ -> {:error, :hgs740_startup_held_closed}
+    end
   end
 
   defp no_marker_evidence_policy(issue_id) do
@@ -1144,10 +1148,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp verify_marker_status(%{"status" => "local_applied"} = marker) do
-    with :ok <- require_paused_gate(),
-         :ok <- verify_marker_state_postimages(marker) do
-      :ok
-    end
+    with :ok <- require_paused_gate(), do: verify_marker_state_postimages(marker)
   end
 
   defp verify_marker_status(%{"status" => "complete"} = marker), do: verify_completed_marker(marker)
@@ -1285,12 +1286,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     with true <- runtime.journal_path == expected_journal,
          true <-
            runtime.execution_fence_path == Path.join(expected_state_dir, "execution-fence.json"),
-         true <- runtime.responsibility_graph_path == Path.join(expected_state_dir, "responsibility-graph.json"),
-         :ok <- trusted_root_state_files([runtime.journal_path, runtime.execution_fence_path, runtime.responsibility_graph_path]) do
+         true <-
+           runtime.responsibility_graph_path == Path.join(expected_state_dir, "responsibility-graph.json"),
+         :ok <- trusted_root_state_files(runtime_state_paths(runtime)) do
       :ok
     else
       _ -> {:error, :untrusted_pool_state_path}
     end
+  end
+
+  defp runtime_state_paths(runtime) do
+    [runtime.journal_path, runtime.execution_fence_path, runtime.responsibility_graph_path]
   end
 
   defp trusted_root_state_files(paths) do
@@ -1397,14 +1403,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp ensure_evidence_directory(issue_id) do
     directory = marker_directory(issue_id)
-    with :ok <- trusted_evidence_directory(directory), do: :ok
+    trusted_evidence_directory(directory)
   end
 
   defp durable_create(path, bytes) do
-    with :ok <- exclusive_write_synced(path, bytes),
-         :ok <- fsync_directory(Path.dirname(path)) do
-      :ok
-    end
+    with :ok <- exclusive_write_synced(path, bytes), do: fsync_directory(Path.dirname(path))
   end
 
   defp durable_replace(path, bytes) do
@@ -1413,9 +1416,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     result =
       with :ok <- exclusive_write_synced(temporary, bytes),
            :ok <- File.rename(temporary, path),
-           :ok <- fsync_directory(Path.dirname(path)) do
-        :ok
-      end
+           do: fsync_directory(Path.dirname(path))
 
     if result != :ok, do: File.rm(temporary)
     result
@@ -1427,9 +1428,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
         try do
           with :ok <- :file.write(file, bytes),
                :ok <- :file.sync(file),
-               :ok <- File.chmod(path, 0o600) do
-            :ok
-          end
+               do: File.chmod(path, 0o600)
         after
           :file.close(file)
         end
@@ -1523,17 +1522,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp parse_systemd_properties(output) do
     Enum.reduce_while(String.split(output, "\n", trim: true), {:ok, %{}}, fn line, {:ok, values} ->
-      case String.split(line, "=", parts: 2) do
-        [key, value] when key in @systemd_properties ->
-          if Map.has_key?(values, key), do: {:halt, :invalid}, else: {:cont, {:ok, Map.put(values, key, value)}}
-
-        _ ->
-          {:halt, :invalid}
+      case parse_systemd_property(line, values) do
+        {:ok, next_values} -> {:cont, {:ok, next_values}}
+        :invalid -> {:halt, :invalid}
       end
     end)
     |> case do
       {:ok, values} when map_size(values) == length(@systemd_properties) -> {:ok, values}
       _ -> {:error, :invalid_systemd_properties}
+    end
+  end
+
+  defp parse_systemd_property(line, values) do
+    case String.split(line, "=", parts: 2) do
+      [key, value] when key in @systemd_properties and not is_map_key(values, key) ->
+        {:ok, Map.put(values, key, value)}
+
+      _ ->
+        :invalid
     end
   end
 
