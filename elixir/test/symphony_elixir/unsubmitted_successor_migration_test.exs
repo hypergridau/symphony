@@ -178,6 +178,70 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
     assert {:error, _reason} =
              Recovery.prepare(runtime, retired_fence, wrong_lease_graph, context.issue, nil, context.now + 2)
 
+    admission = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      branch: context.execution.branch,
+      worktree: context.execution.worktree
+    }
+
+    {:ok, generation_two_fence, generation_two_token} =
+      ExecutionFence.admit(retired_fence, admission, context.now + 3)
+
+    assert generation_two_token.generation == retired_fence.executions[context.issue.id].generation + 1
+
+    generation_two_session = "worker:#{context.issue.id}:#{generation_two_token.generation}"
+
+    worker = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation_two_token.generation,
+      role: :worker,
+      session_id: generation_two_session,
+      process_id: generation_two_session,
+      branch: context.execution.branch,
+      worktree: context.execution.worktree,
+      linear_state: "admitted",
+      pr_state: "unopened",
+      head: "unobserved",
+      last_heartbeat_at: 0
+    }
+
+    {:ok, generation_two_fence, :registered} =
+      ExecutionFence.register(generation_two_fence, generation_two_token, :worker, worker, context.now + 3)
+
+    generation_two_lease = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation_two_token.generation,
+      session_id: generation_two_session,
+      process_id: generation_two_session
+    }
+
+    {:ok, generation_two_graph} =
+      ResponsibilityGraph.bind_runtime_lease(admitted_graph, entry.responsible.id, generation_two_lease, context.now + 3)
+
+    {:ok, restarted_generation_two_fence} =
+      ExecutionFence.mark_unreconciled_after_restart(generation_two_fence)
+
+    {:ok, restarted_generation_two_graph} =
+      ResponsibilityGraph.mark_unreconciled_after_restart(generation_two_graph)
+
+    assert {:new, released_generation_two_fence, released_generation_two_graph} =
+             Recovery.prepare(
+               runtime,
+               restarted_generation_two_fence,
+               restarted_generation_two_graph,
+               context.issue,
+               nil,
+               context.now + 4
+             )
+
+    assert released_generation_two_fence.executions[context.issue.id].leases[generation_two_session].release_reason ==
+             :claim_not_submitted
+
+    assert released_generation_two_graph.delegations[entry.responsible.id].runtime_lease == nil
+
     changed_entry = update_in(entry, [:responsible, :budget, :max_tokens], &(&1 + 1))
     changed_manifest = replace_entry(runtime.managed_delegations, changed_entry)
 

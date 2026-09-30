@@ -78,12 +78,15 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
     end
   end
 
-  defp retired_successor_graph?(%{managed_delegations: %{entries: entries}}, graph, issue_id) when is_list(entries) do
+  defp retired_successor_graph?(%{managed_delegations: %{entries: entries}}, graph, issue_id, generation)
+       when is_list(entries) and is_integer(generation) do
     case Enum.find(entries, &(&1.issue_id == issue_id)) do
       %{prior_unsubmitted_authority: %{accountable_id: accountable_id, responsible_id: responsible_id}} ->
         with %{status: :revoked, terminal_evidence: receipt} <- Map.get(graph.delegations, accountable_id),
              %{status: :revoked, terminal_evidence: ^receipt} <- Map.get(graph.delegations, responsible_id),
-             true <- is_map(receipt) and receipt["type"] == "unsubmitted_successor" do
+             true <-
+               is_map(receipt) and receipt["type"] == "unsubmitted_successor" and
+                 receipt["generation"] == generation do
           true
         else
           _ -> false
@@ -94,10 +97,10 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
     end
   end
 
-  defp retired_successor_graph?(_runtime, _graph, _issue_id), do: false
+  defp retired_successor_graph?(_runtime, _graph, _issue_id, _generation), do: false
 
   defp prepare_nonterminal_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts) do
-    if retired_successor_graph?(runtime, graph, issue.id) do
+    if retired_successor_graph?(runtime, graph, issue.id, execution.generation) do
       prepare_retired_unsubmitted_successor(runtime, fence, graph, issue, attempt, now_ms, execution)
     else
       prepare_claim_by_abandonment(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
