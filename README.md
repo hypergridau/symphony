@@ -40,6 +40,9 @@ operator-issued delegation manifest; an empty manifest is signed too.
 It creates responsibility only for the exact freshly eligible issue, through the existing graph
 owner, and keeps successor admission behind predecessor cleanup and provider claims. A ready label
 does not grant execution authority. See [responsibility delegation](docs/responsibility-delegation.md).
+Each signed work-package ID must match the provider's canonical projection, and correction of an
+active never-submitted grant requires a distinct signed successor plus the paused, evidence-bound
+operator retirement path; prior grant and fence records remain auditable.
 
 Model selection is also subject to that authority: manifest-managed workers default to GPT-6
 Luna high, escalating to xhigh and max only after failed attempts. The optional

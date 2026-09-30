@@ -28,6 +28,22 @@ defmodule SymphonyElixir.ExecutionFence do
     :provider_projection_id,
     :workspace
   ]
+  @successor_retirement_fields [
+    :type,
+    :repository_ref,
+    :managed_project_profile_id,
+    :prior_accountable_id,
+    :prior_responsible_id,
+    :prior_accountable_digest,
+    :prior_responsible_digest,
+    :successor_accountable_id,
+    :successor_responsible_id,
+    :successor_accountable_digest,
+    :successor_responsible_digest,
+    :manifest_sha256,
+    :signer_key_sha256,
+    :observation_sha256
+  ]
 
   @type token :: %{issue_id: String.t(), generation: pos_integer()}
   @type state :: %{
@@ -208,13 +224,49 @@ defmodule SymphonyElixir.ExecutionFence do
   end
 
   defp valid_unsubmitted_retirement_evidence?(evidence) do
-    is_binary(Map.get(evidence, :issue_id)) and positive_integer?(Map.get(evidence, :generation)) and
-      present_string?(Map.get(evidence, :linear_state)) and
-      present_string?(Map.get(evidence, :provider_projection_id)) and
-      present_string?(Map.get(evidence, :evidence_ref)) and
-      Enum.all?([:provider_claim, :active_process, :local_claim, :workspace], &(Map.get(evidence, &1) == :absent)) and
-      Enum.sort(Map.keys(evidence)) == @retirement_evidence_keys
+    base_valid? =
+      is_binary(Map.get(evidence, :issue_id)) and positive_integer?(Map.get(evidence, :generation)) and
+        present_string?(Map.get(evidence, :linear_state)) and
+        present_string?(Map.get(evidence, :provider_projection_id)) and
+        present_string?(Map.get(evidence, :evidence_ref)) and
+        Enum.all?([:provider_claim, :active_process, :local_claim, :workspace], &(Map.get(evidence, &1) == :absent))
+
+    fields = Enum.sort(Map.keys(evidence))
+
+    base_valid? and
+      (fields == Enum.sort(@retirement_evidence_keys) or
+         (fields == Enum.sort(@retirement_evidence_keys ++ @successor_retirement_fields) and
+            valid_successor_retirement_evidence?(evidence)))
   end
+
+  defp valid_successor_retirement_evidence?(evidence) do
+    type_valid? = Map.get(evidence, :type) == "unsubmitted_successor"
+
+    text_fields = [
+      :repository_ref,
+      :managed_project_profile_id,
+      :prior_accountable_id,
+      :prior_responsible_id,
+      :successor_accountable_id,
+      :successor_responsible_id
+    ]
+
+    digest_fields = [
+      :prior_accountable_digest,
+      :prior_responsible_digest,
+      :successor_accountable_digest,
+      :successor_responsible_digest,
+      :manifest_sha256,
+      :signer_key_sha256,
+      :observation_sha256
+    ]
+
+    type_valid? and Enum.all?(text_fields, &present_string?(Map.get(evidence, &1))) and
+      Enum.all?(digest_fields, &valid_sha256?(Map.get(evidence, &1)))
+  end
+
+  defp valid_sha256?(value) when is_binary(value), do: Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+  defp valid_sha256?(_value), do: false
 
   @doc "Returns a sanitized, deterministic projection for operator/API observability."
   @spec snapshot(state()) :: map() | {:error, :invalid_state}

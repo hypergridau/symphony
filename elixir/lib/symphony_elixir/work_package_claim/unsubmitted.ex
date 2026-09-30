@@ -224,6 +224,50 @@ defmodule SymphonyElixir.WorkPackageClaim.Unsubmitted do
 
   def released_without_workspace?(_runtime, _fence, _graph, _execution, _now_ms), do: false
 
+  @doc false
+  @spec reconcile_restart_blocked_pair(map(), String.t(), String.t(), map(), non_neg_integer()) ::
+          {:ok, map()} | {:error, term()}
+  def reconcile_restart_blocked_pair(graph, parent_id, responsible_id, lease, now_ms)
+      when is_map(graph) and is_binary(parent_id) and is_binary(responsible_id) and is_map(lease) and
+             is_integer(now_ms) and now_ms >= 0 do
+    with :ok <- ResponsibilityGraph.validate(graph),
+         %{role: :accountable, status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: nil} <-
+           graph.delegations[parent_id],
+         %{
+           role: :responsible,
+           status: :blocked,
+           blocked_on: :restart_reconciliation,
+           parent_delegation_id: ^parent_id,
+           runtime_lease: ^lease
+         } <- graph.delegations[responsible_id],
+         :ok <- lease_matches_delegation(lease, graph.delegations[responsible_id]),
+         {:ok, graph} <- reconcile_parent(graph, parent_id, now_ms),
+         {:ok, graph} <- reconcile_responsible(graph, responsible_id, lease, now_ms) do
+      {:ok, graph}
+    else
+      _ -> {:error, :claim_recovery_identity_conflict}
+    end
+  end
+
+  def reconcile_restart_blocked_pair(_graph, _parent_id, _responsible_id, _lease, _now_ms),
+    do: {:error, :claim_recovery_identity_conflict}
+
+  defp lease_matches_delegation(
+         %{
+           issue_id: issue_id,
+           repository: repository,
+           generation: generation,
+           session_id: session_id,
+           process_id: process_id
+         },
+         %{scope: %{issue_id: issue_id, repository: repository}}
+       )
+       when is_binary(issue_id) and is_binary(repository) and is_integer(generation) and generation > 0 and
+              is_binary(session_id) and session_id != "" and is_binary(process_id) and process_id != "",
+       do: :ok
+
+  defp lease_matches_delegation(_lease, _delegation), do: {:error, :claim_recovery_identity_conflict}
+
   defp matching_authorization?(%{managed_project_profile_id: profile, managed_delegations: manifest}, graph, execution) do
     with %{managed_project_profile_id: ^profile, repository_ref: repository, entries: entries} <- manifest,
          true <- repository == execution.repository,

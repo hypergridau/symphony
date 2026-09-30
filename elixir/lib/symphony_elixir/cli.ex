@@ -4,6 +4,7 @@ defmodule SymphonyElixir.CLI do
   """
 
   alias SymphonyElixir.{LogFile, ResponsibilityBootstrap}
+  alias SymphonyElixir.UnsubmittedSuccessorRetirement
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -27,12 +28,91 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case args do
-      ["--assignment-json" | _worker_args] -> WorkerCLI.main(args)
-      ["--verify-auth-cache"] -> WorkerCLI.main(args)
-      _ -> main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    if "--retire-unsubmitted-successor" in args do
+      dispatch_or_start(args)
+    else
+      dispatch_regular(args)
     end
   end
+
+  @spec dispatch_regular([String.t()]) :: no_return()
+  defp dispatch_regular(args) do
+    case args do
+      ["--assignment-json" | _worker_args] ->
+        WorkerCLI.main(args)
+
+      ["--verify-auth-cache"] ->
+        WorkerCLI.main(args)
+
+      _ ->
+        main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    end
+  end
+
+  @doc false
+  @spec dispatch_unsubmitted_successor_retirement(
+          [String.t()],
+          (-> ensure_started_result()),
+          (String.t(), String.t() -> {:ok, :retired | :already_retired} | {:error, term()})
+        ) ::
+          {:retirement, {:ok, :retired | :already_retired} | {:error, String.t()}}
+          | {:normal, (-> ensure_started_result())}
+  def dispatch_unsubmitted_successor_retirement(args, ensure_all_started, execute)
+      when is_list(args) and is_function(ensure_all_started, 0) and is_function(execute, 2) do
+    if "--retire-unsubmitted-successor" in args do
+      {:retirement, evaluate_unsubmitted_successor_retirement(args, execute)}
+    else
+      {:normal, ensure_all_started}
+    end
+  end
+
+  @spec dispatch_or_start([String.t()]) :: no_return()
+  defp dispatch_or_start(args) do
+    case dispatch_unsubmitted_successor_retirement(
+           args,
+           fn -> Application.ensure_all_started(:symphony_elixir) end,
+           &UnsubmittedSuccessorRetirement.execute/2
+         ) do
+      {:retirement, {:ok, result}} ->
+        IO.puts("unsubmitted successor retirement #{result}")
+        System.halt(0)
+
+      {:retirement, {:error, reason}} ->
+        IO.puts(:stderr, "unsubmitted successor retirement held closed: #{reason}")
+        System.halt(1)
+
+      {:normal, ensure_all_started} ->
+        main(args, ensure_all_started)
+    end
+  end
+
+  @doc false
+  @spec evaluate_unsubmitted_successor_retirement(
+          [String.t()],
+          (String.t(), String.t() -> {:ok, :retired | :already_retired} | {:error, term()})
+        ) :: {:ok, :retired | :already_retired} | {:error, String.t()}
+  def evaluate_unsubmitted_successor_retirement(
+        ["--retire-unsubmitted-successor", "--workflow", workflow_path, identifier],
+        execute
+      )
+      when is_function(execute, 2) do
+    case execute.(identifier, workflow_path) do
+      {:ok, result} when result in [:retired, :already_retired] -> {:ok, result}
+      {:error, reason} -> {:error, safe_retirement_reason(reason)}
+      _ -> {:error, retirement_usage_message()}
+    end
+  end
+
+  def evaluate_unsubmitted_successor_retirement(_args, _execute),
+    do: {:error, retirement_usage_message()}
+
+  defp retirement_usage_message do
+    "Usage: symphony --retire-unsubmitted-successor --workflow <trusted-absolute-path> <issue-identifier>"
+  end
+
+  defp safe_retirement_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_retirement_reason({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_retirement_reason(_reason), do: "invalid_authority_or_evidence"
 
   @doc false
   @spec main([String.t()], (-> ensure_started_result())) :: no_return()
@@ -109,25 +189,24 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp maybe_activate_responsibility_graph(opts, deps) do
-    if Keyword.get(opts, @activation_switch, false) do
-      case Map.get(deps, :activate_responsibility_graph) do
-        callback when is_function(callback, 1) ->
-          case callback.(System.system_time(:millisecond)) do
-            :ok ->
-              :ok
+    case {Keyword.get(opts, @activation_switch, false), Map.get(deps, :activate_responsibility_graph)} do
+      {false, _callback} ->
+        :ok
 
-            {:error, reason} ->
-              {:error, "Failed to activate responsibility graph: #{inspect(reason)}"}
+      {true, callback} when is_function(callback, 1) ->
+        case callback.(System.system_time(:millisecond)) do
+          :ok ->
+            :ok
 
-            result ->
-              {:error, "Failed to activate responsibility graph: #{inspect(result)}"}
-          end
+          {:error, reason} ->
+            {:error, "Failed to activate responsibility graph: #{inspect(reason)}"}
 
-        _ ->
-          {:error, "Responsibility graph activation is unavailable"}
-      end
-    else
-      :ok
+          result ->
+            {:error, "Failed to activate responsibility graph: #{inspect(result)}"}
+        end
+
+      {true, _callback} ->
+        {:error, "Responsibility graph activation is unavailable"}
     end
   end
 
