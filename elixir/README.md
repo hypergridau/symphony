@@ -340,6 +340,16 @@ Pod absence snapshots, and a fresh provider readback showing the exact claimed/h
 Unknown fields, incomplete snapshots, a changed tuple, stale evidence, or another signing key
 fail closed. The verifier does not write state or provide a recovery command; a separate
 write-ahead transition and startup guard are required before this evidence can authorize recovery.
+Its caller must supply the expected one-shot nonce and the exact pre-mutation SHA-256 values for
+the claim journal, execution fence, and responsibility graph; all four values must match the
+signed payload. The later WAL driver must durably consume that nonce before the first state write,
+re-read and match those three exact preimages under the claim lock, and refuse replay after use.
+The verifier alone does not consume a nonce or attest that the local preimages still match.
+The outer signed payload and envelope use compact UTF-8 JSON with lexically sorted object keys;
+the nested HGS-485 observation keeps its existing insertion-ordered evidence hash.
+Before transition, Symphony also recomputes the predecessor retirement `evidence_ref` from the
+persisted receipt fields using the original deterministic Erlang term encoding; the candidate
+does not need to reproduce that encoding in Python.
 
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.

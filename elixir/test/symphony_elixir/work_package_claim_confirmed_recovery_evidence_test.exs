@@ -9,6 +9,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   @repository "hypergrid.au/symphony"
   @reservation "reservation-gen2"
   @assignment_sha String.duplicate("a", 64)
+  @nonce "11111111-2222-4333-8444-555555555501"
+  @fence_sha String.duplicate("c", 64)
+  @journal_sha String.duplicate("d", 64)
+  @graph_sha String.duplicate("9", 64)
   @pool "midgard"
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
 
@@ -46,6 +50,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_valid(%{payload | "assignmentSHA256" => String.duplicate("c", 64)})
   end
 
+  test "requires the expected nonce and exact journal, fence, and graph preimages" do
+    payload = payload()
+    refute_valid(put_in(payload, ["nonce"], "11111111-2222-4333-8444-555555555502"))
+    refute_valid(put_in(payload, ["observation", "fenceSHA256"], String.duplicate("f", 64)))
+    refute_valid(put_in(payload, ["observation", "claimJournalSHA256"], String.duplicate("f", 64)))
+    refute_valid(put_in(payload, ["observation", "responsibilityGraphSHA256"], String.duplicate("f", 64)))
+  end
+
   test "rejects unknown signing keys and invalid detached envelopes" do
     {public, _private} = :crypto.generate_key(:eddsa, :ed25519)
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify("{}", public, bindings())
@@ -55,13 +67,46 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   test "provider tuple digest uses the HGS485 field order and sorted scope keys" do
     claim = claim()
     assert Evidence.tuple_digest(claim) == Evidence.tuple_digest(%{claim | "scopeKeys" => Enum.reverse(claim["scopeKeys"])})
-    refute Evidence.tuple_digest(claim) == nil
+    assert Evidence.tuple_digest(claim) == "98786bf424799b5c00d56df82356d2d0dc56d7d9e35e0e754b7ee67e75959f7d"
+  end
+
+  test "retirement receipt evidence uses the producer's deterministic ETF tuple digest" do
+    receipt = predecessor(claim())["receipt"]
+    assert Evidence.retirement_evidence_ref(receipt) == "28c40b36c7a008a8eb0cbe39d91f576f4968815d0085be9d3009cd2de8681289"
+  end
+
+  test "canonical JSON and a detached Ed25519 envelope round-trip with an ephemeral key" do
+    assert Evidence.canonical_json(%{"z" => 1, "a" => "é"}) == "{\"a\":\"é\",\"z\":1}"
+
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+    payload_bytes = Evidence.canonical_json(payload())
+    signature = :crypto.sign(:eddsa, :none, Evidence.signature_message(payload_bytes), [private, :ed25519])
+
+    envelope =
+      Evidence.canonical_json(%{
+        "payload" => Base.url_encode64(payload_bytes, padding: false),
+        "signature" => Base.url_encode64(signature, padding: false)
+      })
+
+    assert {:ok, _payload} = Evidence.verify_test_envelope(envelope, public, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(envelope, public, bindings())
   end
 
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
 
   defp bindings do
-    %{pool: @pool, issue_id: @issue, generation: 2, reservation_id: @reservation, assignment_sha256: @assignment_sha, now_ms: @now_ms}
+    %{
+      pool: @pool,
+      issue_id: @issue,
+      generation: 2,
+      reservation_id: @reservation,
+      assignment_sha256: @assignment_sha,
+      nonce: @nonce,
+      fence_sha256: @fence_sha,
+      claim_journal_sha256: @journal_sha,
+      responsibility_graph_sha256: @graph_sha,
+      now_ms: @now_ms
+    }
   end
 
   defp payload do
@@ -77,7 +122,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
       "assignmentSHA256" => @assignment_sha,
       "issuedAt" => "2026-09-30T09:59:50Z",
       "expiresAt" => "2026-09-30T10:00:30Z",
-      "nonce" => "11111111-2222-4333-8444-555555555501",
+      "nonce" => @nonce,
       "observation" => observation(claim, observed),
       "providerHeld" => provider_readback(claim, "2026-09-30T09:59:40Z")
     }
@@ -108,8 +153,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     %{
       "expected" => claim,
       "localGenerationMax" => 2,
-      "fenceSHA256" => String.duplicate("c", 64),
-      "claimJournalSHA256" => String.duplicate("d", 64),
+      "fenceSHA256" => @fence_sha,
+      "claimJournalSHA256" => @journal_sha,
+      "responsibilityGraphSHA256" => @graph_sha,
       "globalPause" => true,
       "runnerStopped" => true,
       "neverSpawned" => true,
@@ -198,7 +244,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
 
     receipt = %{
       "active_process" => "absent",
-      "evidence_ref" => "sha256:" <> String.duplicate("1", 64),
+      "evidence_ref" => "28c40b36c7a008a8eb0cbe39d91f576f4968815d0085be9d3009cd2de8681289",
       "generation" => 1,
       "issue_id" => @issue,
       "linear_state" => "In Progress",

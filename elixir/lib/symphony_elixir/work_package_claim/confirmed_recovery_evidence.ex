@@ -11,7 +11,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
   @claim_fields ~w(projectionId reservationId workspaceId companyId issueId runnerId managedProjectProfileId repositoryRef scopeKeys generation sessionId processId responsibleDelegationId executionFenceToken runtimeLeaseId nonceHash)
   @payload_fields ~w(contractVersion pool issueId generation reservationId assignmentSHA256 issuedAt expiresAt nonce observation providerHeld)
-  @observation_fields ~w(expected localGenerationMax fenceSHA256 claimJournalSHA256 globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent hostIdentity bootId observedAt witnesses witnessLogSHA256 dispatchPhase kubernetes predecessorRetirement serviceUnits witnessUnits turnsAbsent)
+  @observation_fields ~w(expected localGenerationMax fenceSHA256 claimJournalSHA256 responsibilityGraphSHA256 globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent hostIdentity bootId observedAt witnesses witnessLogSHA256 dispatchPhase kubernetes predecessorRetirement serviceUnits witnessUnits turnsAbsent)
   @provider_fields ~w(observedAt sourceIdentity assignmentDigest expected projectionState mutationState reservationState executionCapacityState scopeState)
   @retirement_fields ~w(active_process evidence_ref generation issue_id linear_state local_claim provider_claim provider_projection_id retired_at_ms workspace type repository_ref managed_project_profile_id prior_accountable_id prior_responsible_id prior_accountable_digest prior_responsible_digest successor_accountable_id successor_responsible_id successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256)
   @execution_fields ~w(issue_id repository worker_host generation branch worktree status ownership leases terminal retirement cleanup cleanup_receipt termination_unconfirmed admitted_at_ms cleaned_at_ms)
@@ -25,6 +25,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
           required(:generation) => pos_integer(),
           required(:reservation_id) => String.t(),
           required(:assignment_sha256) => String.t(),
+          required(:nonce) => String.t(),
+          required(:fence_sha256) => String.t(),
+          required(:claim_journal_sha256) => String.t(),
+          required(:responsibility_graph_sha256) => String.t(),
           required(:now_ms) => non_neg_integer()
         }
 
@@ -33,13 +37,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   def verify(encoded, public_key, bindings)
       when is_binary(encoded) and is_binary(public_key) and is_map(bindings) do
     with :ok <- trusted_public_key(public_key),
-         {:ok, envelope} <- decode_canonical_object(encoded),
-         true <- exact_keys?(envelope, ~w(payload signature)),
-         {:ok, payload_bytes} <- Base.url_decode64(envelope["payload"], padding: false),
-         {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
-         true <- byte_size(signature) == 64,
-         true <- verify_signature(payload_bytes, signature, public_key),
-         {:ok, payload} <- decode_canonical_object(payload_bytes),
+         {:ok, payload} <- verify_envelope(encoded, public_key),
          :ok <- validate_payload(payload, bindings) do
       {:ok, payload}
     else
@@ -53,6 +51,62 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   def verify(_encoded, _public_key, _bindings),
     do: {:error, :invalid_confirmed_recovery_evidence}
+
+  if Mix.env() == :test do
+    @doc false
+    @spec verify_test_envelope(binary(), binary(), bindings()) ::
+            {:ok, map()} | {:error, :invalid_confirmed_recovery_evidence}
+    def verify_test_envelope(encoded, public_key, bindings)
+        when is_binary(encoded) and is_binary(public_key) and is_map(bindings) do
+      with {:ok, payload} <- verify_envelope(encoded, public_key),
+           :ok <- validate_payload(payload, bindings) do
+        {:ok, payload}
+      else
+        _ -> {:error, :invalid_confirmed_recovery_evidence}
+      end
+    rescue
+      _ -> {:error, :invalid_confirmed_recovery_evidence}
+    catch
+      _kind, _reason -> {:error, :invalid_confirmed_recovery_evidence}
+    end
+
+    def verify_test_envelope(_encoded, _public_key, _bindings),
+      do: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp verify_envelope(encoded, public_key) do
+    with {:ok, envelope} <- decode_canonical_object(encoded),
+         true <- exact_keys?(envelope, ~w(payload signature)),
+         {:ok, payload_bytes} <- Base.url_decode64(envelope["payload"], padding: false),
+         {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
+         true <- byte_size(signature) == 64,
+         true <- verify_signature(payload_bytes, signature, public_key),
+         {:ok, payload} <- decode_canonical_object(payload_bytes) do
+      {:ok, payload}
+    else
+      _ -> {:error, :invalid_confirmed_recovery_evidence}
+    end
+  end
+
+  @doc false
+  @spec canonical_json(term()) :: binary()
+  def canonical_json(value), do: encode_canonical_json(value)
+
+  defp encode_canonical_json(value) when is_map(value) do
+    entries =
+      value
+      |> Enum.sort_by(fn {key, _value} -> key end)
+      |> Enum.map(fn {key, child} -> [Jason.encode!(key), ":", encode_canonical_json(child)] end)
+
+    ["{", Enum.intersperse(entries, ","), "}"] |> IO.iodata_to_binary()
+  end
+
+  defp encode_canonical_json(value) when is_list(value) do
+    ["[", value |> Enum.map(&encode_canonical_json/1) |> Enum.intersperse(","), "]"]
+    |> IO.iodata_to_binary()
+  end
+
+  defp encode_canonical_json(value), do: Jason.encode!(value)
 
   @doc false
   @spec signature_message(binary()) :: binary()
@@ -89,13 +143,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
     do: {:error, :invalid_confirmed_recovery_evidence}
 
   defp valid_bindings(payload, bindings) do
-    with true <- Enum.sort(Map.keys(bindings)) == Enum.sort(~w(assignment_sha256 generation issue_id now_ms pool reservation_id)a),
+    with true <-
+           Enum.sort(Map.keys(bindings)) ==
+             Enum.sort(~w(assignment_sha256 claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a),
          true <- payload["pool"] in @pools,
          true <- payload["pool"] == bindings.pool,
          true <- payload["issueId"] == bindings.issue_id and uuid?(payload["issueId"]),
          true <- payload["generation"] == 2 and payload["generation"] == bindings.generation,
          true <- payload["reservationId"] == bindings.reservation_id and text?(payload["reservationId"]),
          true <- digest?(payload["assignmentSHA256"]) and payload["assignmentSHA256"] == bindings.assignment_sha256,
+         true <- uuid?(payload["nonce"]) and payload["nonce"] == bindings.nonce,
          true <- is_integer(bindings.now_ms) and bindings.now_ms >= 0 do
       :ok
     else
@@ -108,7 +165,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          true <- observation["dispatchPhase"] == "confirmed" and observation["localGenerationMax"] == 2,
          true <- Enum.all?(~w(globalPause runnerStopped neverSpawned supervisedWorkerAbsent workspaceAbsent turnsAbsent), &(observation[&1] == true)),
          true <- observation["processCount"] == 0,
-         true <- digest?(observation["fenceSHA256"]) and digest?(observation["claimJournalSHA256"]),
+         true <- observation["fenceSHA256"] == bindings.fence_sha256,
+         true <- observation["claimJournalSHA256"] == bindings.claim_journal_sha256,
+         true <- observation["responsibilityGraphSHA256"] == bindings.responsibility_graph_sha256,
+         true <- Enum.all?([bindings.fence_sha256, bindings.claim_journal_sha256, bindings.responsibility_graph_sha256], &digest?/1),
          true <- text?(observation["hostIdentity"]) and text?(observation["bootId"]),
          {:ok, observed_at_ms} <- timestamp_ms(observation["observedAt"]),
          true <- fresh?(observed_at_ms, bindings.now_ms),
@@ -143,28 +203,30 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   defp validate_service_units(service_units, witness_units) do
     expected_witness_units = ["dahlia-claim-witness.service", "dahlia-claim-witness.socket"]
 
-    with true <- is_map(service_units) and Enum.sort(Map.keys(service_units)) == Enum.sort(@pools),
-         true <- is_map(witness_units) and Enum.sort(Map.keys(witness_units)) == Enum.sort(expected_witness_units),
-         true <-
-           Enum.all?(@pools, fn pool ->
-             unit = Map.get(service_units, pool)
-
-             is_map(unit) and exact_keys?(unit, ~w(unit mainPID activeState masked cgroupProcessCount)) and
-               unit["unit"] == "dahlia-symphony@#{pool}.service" and unit["mainPID"] == 0 and
-               unit["activeState"] in ["inactive", "failed"] and unit["masked"] == true and
-               unit["cgroupProcessCount"] == 0
-           end),
-         true <-
-           Enum.all?(expected_witness_units, fn name ->
-             unit = Map.get(witness_units, name)
-
-             is_map(unit) and exact_keys?(unit, ~w(activeState masked)) and
-               unit["activeState"] == "inactive" and unit["masked"] == true
-           end) do
+    with true <- exact_map_keys?(service_units, @pools),
+         true <- exact_map_keys?(witness_units, expected_witness_units),
+         true <- Enum.all?(@pools, &valid_service_unit?(service_units[&1], &1)),
+         true <- Enum.all?(expected_witness_units, &valid_witness_unit?(witness_units[&1])) do
       :ok
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}
     end
+  end
+
+  defp valid_service_unit?(unit, pool) do
+    is_map(unit) and exact_keys?(unit, ~w(unit mainPID activeState masked cgroupProcessCount)) and
+      unit["unit"] == "dahlia-symphony@#{pool}.service" and unit["mainPID"] == 0 and
+      unit["activeState"] in ["inactive", "failed"] and unit["masked"] == true and
+      unit["cgroupProcessCount"] == 0
+  end
+
+  defp valid_witness_unit?(unit) do
+    is_map(unit) and exact_keys?(unit, ~w(activeState masked)) and
+      unit["activeState"] == "inactive" and unit["masked"] == true
+  end
+
+  defp exact_map_keys?(value, expected) do
+    is_map(value) and Enum.sort(Map.keys(value)) == Enum.sort(expected)
   end
 
   defp validate_witness_history(witnesses, log_hashes) do
@@ -220,45 +282,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
     with true <- exact_keys?(execution, @execution_fields),
          true <- exact_keys?(claim, @claim_fields),
          true <- exact_keys?(receipt, @retirement_fields),
-         true <- execution["issue_id"] == payload["issueId"] and execution["generation"] == 1,
-         true <-
-           execution["repository"] == current_claim["repositoryRef"] and
-             execution["status"] == "retired" and execution["cleanup"] == "cleaned" and
-             execution["ownership"] in ["reconciled", "unknown"] and is_nil(execution["terminal"]) and
-             is_nil(execution["cleanup_receipt"]) and execution["termination_unconfirmed"] == false and
-             execution["retirement"] == receipt,
-         true <-
-           claim["issueId"] == payload["issueId"] and claim["generation"] == 1 and
-             claim["repositoryRef"] == current_claim["repositoryRef"] and
-             claim["managedProjectProfileId"] == current_claim["managedProjectProfileId"] and
-             claim["runnerId"] == current_claim["runnerId"] and claim["workspaceId"] == current_claim["workspaceId"] and
-             claim["companyId"] == current_claim["companyId"] and
-             claim["responsibleDelegationId"] == receipt["prior_responsible_id"] and
-             claim["executionFenceToken"] == "#{payload["issueId"]}:1" and
-             claim["runtimeLeaseId"] == claim["sessionId"] and digest?(claim["nonceHash"]),
-         true <-
-           receipt["type"] == "unsubmitted_successor" and receipt["issue_id"] == payload["issueId"] and
-             receipt["generation"] == 1 and receipt["repository_ref"] == current_claim["repositoryRef"] and
-             receipt["managed_project_profile_id"] == current_claim["managedProjectProfileId"] and
-             receipt["provider_projection_id"] == claim["projectionId"],
-         true <-
-           receipt["active_process"] == "absent" and receipt["local_claim"] == "absent" and
-             receipt["provider_claim"] == "absent" and receipt["workspace"] == "absent",
-         true <- text?(receipt["provider_projection_id"]) and is_integer(receipt["retired_at_ms"]) and receipt["retired_at_ms"] > 0,
-         true <-
-           Enum.all?(
-             ~w(prior_accountable_digest prior_responsible_digest successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256),
-             &digest?(receipt[&1])
-           ),
-         true <-
-           Regex.match?(~r/\Asha256:[0-9a-f]{64}\z/, receipt["evidence_ref"]) and
-             text?(receipt["linear_state"]) and receipt["successor_responsible_id"] == current_claim["responsibleDelegationId"],
-         true <- receipt["prior_responsible_id"] == claim["responsibleDelegationId"],
-         true <-
-           receipt["prior_accountable_id"] != receipt["prior_responsible_id"] and
-             receipt["successor_accountable_id"] != receipt["successor_responsible_id"] and
-             receipt["prior_accountable_id"] != receipt["successor_accountable_id"] and
-             receipt["prior_responsible_id"] != receipt["successor_responsible_id"],
+         true <- predecessor_execution_matches?(execution, receipt, payload, current_claim),
+         true <- predecessor_claim_matches?(claim, receipt, payload, current_claim),
+         true <- predecessor_receipt_matches?(receipt, claim, payload, current_claim),
          true <- retired_execution_lease?(execution, claim) do
       :ok
     else
@@ -269,22 +295,104 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   defp validate_predecessor(_predecessor, _payload, _current_claim),
     do: {:error, :invalid_confirmed_recovery_evidence}
 
+  defp predecessor_execution_matches?(execution, receipt, payload, current_claim) do
+    predecessor_execution_identity?(execution, payload, current_claim) and
+      predecessor_execution_retired?(execution) and execution["retirement"] == receipt
+  end
+
+  defp predecessor_execution_identity?(execution, payload, current_claim) do
+    execution["issue_id"] == payload["issueId"] and execution["generation"] == 1 and
+      execution["repository"] == current_claim["repositoryRef"]
+  end
+
+  defp predecessor_execution_retired?(execution) do
+    execution["status"] == "retired" and execution["cleanup"] == "cleaned" and
+      execution["ownership"] in ["reconciled", "unknown"] and is_nil(execution["terminal"]) and
+      is_nil(execution["cleanup_receipt"]) and execution["termination_unconfirmed"] == false
+  end
+
+  defp predecessor_claim_matches?(claim, receipt, payload, current_claim) do
+    predecessor_claim_identity?(claim, payload, current_claim) and
+      predecessor_claim_delegation?(claim, receipt) and
+      claim["executionFenceToken"] == "#{payload["issueId"]}:1" and
+      claim["runtimeLeaseId"] == claim["sessionId"] and digest?(claim["nonceHash"])
+  end
+
+  defp predecessor_claim_identity?(claim, payload, current_claim) do
+    claim["issueId"] == payload["issueId"] and claim["generation"] == 1 and
+      claim["repositoryRef"] == current_claim["repositoryRef"] and
+      claim["managedProjectProfileId"] == current_claim["managedProjectProfileId"] and
+      claim["runnerId"] == current_claim["runnerId"] and claim["workspaceId"] == current_claim["workspaceId"] and
+      claim["companyId"] == current_claim["companyId"]
+  end
+
+  defp predecessor_claim_delegation?(claim, receipt) do
+    claim["responsibleDelegationId"] == receipt["prior_responsible_id"]
+  end
+
+  defp predecessor_receipt_matches?(receipt, claim, payload, current_claim) do
+    predecessor_receipt_identity?(receipt, claim, payload, current_claim) and
+      predecessor_receipt_absence?(receipt) and predecessor_receipt_hashes?(receipt) and
+      predecessor_receipt_delegations?(receipt, claim, current_claim)
+  end
+
+  defp predecessor_receipt_identity?(receipt, claim, payload, current_claim) do
+    receipt["type"] == "unsubmitted_successor" and receipt["issue_id"] == payload["issueId"] and
+      receipt["generation"] == 1 and receipt["repository_ref"] == current_claim["repositoryRef"] and
+      receipt["managed_project_profile_id"] == current_claim["managedProjectProfileId"] and
+      receipt["provider_projection_id"] == claim["projectionId"] and text?(receipt["provider_projection_id"]) and
+      is_integer(receipt["retired_at_ms"]) and receipt["retired_at_ms"] > 0
+  end
+
+  defp predecessor_receipt_absence?(receipt) do
+    receipt["active_process"] == "absent" and receipt["local_claim"] == "absent" and
+      receipt["provider_claim"] == "absent" and receipt["workspace"] == "absent"
+  end
+
+  defp predecessor_receipt_hashes?(receipt) do
+    digest_fields =
+      ~w(prior_accountable_digest prior_responsible_digest successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256)
+
+    Enum.all?(digest_fields, &digest?(receipt[&1])) and
+      retirement_evidence_ref(receipt) == receipt["evidence_ref"] and text?(receipt["linear_state"])
+  end
+
+  defp predecessor_receipt_delegations?(receipt, claim, current_claim) do
+    receipt["successor_responsible_id"] == current_claim["responsibleDelegationId"] and
+      receipt["prior_responsible_id"] == claim["responsibleDelegationId"] and
+      receipt["prior_accountable_id"] != receipt["prior_responsible_id"] and
+      receipt["successor_accountable_id"] != receipt["successor_responsible_id"] and
+      receipt["prior_accountable_id"] != receipt["successor_accountable_id"] and
+      receipt["prior_responsible_id"] != receipt["successor_responsible_id"]
+  end
+
   defp retired_execution_lease?(execution, claim) do
     case Map.to_list(execution["leases"]) do
       [{session_id, lease}] ->
         session_id == claim["sessionId"] and exact_keys?(lease, @lease_fields) and
-          lease["issue_id"] == claim["issueId"] and lease["generation"] == 1 and
-          lease["repository"] == claim["repositoryRef"] and lease["role"] == "worker" and
-          lease["session_id"] == claim["sessionId"] and lease["process_id"] == claim["processId"] and
-          lease["branch"] == execution["branch"] and lease["worktree"] == execution["worktree"] and
-          lease["status"] == "released" and lease["release_reason"] == "claim_not_submitted" and
-          lease["head"] == "unobserved" and lease["last_heartbeat_at"] == 0 and
-          lease["termination_required"] == false and is_nil(lease["termination_confirmed_at_ms"]) and
-          is_nil(lease["termination_evidence_ref"]) and is_nil(lease["termination_evidence"])
+          retired_lease_identity?(lease, claim, execution) and retired_lease_state?(lease) and
+          retired_lease_unobserved?(lease)
 
       _ ->
         false
     end
+  end
+
+  defp retired_lease_identity?(lease, claim, execution) do
+    lease["issue_id"] == claim["issueId"] and lease["generation"] == 1 and
+      lease["repository"] == claim["repositoryRef"] and lease["role"] == "worker" and
+      lease["session_id"] == claim["sessionId"] and lease["process_id"] == claim["processId"] and
+      lease["branch"] == execution["branch"] and lease["worktree"] == execution["worktree"]
+  end
+
+  defp retired_lease_state?(lease) do
+    lease["status"] == "released" and lease["release_reason"] == "claim_not_submitted" and
+      lease["termination_required"] == false and is_nil(lease["termination_confirmed_at_ms"])
+  end
+
+  defp retired_lease_unobserved?(lease) do
+    lease["head"] == "unobserved" and lease["last_heartbeat_at"] == 0 and
+      is_nil(lease["termination_evidence_ref"]) and is_nil(lease["termination_evidence"])
   end
 
   defp validate_provider_readback(readback, payload, bindings) do
@@ -323,6 +431,37 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   def tuple_digest(_claim), do: nil
 
+  @doc false
+  @spec retirement_evidence_ref(map()) :: String.t() | nil
+  def retirement_evidence_ref(receipt) when is_map(receipt) do
+    fields = [
+      "manifest_sha256",
+      "signer_key_sha256",
+      "observation_sha256",
+      "prior_accountable_digest",
+      "prior_responsible_digest",
+      "successor_accountable_id",
+      "successor_responsible_id",
+      "successor_accountable_digest",
+      "successor_responsible_digest"
+    ]
+
+    with true <- Enum.all?(fields, &Map.has_key?(receipt, &1)),
+         true <- Enum.all?(Enum.take(fields, 5) ++ Enum.drop(fields, 7), &digest?(receipt[&1])),
+         true <- text?(receipt["successor_accountable_id"]) and text?(receipt["successor_responsible_id"]) do
+      tuple =
+        {receipt["manifest_sha256"], receipt["signer_key_sha256"], receipt["observation_sha256"], receipt["prior_accountable_digest"], receipt["prior_responsible_digest"],
+         receipt["successor_accountable_id"], receipt["successor_responsible_id"], receipt["successor_accountable_digest"], receipt["successor_responsible_digest"]}
+
+      :crypto.hash(:sha256, :erlang.term_to_binary(tuple, [:deterministic]))
+      |> Base.encode16(case: :lower)
+    else
+      _ -> nil
+    end
+  end
+
+  def retirement_evidence_ref(_receipt), do: nil
+
   defp encode_ordered_claim(claim) do
     fields = [
       "projectionId",
@@ -348,13 +487,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
     fields
     |> Enum.reduce_while({:ok, []}, fn field, {:ok, chunks} ->
       case Jason.encode(Map.fetch!(values, field)) do
-        {:ok, encoded} -> {:cont, {:ok, [chunks, Jason.encode!(field), ":", encoded]}}
+        {:ok, encoded} -> {:cont, {:ok, [chunks, Jason.encode!(field), ":", encoded, ","]}}
         _ -> {:halt, {:error, :invalid_claim}}
       end
     end)
     |> case do
-      {:ok, chunks} -> {:ok, ["{", chunks, "}"] |> IO.iodata_to_binary()}
-      error -> error
+      {:ok, chunks} ->
+        encoded = IO.iodata_to_binary(chunks)
+        {:ok, ["{", String.trim_trailing(encoded, ","), "}"] |> IO.iodata_to_binary()}
+
+      error ->
+        error
     end
   end
 
@@ -380,7 +523,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   defp decode_canonical_object(bytes) do
     with {:ok, value} when is_map(value) <- Jason.decode(bytes),
-         {:ok, canonical} <- Jason.encode(value),
+         canonical <- canonical_json(value),
          true <- canonical == bytes do
       {:ok, value}
     else
