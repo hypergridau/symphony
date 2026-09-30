@@ -210,6 +210,8 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
+  @spec fetch_issues_across_projects_for_test([String.t()], [String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+          {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_across_projects_for_test(slugs, state_names, graphql_fun)
       when is_list(slugs) and is_list(state_names) and is_function(graphql_fun, 2) do
     fetch_across_projects(slugs, fn slug ->
