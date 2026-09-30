@@ -115,32 +115,34 @@ defmodule SymphonyElixir.Linear.Client do
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) when is_list(state_names) do
     normalized_states = Enum.map(state_names, &to_string/1) |> Enum.uniq()
+    fetch_states(normalized_states)
+  end
 
-    case normalized_states do
-      [] ->
-        {:ok, []}
+  defp fetch_states([]), do: {:ok, []}
 
-      states ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
-             {:ok, assignee_filter} <- routing_assignee_filter() do
-          fetch_across_projects(project_slugs(tracker), fn slug -> do_fetch_by_states(slug, states, assignee_filter) end)
-        end
+  defp fetch_states(states) do
+    with {:ok, tracker} <- configured_tracker_for_read(),
+         {:ok, assignee_filter} <- routing_assignee_filter() do
+      fetch_across_projects(project_slugs(tracker), fn slug ->
+        do_fetch_by_states(slug, states, assignee_filter)
+      end)
     end
   end
 
   @spec fetch_issues_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_ids(issue_ids) when is_list(issue_ids) do
     ids = Enum.uniq(issue_ids)
+    fetch_ids(ids)
+  end
 
-    case ids do
-      [] ->
-        {:ok, []}
+  defp fetch_ids([]), do: {:ok, []}
 
-      ids ->
-        with {:ok, tracker} <- configured_tracker_for_read(),
-             {:ok, assignee_filter} <- routing_assignee_filter() do
-          fetch_across_projects(project_slugs(tracker), fn slug -> do_fetch_issue_states(ids, slug, assignee_filter) end)
-        end
+  defp fetch_ids(ids) do
+    with {:ok, tracker} <- configured_tracker_for_read(),
+         {:ok, assignee_filter} <- routing_assignee_filter() do
+      fetch_across_projects(project_slugs(tracker), fn slug ->
+        do_fetch_issue_states(ids, slug, assignee_filter)
+      end)
     end
   end
 
@@ -210,7 +212,11 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec fetch_issues_across_projects_for_test([String.t()], [String.t()], (String.t(), map() -> {:ok, map()} | {:error, term()})) ::
+  @spec fetch_issues_across_projects_for_test(
+          [String.t()],
+          [String.t()],
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) ::
           {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_across_projects_for_test(slugs, state_names, graphql_fun)
       when is_list(slugs) and is_list(state_names) and is_function(graphql_fun, 2) do
@@ -272,7 +278,8 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], 1, strict_project_graphql(project_slug, &graphql/2))
+    graphql_fun = strict_project_graphql(project_slug, &graphql/2)
+    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [], 1, graphql_fun)
   end
 
   defp strict_project_graphql(project_slug, graphql_fun) do
@@ -300,22 +307,23 @@ defmodule SymphonyElixir.Linear.Client do
   defp fetch_across_projects(slugs, fetch) do
     Enum.reduce_while(slugs, {:ok, [], MapSet.new()}, fn slug, {:ok, acc, seen} ->
       case fetch.(slug) do
-        {:ok, issues} ->
-          ids = Enum.map(issues, & &1.id)
-
-          if length(ids) != length(Enum.uniq(ids)) or Enum.any?(ids, &MapSet.member?(seen, &1)) do
-            {:halt, {:error, :linear_project_issue_duplicate}}
-          else
-            {:cont, {:ok, Enum.reverse(issues, acc), Enum.reduce(ids, seen, &MapSet.put(&2, &1))}}
-          end
-
-        {:error, reason} ->
-          {:halt, {:error, reason}}
+        {:ok, issues} -> merge_project_issues(issues, acc, seen)
+        {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
       {:ok, issues, _seen} -> {:ok, Enum.reverse(issues)}
       error -> error
+    end
+  end
+
+  defp merge_project_issues(issues, acc, seen) do
+    ids = Enum.map(issues, & &1.id)
+
+    if length(ids) != length(Enum.uniq(ids)) or Enum.any?(ids, &MapSet.member?(seen, &1)) do
+      {:halt, {:error, :linear_project_issue_duplicate}}
+    else
+      {:cont, {:ok, Enum.reverse(issues, acc), Enum.reduce(ids, seen, &MapSet.put(&2, &1))}}
     end
   end
 
