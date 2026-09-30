@@ -2,6 +2,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
 
@@ -66,6 +67,78 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     refute_received :graph_must_not_be_attempted
     assert {:error, :invalid_replay_request} = ConfirmedRecoveryWAL.replay(:not_a_list, fn _ -> :ok end)
     assert {:error, :invalid_replay_result} = ConfirmedRecoveryWAL.replay([:bad], fn _ -> :skip end)
+  end
+
+  test "completion persists the terminal marker before releasing directory custody" do
+    parent = self()
+
+    assert :ok =
+             ConfirmedRecoveryWAL.commit_then_release(
+               fn ->
+                 send(parent, :terminal_marker_persisted)
+                 :ok
+               end,
+               fn ->
+                 assert_received :terminal_marker_persisted
+                 send(parent, :directory_custody_released)
+                 :ok
+               end
+             )
+
+    assert_received :directory_custody_released
+
+    assert {:error, :synthetic_marker_failure} =
+             ConfirmedRecoveryWAL.commit_then_release(
+               fn -> {:error, :synthetic_marker_failure} end,
+               fn -> send(parent, :custody_must_remain) end
+             )
+
+    refute_received :custody_must_remain
+
+    assert {:error, :invalid_finalization_result} =
+             ConfirmedRecoveryWAL.commit_then_release(fn -> :skipped end, fn -> :ok end)
+  end
+
+  test "completed lineage accepts gen2 release retained in fence history after gen3 admission" do
+    issue_id = "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
+    expected = %{"issueId" => issue_id, "sessionId" => "session-2", "processId" => "process-2", "responsibleDelegationId" => "delegation"}
+
+    gen2 = %{
+      generation: 2,
+      status: :active,
+      ownership: :reconciled,
+      cleanup: :pending,
+      terminal: nil,
+      cleanup_receipt: nil,
+      retirement: nil,
+      termination_unconfirmed: false,
+      leases: %{
+        "session-2" => %{
+          process_id: "process-2",
+          status: :released,
+          release_reason: :spawn_failed,
+          termination_required: false
+        }
+      }
+    }
+
+    fence = %{executions: %{issue_id => %{generation: 3}}, history: [Map.put(gen2, :issue_id, issue_id)]}
+    assert :ok = ConfirmedRecoveryLineage.released_fence_lease(fence, issue_id, expected)
+
+    graph = %{
+      delegations: %{
+        "delegation" => %{runtime_lease: %{issue_id: issue_id, generation: 3}}
+      },
+      events: [
+        %{type: :runtime_lease_released, delegation_id: "delegation", at_ms: 100},
+        %{type: :runtime_lease_bound, delegation_id: "delegation", at_ms: 101}
+      ]
+    }
+
+    assert :ok = ConfirmedRecoveryLineage.released_graph_lease(graph, expected, 100)
+    refute ConfirmedRecoveryLineage.released_graph_lease(graph, expected, 99) == :ok
+    refute ConfirmedRecoveryLineage.released_graph_lease(put_in(graph, [:events, Access.at(1), :at_ms], 100), expected, 100) == :ok
+    refute ConfirmedRecoveryLineage.released_fence_lease(%{fence | history: []}, issue_id, expected) == :ok
   end
 
   test "WAL replay resumes each partial state-write prefix and skips exact postimages" do

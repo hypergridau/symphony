@@ -351,6 +351,31 @@ Before transition, Symphony also recomputes the predecessor retirement `evidence
 persisted receipt fields using the original deterministic Erlang term encoding; the candidate
 does not need to reproduce that encoding in Python.
 
+The root-only transaction CLI is `symphony --apply-hgs740-confirmed-recovery --workflow
+<trusted-WORKFLOW.md> --nonce <proof-nonce> f77e349e-21d9-4bdf-bad3-ce08b302e7e8
+<pool-key>`, followed after HGS-485 provider confirmation by
+`symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md>
+f77e349e-21d9-4bdf-bad3-ce08b302e7e8 <pool-key>`. Startup uses
+`symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key>` before
+normal runtime startup. These entry points require the fixed six-pool workflow mapping,
+paused global gate, and root execution; they emit sanitized failures.
+
+Artifacts live under
+`/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
+the read-only signed observation (`candidate.json`), root-signed proof
+(`confirmed-root-envelope.json`), immutable transition candidate and receipt, and durable
+transaction marker. The marker is written before directory custody changes. While the
+marker is `applying`, startup stays closed and root replay resumes only exact preimage or
+postimage states. `local_applied` also remains closed until HGS-485 confirms the exact held
+claim release and next-generation floor. Completion writes a terminal `complete` marker
+while the runner-writable state anchors are still root-custodied, then restores their
+recorded owner, group, mode, and inode-checked identity as its final mutation. If interrupted
+between those steps, startup denies access and the root completion command revalidates the
+signed proof, provider receipt, Kubernetes absence, and local lineage before restoring the
+anchors. The completed marker must have original anchor metadata at startup. Do not restart
+the pool until root apply/complete succeeds and the drop-in `ExecStartPre` verifier is
+installed from the same attested source build.
+
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the

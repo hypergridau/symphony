@@ -19,6 +19,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   alias SymphonyElixir.WorkPackageClaim.{
     ConfirmedRecoveryEvidence,
     ConfirmedRecoveryKubernetes,
+    ConfirmedRecoveryLineage,
     ConfirmedRecoveryWAL,
     Dispatch,
     Journal
@@ -281,10 +282,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          {:ok, marker_bytes} <- read_trusted_evidence(marker_path),
          {:ok, marker} when is_map(marker) <- Jason.decode(marker_bytes),
          :ok <- validate_marker_identity(marker, issue_id, pool, marker["nonce"]),
-         true <- marker["status"] == "local_applied",
          :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
          :ok <- freeze_state_directories(marker, runtime),
-         :ok <- verify_signed_local_receipt(marker, issue_id),
+         result <- complete_status(marker, issue_id, pool, runtime),
+         {:ok, status} <- result do
+      {:ok, status}
+    else
+      _ -> {:error, :hgs740_completion_held_closed}
+    end
+  end
+
+  defp complete_status(%{"status" => "local_applied"} = marker, issue_id, pool, runtime) do
+    path = marker_path(issue_id)
+
+    with :ok <- verify_signed_local_receipt(marker, issue_id),
          :ok <- verify_postimages(marker, runtime),
          {:ok, provider_proof, provider_payload} <- verify_provider_final_proof(marker, runtime),
          {:ok, candidate} <- read_candidate(issue_id, marker),
@@ -296,12 +307,37 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          :ok <- final_local_release_invariants(marker, runtime, provider_payload),
          :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
          :ok <- ManagedLauncherLock.require_service_stopped(pool),
-         :ok <- complete_marker(marker, marker_path, provider_proof, provider_payload, k8s_readback, runtime) do
+         :ok <- complete_marker(marker, path, provider_proof, provider_payload, k8s_readback, runtime) do
       {:ok, :complete}
     else
       _ -> {:error, :hgs740_completion_held_closed}
     end
   end
+
+  defp complete_status(%{"status" => "complete"} = marker, issue_id, pool, runtime) do
+    with :ok <- verify_signed_local_receipt(marker, issue_id),
+         {:ok, provider_proof, provider_payload} <- verify_provider_final_proof(marker, runtime, false),
+         true <- digest(provider_proof) == marker["providerFinalProofSHA256"],
+         true <- provider_payload["journalSHA256"] == marker["providerJournalSHA256"],
+         :ok <- valid_completed_marker_postconditions(marker, provider_payload),
+         :ok <- release_state_invariants(marker, runtime),
+         {:ok, candidate} <- read_candidate(issue_id, marker),
+         {:ok, _k8s_readback} <-
+           ConfirmedRecoveryKubernetes.observe(
+             Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
+             candidate["kubernetes"]["cluster"]
+           ),
+         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
+         :ok <- ManagedLauncherLock.require_service_stopped(pool),
+         :ok <- validate_state_directories(marker, runtime, :frozen),
+         :ok <- restore_state_directories(marker, runtime) do
+      {:ok, :complete}
+    else
+      _ -> {:error, :hgs740_completion_held_closed}
+    end
+  end
+
+  defp complete_status(_marker, _issue_id, _pool, _runtime), do: {:error, :hgs740_completion_held_closed}
 
   defp read_candidate(issue_id, marker) do
     directory = marker_directory(issue_id)
@@ -685,28 +721,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          reservation when is_map(reservation) <- paths.journal.state.reservations[key],
          %{dispatch: %{phase: "recovery_pending", allocation_id: nil}} <- reservation,
          true <- current_claim(paths.journal.state, expected) == expected,
-         :ok <- released_fence_lease(paths.fence.state, issue_id, expected),
-         :ok <- released_graph_lease(paths.graph.state, expected) do
+         :ok <- ConfirmedRecoveryLineage.released_fence_lease(paths.fence.state, issue_id, expected),
+         :ok <-
+           ConfirmedRecoveryLineage.released_graph_lease(
+             paths.graph.state,
+             expected,
+             marker["verificationNowMs"]
+           ) do
       :ok
     else
       _ -> {:error, :local_release_invariants_changed}
-    end
-  end
-
-  defp released_fence_lease(fence, issue_id, expected) do
-    case get_in(fence, [:executions, issue_id, :leases, expected["sessionId"]]) do
-      %{process_id: process_id, status: :released, release_reason: :spawn_failed, termination_required: false} ->
-        if process_id == expected["processId"], do: :ok, else: {:error, :execution_lease_not_released}
-
-      _ ->
-        {:error, :execution_lease_not_released}
-    end
-  end
-
-  defp released_graph_lease(graph, expected) do
-    case Map.get(graph.delegations, expected["responsibleDelegationId"]) do
-      %{status: :active, runtime_lease: nil} -> :ok
-      _ -> {:error, :responsibility_lease_not_released}
     end
   end
 
@@ -724,11 +748,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          true <- completed["completionPostimages"]["claimJournalSHA256"] == marker["postimages"]["claimJournal"]["sha256"],
          true <- completed["completionPostimages"]["fenceSHA256"] == marker["postimages"]["fence"]["sha256"],
          true <- completed["completionPostimages"]["responsibilityGraphSHA256"] == marker["postimages"]["responsibilityGraph"]["sha256"],
-         :ok <- restore_state_directories(marker, runtime),
-         :ok <- validate_state_directories(marker, runtime, :original),
          :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
          :ok <- release_state_invariants(marker, runtime),
-         :ok <- durable_replace(path, Jason.encode!(completed)) do
+         :ok <-
+           ConfirmedRecoveryWAL.commit_then_release(
+             fn -> durable_replace(path, Jason.encode!(completed)) end,
+             fn -> restore_state_directories(marker, runtime) end
+           ) do
       :ok
     else
       _ -> {:error, :hgs740_completion_held_closed}

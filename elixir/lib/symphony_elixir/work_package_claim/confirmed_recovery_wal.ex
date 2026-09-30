@@ -13,4 +13,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL do
   end
 
   def replay(_names, _apply_one), do: {:error, :invalid_replay_request}
+
+  @spec commit_then_release((-> :ok | {:error, term()}), (-> :ok | {:error, term()})) ::
+          :ok | {:error, term()}
+  def commit_then_release(commit, release) when is_function(commit, 0) and is_function(release, 0) do
+    with :ok <- commit.(),
+         :ok <- release.() do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :invalid_finalization_result}
+    end
+  end
+
+  def commit_then_release(_commit, _release), do: {:error, :invalid_finalization_request}
 end
