@@ -145,6 +145,39 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
     assert admitted_graph.delegations[old.accountable.id].status == :revoked
     assert admitted_graph.delegations[old.responsible.id].status == :revoked
 
+    assert {:new, graph_first_admission} =
+             Recovery.prepare(runtime, context.fence, retired_graph, context.issue, nil, context.now + 1)
+
+    assert graph_first_admission.delegations[entry.responsible.id].status == :active
+
+    generation = retired_fence.executions[context.issue.id].generation + 1
+    session = "worker:#{context.issue.id}:#{generation}"
+
+    lease = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation,
+      session_id: session,
+      process_id: session
+    }
+
+    {:ok, bound_graph} =
+      ResponsibilityGraph.bind_runtime_lease(admitted_graph, entry.responsible.id, lease, context.now + 1)
+
+    {:ok, restarted_graph} = ResponsibilityGraph.mark_unreconciled_after_restart(bound_graph)
+
+    assert {:new, recovered_graph} =
+             Recovery.prepare(runtime, retired_fence, restarted_graph, context.issue, nil, context.now + 2)
+
+    assert recovered_graph.delegations[entry.accountable.id].status == :active
+    assert recovered_graph.delegations[entry.responsible.id].status == :active
+    assert recovered_graph.delegations[entry.responsible.id].runtime_lease == nil
+
+    wrong_lease_graph = put_in(restarted_graph.delegations[entry.responsible.id].runtime_lease.session_id, "worker:foreign")
+
+    assert {:error, _reason} =
+             Recovery.prepare(runtime, retired_fence, wrong_lease_graph, context.issue, nil, context.now + 2)
+
     changed_entry = update_in(entry, [:responsible, :budget, :max_tokens], &(&1 + 1))
     changed_manifest = replace_entry(runtime.managed_delegations, changed_entry)
 

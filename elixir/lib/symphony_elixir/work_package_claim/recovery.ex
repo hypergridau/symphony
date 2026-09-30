@@ -57,16 +57,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
         prepare_retired_unsubmitted_successor(runtime, fence, graph, issue, attempt, now_ms, execution)
 
       execution ->
-        case Abandonment.check(runtime, fence, issue.id) do
-          :authorized ->
-            prepare_released_claim(runtime, fence, graph, issue, attempt, now_ms)
-
-          :missing ->
-            prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
-
-          {:error, _reason} = error ->
-            error
-        end
+        prepare_nonterminal_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
     end
   end
 
@@ -77,12 +68,108 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
          {:ok, verified_fence, verified_graph, retirement_result} <-
            UnsubmittedSuccessor.prepare(runtime, fence, graph, entry, now_ms),
          true <- retirement_result in [:retired, :already_retired],
+         {:ok, verified_graph} <- release_orphan_successor_lease(verified_graph, entry, execution, now_ms),
          {:ok, candidate} <-
            Admission.prepare(verified_graph, verified_fence, manifest, issue, attempt, now_ms, runtime) do
       {:new, candidate}
     else
       {:error, _reason} = error -> error
       _ -> {:error, :unsubmitted_successor_not_proven}
+    end
+  end
+
+  defp retired_successor_graph?(%{managed_delegations: %{entries: entries}}, graph, issue_id) when is_list(entries) do
+    case Enum.find(entries, &(&1.issue_id == issue_id)) do
+      %{prior_unsubmitted_authority: %{accountable_id: accountable_id, responsible_id: responsible_id}} ->
+        with %{status: :revoked, terminal_evidence: receipt} <- Map.get(graph.delegations, accountable_id),
+             %{status: :revoked, terminal_evidence: ^receipt} <- Map.get(graph.delegations, responsible_id),
+             true <- is_map(receipt) and receipt["type"] == "unsubmitted_successor" do
+          true
+        else
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
+
+  defp retired_successor_graph?(_runtime, _graph, _issue_id), do: false
+
+  defp prepare_nonterminal_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts) do
+    if retired_successor_graph?(runtime, graph, issue.id) do
+      prepare_retired_unsubmitted_successor(runtime, fence, graph, issue, attempt, now_ms, execution)
+    else
+      prepare_claim_by_abandonment(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
+    end
+  end
+
+  defp prepare_claim_by_abandonment(runtime, fence, graph, issue, attempt, now_ms, execution, opts) do
+    case Abandonment.check(runtime, fence, issue.id) do
+      :authorized ->
+        prepare_released_claim(runtime, fence, graph, issue, attempt, now_ms)
+
+      :missing ->
+        prepare_existing_claim(runtime, fence, graph, issue, attempt, now_ms, execution, opts)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp release_orphan_successor_lease(graph, entry, execution, now_ms) do
+    case Map.get(graph.delegations, entry.responsible.id) do
+      %{runtime_lease: nil} ->
+        {:ok, graph}
+
+      %{runtime_lease: lease} ->
+        expected_session = "worker:#{entry.issue_id}:#{execution.generation + 1}"
+
+        expected_lease = %{
+          issue_id: entry.issue_id,
+          repository: execution.repository,
+          generation: execution.generation + 1,
+          session_id: expected_session,
+          process_id: expected_session
+        }
+
+        release_expected_orphan_lease(graph, entry, lease, expected_lease, now_ms)
+
+      nil ->
+        {:ok, graph}
+    end
+  end
+
+  defp release_expected_orphan_lease(graph, entry, lease, expected_lease, now_ms) do
+    if lease == expected_lease do
+      with {:ok, graph} <- reconcile_orphan_successor_pair(graph, entry, lease, now_ms),
+           {:ok, released_graph, :released} <-
+             ResponsibilityGraph.release_runtime_lease(graph, entry.responsible.id, lease, now_ms) do
+        {:ok, released_graph}
+      else
+        _ -> {:error, :unsubmitted_successor_not_proven}
+      end
+    else
+      {:error, :unsubmitted_successor_not_proven}
+    end
+  end
+
+  defp reconcile_orphan_successor_pair(graph, entry, lease, now_ms) do
+    case {Map.get(graph.delegations, entry.accountable.id), Map.get(graph.delegations, entry.responsible.id)} do
+      {%{status: :active, runtime_lease: nil}, %{status: :active, runtime_lease: ^lease}} ->
+        {:ok, graph}
+
+      {
+        %{status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: nil},
+        %{status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: ^lease}
+      } ->
+        with {:ok, graph} <-
+               ResponsibilityGraph.reconcile_delegation(graph, entry.accountable.id, nil, now_ms) do
+          ResponsibilityGraph.reconcile_delegation(graph, entry.responsible.id, lease, now_ms)
+        end
+
+      _ ->
+        {:error, :unsubmitted_successor_not_proven}
     end
   end
 
