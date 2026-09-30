@@ -154,7 +154,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         "session-2" => %{
           process_id: "process-2",
           status: :released,
-          release_reason: :spawn_failed,
+          release_reason: "spawn_failed",
           termination_required: false
         }
       }
@@ -163,20 +163,65 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     fence = %{executions: %{issue_id => %{generation: 3}}, history: [Map.put(gen2, :issue_id, issue_id)]}
     assert :ok = ConfirmedRecoveryLineage.released_fence_lease(fence, issue_id, expected)
 
+    assert :ok =
+             ConfirmedRecoveryLineage.released_fence_lease(
+               put_in(fence, [:history, Access.at(0)], Map.delete(gen2, :retirement) |> Map.put(:issue_id, issue_id)),
+               issue_id,
+               expected
+             )
+
+    retired_fence = put_in(fence, [:history, Access.at(0), :retirement], %{})
+
+    assert {:error, :execution_lease_not_released} =
+             ConfirmedRecoveryLineage.released_fence_lease(retired_fence, issue_id, expected)
+
+    assert {:error, :execution_lease_not_released} =
+             ConfirmedRecoveryLineage.released_fence_lease(
+               put_in(fence, [:history, Access.at(0), :leases, "session-2", :release_reason], "operator_stop"),
+               issue_id,
+               expected
+             )
+
     graph = %{
       delegations: %{
         "delegation" => %{runtime_lease: %{issue_id: issue_id, generation: 3}}
       },
       events: [
-        %{type: :runtime_lease_released, delegation_id: "delegation", at_ms: 100},
-        %{type: :runtime_lease_bound, delegation_id: "delegation", at_ms: 101}
+        %{"type" => "runtime_lease_released", "delegation_id" => "delegation", "at_ms" => 100},
+        %{"type" => "runtime_lease_bound", "delegation_id" => "delegation", "at_ms" => 101}
       ]
     }
 
     assert :ok = ConfirmedRecoveryLineage.released_graph_lease(graph, expected, 100)
-    refute ConfirmedRecoveryLineage.released_graph_lease(graph, expected, 99) == :ok
-    refute ConfirmedRecoveryLineage.released_graph_lease(put_in(graph, [:events, Access.at(1), :at_ms], 100), expected, 100) == :ok
-    refute ConfirmedRecoveryLineage.released_fence_lease(%{fence | history: []}, issue_id, expected) == :ok
+
+    assert {:error, :responsibility_lease_not_released} =
+             ConfirmedRecoveryLineage.released_graph_lease(graph, expected, 99)
+
+    wrong_event_type = put_in(graph, [:events, Access.at(0), "type"], "other")
+
+    assert {:error, :responsibility_lease_not_released} =
+             ConfirmedRecoveryLineage.released_graph_lease(wrong_event_type, expected, 100)
+
+    assert {:error, :responsibility_lease_not_released} =
+             ConfirmedRecoveryLineage.released_graph_lease(
+               put_in(graph, [:events, Access.at(0)], Map.delete(Enum.at(graph.events, 0), "delegation_id")),
+               expected,
+               100
+             )
+
+    no_rebind_after_release = put_in(graph, [:events, Access.at(1), "at_ms"], 100)
+
+    assert {:error, :responsibility_lease_not_released} =
+             ConfirmedRecoveryLineage.released_graph_lease(no_rebind_after_release, expected, 100)
+
+    missing_rebind_time =
+      put_in(graph, [:events, Access.at(1)], Map.delete(Enum.at(graph.events, 1), "at_ms"))
+
+    assert {:error, :responsibility_lease_not_released} =
+             ConfirmedRecoveryLineage.released_graph_lease(missing_rebind_time, expected, 100)
+
+    assert {:error, :execution_lease_not_released} =
+             ConfirmedRecoveryLineage.released_fence_lease(%{fence | history: []}, issue_id, expected)
   end
 
   test "WAL replay resumes each partial state-write prefix and skips exact postimages" do
@@ -582,6 +627,87 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert {:error, _reason} =
              ConfirmedRecoveryRootHost.verify_signed_evidence(fixture.proof_bytes, fixture.bindings)
 
+    Agent.stop(fixture.vfs)
+  end
+
+  test "Core replays a signed complete marker after directory restore fails and then admits startup" do
+    fixture = positive_apply_fixture()
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+
+    files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+    completion_fixture = install_completion_evidence(fixture, marker, files)
+    candidate = Jason.decode!(Map.fetch!(files, Path.join(Path.dirname(fixture.marker_path), "candidate.json")))
+    parent = self()
+
+    observer = fn claim, cluster ->
+      send(parent, {:kubernetes_observation, claim, cluster})
+
+      {:ok,
+       %{
+         "observedAt" => "2026-09-30T12:01:00Z",
+         "apiServer" => cluster["apiServer"],
+         "namespace" => "frigga",
+         "jobs" => %{
+           "firstResourceVersion" => "1",
+           "confirmingResourceVersion" => "2",
+           "sha256" => sha256("[]"),
+           "claimAbsent" => true
+         },
+         "pods" => %{"resourceVersion" => "1", "sha256" => sha256("[]"), "claimAbsent" => true}
+       }}
+    end
+
+    original_change_owner = completion_fixture.context.host_ops.change_owner
+
+    fail_restore_once = fn path, uid, gid ->
+      if Agent.get(fixture.vfs, fn state ->
+           state.files[fixture.marker_path] |> Jason.decode!() |> Map.get("status") == "complete"
+         end) and
+           Process.get(:fail_first_restore, true) do
+        Process.put(:fail_first_restore, false)
+        {:error, :simulated_restore_failure}
+      else
+        original_change_owner.(path, uid, gid)
+      end
+    end
+
+    context =
+      completion_fixture.context
+      |> put_in([Access.key!(:host_ops), :observe_kubernetes_for_test], observer)
+      |> put_in([Access.key!(:host_ops), :change_owner], fail_restore_once)
+
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(context)
+    assert_received {:kubernetes_observation, claim, cluster}
+    assert claim == Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
+    assert cluster == candidate["kubernetes"]["cluster"]
+
+    completed = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+    assert completed["status"] == "complete"
+    assert completed["completedAt"] == marker["completedAt"]
+    assert is_binary(completed["completionCommittedAt"])
+    refute completed["completionCommittedAt"] == completed["completedAt"]
+    assert completed["providerJournalSHA256"] == marker["postimages"]["claimJournal"]["sha256"]
+
+    assert completed["completionPostimages"] == %{
+             "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
+             "fenceSHA256" => marker["postimages"]["fence"]["sha256"],
+             "responsibilityGraphSHA256" => marker["postimages"]["responsibilityGraph"]["sha256"]
+           }
+
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(context)
+
+    replay_context = %{context | host_ops: Map.put(context.host_ops, :change_owner, original_change_owner)}
+    tampered = Map.put(completed, "completedAt", completed["completionCommittedAt"])
+    Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(tampered)))
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(replay_context)
+    Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(completed)))
+    assert :ok = Transaction.complete_with_test_context(replay_context)
+    assert_received {:kubernetes_observation, ^claim, ^cluster}
+    assert :ok = Transaction.verify_startup_with_test_context(replay_context)
+
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+    assert Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path))) == completed
     Agent.stop(fixture.vfs)
   end
 

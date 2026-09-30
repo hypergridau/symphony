@@ -412,10 +412,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       end,
       candidate: fn issue_id, marker -> read_candidate(issue_id, marker, runtime) end,
       observe: fn marker, candidate ->
-        ConfirmedRecoveryKubernetes.observe(
-          Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
-          candidate["kubernetes"]["cluster"]
-        )
+        observe_kubernetes(marker, candidate, runtime)
       end,
       final_release_invariants: fn marker, payload ->
         final_local_release_invariants(marker, runtime, payload)
@@ -433,6 +430,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       directories_frozen: fn marker -> validate_state_directories(marker, runtime, :frozen) end,
       restore_directories: fn marker -> restore_state_directories(marker, runtime) end
     }
+  end
+
+  if Mix.env() == :test do
+    defp observe_kubernetes(marker, candidate, runtime) do
+      claim = Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
+      cluster = candidate["kubernetes"]["cluster"]
+
+      case Map.get(runtime.host_ops, :observe_kubernetes_for_test) do
+        callback when is_function(callback, 2) -> callback.(claim, cluster)
+        _ -> ConfirmedRecoveryKubernetes.observe(claim, cluster)
+      end
+    end
+  else
+    defp observe_kubernetes(marker, candidate, _runtime) do
+      ConfirmedRecoveryKubernetes.observe(
+        Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
+        candidate["kubernetes"]["cluster"]
+      )
+    end
   end
 
   defp read_candidate(issue_id, marker, runtime) do
@@ -640,7 +656,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
            |> Map.put("completionObservation", k8s_readback)
            |> Map.put("completionPostimages", completion_postimages)
            |> Map.put("providerReceipt", provider_payload["receipt"])
-           |> Map.put("completedAt", DateTime.utc_now() |> DateTime.to_iso8601()),
+           |> Map.put("completionCommittedAt", DateTime.utc_now() |> DateTime.to_iso8601()),
          true <- completed["completionPostimages"]["claimJournalSHA256"] == marker["postimages"]["claimJournal"]["sha256"],
          true <- completed["completionPostimages"]["fenceSHA256"] == marker["postimages"]["fence"]["sha256"],
          true <- completed["completionPostimages"]["responsibilityGraphSHA256"] == marker["postimages"]["responsibilityGraph"]["sha256"],

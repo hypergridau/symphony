@@ -43,20 +43,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage do
            cleanup: :pending,
            terminal: nil,
            cleanup_receipt: nil,
-           retirement: nil,
            termination_unconfirmed: false,
            leases: leases
-         },
+         } = execution,
          expected
        ) do
     case Map.get(leases, expected["sessionId"]) do
       %{
         process_id: process_id,
         status: :released,
-        release_reason: :spawn_failed,
+        release_reason: "spawn_failed",
         termination_required: false
       } ->
-        process_id == expected["processId"]
+        Map.get(execution, :retirement) == nil and process_id == expected["processId"]
 
       _ ->
         false
@@ -67,15 +66,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage do
 
   defp release_event?(graph, expected, release_at_ms) do
     Enum.any?(graph.events, fn event ->
-      event.type == :runtime_lease_released and
-        event.delegation_id == expected["responsibleDelegationId"] and event.at_ms == release_at_ms
+      event["type"] == "runtime_lease_released" and
+        event["delegation_id"] == expected["responsibleDelegationId"] and event["at_ms"] == release_at_ms
     end)
   end
 
   defp rebound_after_release?(graph, expected, release_at_ms) do
     Enum.any?(graph.events, fn event ->
-      event.type == :runtime_lease_bound and
-        event.delegation_id == expected["responsibleDelegationId"] and event.at_ms > release_at_ms
+      event["type"] == "runtime_lease_bound" and
+        event["delegation_id"] == expected["responsibleDelegationId"] and
+        is_integer(event["at_ms"]) and event["at_ms"] > release_at_ms
     end)
   end
 
