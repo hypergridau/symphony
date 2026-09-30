@@ -209,8 +209,7 @@ defmodule SymphonyElixir.WorkPackageClaim.UnsubmittedSuccessor do
          true <- entry.responsible.scope.issue_id == entry.issue_id and entry.responsible.scope.repository == execution.repository,
          true <- entry.responsible.scope.work_package_id == get_in(entry, [:unsubmitted_observation, "provider_projection_id"]),
          true <- old_authorities_match?(old_accountable, old_responsible, prior, entry, execution),
-         true <- Enum.all?(new_ids, &(not Map.has_key?(graph.delegations, &1))),
-         true <- only_prior_pair_for_issue?(graph, entry.issue_id, prior.accountable_id, prior.responsible_id),
+         true <- successor_graph_state?(graph, entry, prior, new_ids, execution),
          true <- old_scope_work_package?(old_accountable, old_responsible, entry.identifier),
          true <- normalized_grant(old_accountable, :accountable) == normalized_grant(entry.accountable, :accountable),
          true <- normalized_grant(old_responsible, :responsible) == normalized_grant(entry.responsible, :responsible) do
@@ -245,6 +244,63 @@ defmodule SymphonyElixir.WorkPackageClaim.UnsubmittedSuccessor do
     entry.accountable.id != accountable.id and entry.responsible.id != responsible.id and
       entry.responsible.parent_delegation_id == entry.accountable.id
   end
+
+  defp successor_graph_state?(graph, entry, prior, [accountable_id, responsible_id], execution) do
+    case {Map.get(graph.delegations, accountable_id), Map.get(graph.delegations, responsible_id)} do
+      {nil, nil} ->
+        only_prior_pair_for_issue?(graph, entry.issue_id, prior.accountable_id, prior.responsible_id)
+
+      {%{} = accountable, %{} = responsible} when execution.status == :retired and execution.cleanup == :cleaned ->
+        bound_successor_pair?(graph, entry, prior, accountable, responsible)
+
+      _ ->
+        false
+    end
+  end
+
+  defp bound_successor_pair?(graph, entry, prior, accountable, responsible) do
+    next_generation = prior.generation + 1
+    expected_session = "worker:#{entry.issue_id}:#{next_generation}"
+
+    expected_lease = %{
+      issue_id: entry.issue_id,
+      repository: prior.repository_ref,
+      generation: next_generation,
+      session_id: expected_session,
+      process_id: expected_session
+    }
+
+    issue_delegation_ids =
+      graph.delegations
+      |> Enum.filter(fn {_id, delegation} ->
+        delegation.scope.issue_id == entry.issue_id and delegation.role in [:accountable, :responsible]
+      end)
+      |> Enum.map(&elem(&1, 0))
+      |> Enum.sort()
+
+    issue_delegation_ids == Enum.sort([prior.accountable_id, prior.responsible_id, entry.accountable.id, entry.responsible.id]) and
+      grant_digest(accountable) == grant_digest(entry.accountable) and
+      grant_digest(responsible) == grant_digest(entry.responsible) and
+      successor_pair_runtime_state?(accountable, responsible, expected_lease) and
+      accountable.role == :accountable and is_nil(accountable.parent_delegation_id) and
+      responsible.role == :responsible and responsible.parent_delegation_id == accountable.id
+  end
+
+  defp successor_pair_runtime_state?(
+         %{status: :active, runtime_lease: nil},
+         %{status: :active, runtime_lease: lease},
+         lease
+       ),
+       do: true
+
+  defp successor_pair_runtime_state?(
+         %{status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: nil},
+         %{status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: lease},
+         lease
+       ),
+       do: true
+
+  defp successor_pair_runtime_state?(_accountable, _responsible, _expected_lease), do: false
 
   defp prior_pair_state?(%{status: :active}, %{status: :active}), do: true
 

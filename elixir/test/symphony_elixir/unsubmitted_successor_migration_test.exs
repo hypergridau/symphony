@@ -7,7 +7,7 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
   alias SymphonyElixir.ManagedResponsibility.Manifest
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
-  alias SymphonyElixir.WorkPackageClaim.{Journal, UnsubmittedSuccessor}
+  alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery, UnsubmittedSuccessor}
 
   @projection_id "workpkg_4446a7d851764ecf9bf62bfbae26d1cc"
   @grant_fields ~w(id parent_delegation_id role actor_id scope authority budget expires_at_ms expected_deliverable expected_evidence return_to_parent)a
@@ -128,6 +128,132 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
     assert :ok = ExecutionFence.validate(cold_fence)
     assert :ok = ResponsibilityGraph.validate(cold_graph)
     assert cold_fence.executions[context.issue.id].retirement.type == "unsubmitted_successor"
+  end
+
+  test "recovery admits only the exact signed successor after unsubmitted retirement", context do
+    {runtime, entry} = successor(context)
+
+    assert {:ok, retired_fence, retired_graph, :retired} =
+             UnsubmittedSuccessor.prepare(runtime, context.fence, context.graph, entry, context.now)
+
+    assert {:new, admitted_graph} =
+             Recovery.prepare(runtime, retired_fence, retired_graph, context.issue, nil, context.now + 1)
+
+    assert admitted_graph.delegations[entry.accountable.id].status == :active
+    assert admitted_graph.delegations[entry.responsible.id].status == :active
+    old = Enum.find(context.runtime.managed_delegations.entries, &(&1.issue_id == context.issue.id))
+    assert admitted_graph.delegations[old.accountable.id].status == :revoked
+    assert admitted_graph.delegations[old.responsible.id].status == :revoked
+
+    assert {:new, graph_first_admission} =
+             Recovery.prepare(runtime, context.fence, retired_graph, context.issue, nil, context.now + 1)
+
+    assert graph_first_admission.delegations[entry.responsible.id].status == :active
+
+    generation = retired_fence.executions[context.issue.id].generation + 1
+    session = "worker:#{context.issue.id}:#{generation}"
+
+    lease = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation,
+      session_id: session,
+      process_id: session
+    }
+
+    {:ok, bound_graph} =
+      ResponsibilityGraph.bind_runtime_lease(admitted_graph, entry.responsible.id, lease, context.now + 1)
+
+    {:ok, restarted_graph} = ResponsibilityGraph.mark_unreconciled_after_restart(bound_graph)
+
+    assert {:new, recovered_graph} =
+             Recovery.prepare(runtime, retired_fence, restarted_graph, context.issue, nil, context.now + 2)
+
+    assert recovered_graph.delegations[entry.accountable.id].status == :active
+    assert recovered_graph.delegations[entry.responsible.id].status == :active
+    assert recovered_graph.delegations[entry.responsible.id].runtime_lease == nil
+
+    wrong_lease_graph = put_in(restarted_graph.delegations[entry.responsible.id].runtime_lease.session_id, "worker:foreign")
+
+    assert {:error, _reason} =
+             Recovery.prepare(runtime, retired_fence, wrong_lease_graph, context.issue, nil, context.now + 2)
+
+    admission = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      branch: context.execution.branch,
+      worktree: context.execution.worktree
+    }
+
+    {:ok, generation_two_fence, generation_two_token} =
+      ExecutionFence.admit(retired_fence, admission, context.now + 3)
+
+    assert generation_two_token.generation == retired_fence.executions[context.issue.id].generation + 1
+
+    generation_two_session = "worker:#{context.issue.id}:#{generation_two_token.generation}"
+
+    worker = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation_two_token.generation,
+      role: :worker,
+      session_id: generation_two_session,
+      process_id: generation_two_session,
+      branch: context.execution.branch,
+      worktree: context.execution.worktree,
+      linear_state: "admitted",
+      pr_state: "unopened",
+      head: "unobserved",
+      last_heartbeat_at: 0
+    }
+
+    {:ok, generation_two_fence, :registered} =
+      ExecutionFence.register(generation_two_fence, generation_two_token, :worker, worker, context.now + 3)
+
+    generation_two_lease = %{
+      issue_id: context.issue.id,
+      repository: context.execution.repository,
+      generation: generation_two_token.generation,
+      session_id: generation_two_session,
+      process_id: generation_two_session
+    }
+
+    {:ok, generation_two_graph} =
+      ResponsibilityGraph.bind_runtime_lease(admitted_graph, entry.responsible.id, generation_two_lease, context.now + 3)
+
+    {:ok, restarted_generation_two_fence} =
+      ExecutionFence.mark_unreconciled_after_restart(generation_two_fence)
+
+    {:ok, restarted_generation_two_graph} =
+      ResponsibilityGraph.mark_unreconciled_after_restart(generation_two_graph)
+
+    assert {:new, released_generation_two_fence, released_generation_two_graph} =
+             Recovery.prepare(
+               runtime,
+               restarted_generation_two_fence,
+               restarted_generation_two_graph,
+               context.issue,
+               nil,
+               context.now + 4
+             )
+
+    assert released_generation_two_fence.executions[context.issue.id].leases[generation_two_session].release_reason ==
+             :claim_not_submitted
+
+    assert released_generation_two_graph.delegations[entry.responsible.id].runtime_lease == nil
+
+    changed_entry = update_in(entry, [:responsible, :budget, :max_tokens], &(&1 + 1))
+    changed_manifest = replace_entry(runtime.managed_delegations, changed_entry)
+
+    assert {:error, _reason} =
+             Recovery.prepare(
+               %{runtime | managed_delegations: changed_manifest},
+               retired_fence,
+               retired_graph,
+               context.issue,
+               nil,
+               context.now + 1
+             )
   end
 
   test "claim, worker, scope, identity, stale observations and journal rows keep the transition closed", context do
