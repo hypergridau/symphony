@@ -20,6 +20,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     ConfirmedRecoveryEvidence,
     ConfirmedRecoveryKubernetes,
     ConfirmedRecoveryLineage,
+    ConfirmedRecoveryStateMachine,
     ConfirmedRecoveryWAL,
     Dispatch,
     Journal
@@ -174,8 +175,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   def no_marker_startup_policy(@issue_id, _evidence_directory_exists),
     do: {:error, :hgs740_transaction_marker_missing}
 
-  def no_marker_startup_policy(_issue_id, evidence_directory_exists),
-    do: pre_marker_startup_policy(evidence_directory_exists)
+  def no_marker_startup_policy(issue_id, evidence_directory_exists),
+    do: ConfirmedRecoveryStateMachine.no_marker_startup_policy(issue_id, @issue_id, evidence_directory_exists)
 
   @doc false
   @spec local_receipt_payload(map()) :: map()
@@ -293,51 +294,46 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp complete_status(%{"status" => "local_applied"} = marker, issue_id, pool, runtime) do
-    path = marker_path(issue_id)
-
-    with :ok <- verify_signed_local_receipt(marker, issue_id),
-         :ok <- verify_postimages(marker, runtime),
-         {:ok, provider_proof, provider_payload} <- verify_provider_final_proof(marker, runtime),
-         {:ok, candidate} <- read_candidate(issue_id, marker),
-         {:ok, k8s_readback} <-
-           ConfirmedRecoveryKubernetes.observe(
-             Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
-             candidate["kubernetes"]["cluster"]
-           ),
-         :ok <- final_local_release_invariants(marker, runtime, provider_payload),
-         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
-         :ok <- ManagedLauncherLock.require_service_stopped(pool),
-         :ok <- complete_marker(marker, path, provider_proof, provider_payload, k8s_readback, runtime) do
-      {:ok, :complete}
-    else
-      _ -> {:error, :hgs740_completion_held_closed}
-    end
+    ConfirmedRecoveryStateMachine.complete(marker, issue_id, pool, completion_operations(issue_id, runtime))
   end
 
   defp complete_status(%{"status" => "complete"} = marker, issue_id, pool, runtime) do
-    with :ok <- verify_signed_local_receipt(marker, issue_id),
-         {:ok, provider_proof, provider_payload} <- verify_provider_final_proof(marker, runtime, false),
-         true <- digest(provider_proof) == marker["providerFinalProofSHA256"],
-         true <- provider_payload["journalSHA256"] == marker["providerJournalSHA256"],
-         :ok <- valid_completed_marker_postconditions(marker, provider_payload),
-         :ok <- release_state_invariants(marker, runtime),
-         {:ok, candidate} <- read_candidate(issue_id, marker),
-         {:ok, _k8s_readback} <-
-           ConfirmedRecoveryKubernetes.observe(
-             Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
-             candidate["kubernetes"]["cluster"]
-           ),
-         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
-         :ok <- ManagedLauncherLock.require_service_stopped(pool),
-         :ok <- validate_state_directories(marker, runtime, :frozen),
-         :ok <- restore_state_directories(marker, runtime) do
-      {:ok, :complete}
-    else
-      _ -> {:error, :hgs740_completion_held_closed}
-    end
+    ConfirmedRecoveryStateMachine.complete(marker, issue_id, pool, completion_operations(issue_id, runtime))
   end
 
   defp complete_status(_marker, _issue_id, _pool, _runtime), do: {:error, :hgs740_completion_held_closed}
+
+  defp completion_operations(issue_id, runtime) do
+    %{
+      verify_receipt: fn marker -> verify_signed_local_receipt(marker, issue_id) end,
+      verify_postimages: fn marker -> verify_postimages(marker, runtime) end,
+      provider_final: fn marker, require_current? ->
+        verify_provider_final_proof(marker, runtime, require_current?)
+      end,
+      candidate: &read_candidate(&1, &2),
+      observe: fn marker, candidate ->
+        ConfirmedRecoveryKubernetes.observe(
+          Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
+          candidate["kubernetes"]["cluster"]
+        )
+      end,
+      final_release_invariants: fn marker, payload ->
+        final_local_release_invariants(marker, runtime, payload)
+      end,
+      mutation_quiescent: fn marker ->
+        require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"])
+      end,
+      service_stopped: &ManagedLauncherLock.require_service_stopped/1,
+      write_complete: fn marker, proof, payload, observation ->
+        complete_marker(marker, marker_path(issue_id), proof, payload, observation, runtime)
+      end,
+      digest: &digest/1,
+      valid_postconditions: &valid_completed_marker_postconditions/2,
+      release_invariants: fn marker -> release_state_invariants(marker, runtime) end,
+      directories_frozen: fn marker -> validate_state_directories(marker, runtime, :frozen) end,
+      restore_directories: fn marker -> restore_state_directories(marker, runtime) end
+    }
+  end
 
   defp read_candidate(issue_id, marker) do
     directory = marker_directory(issue_id)
@@ -354,7 +350,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     end
   end
 
-  defp verify_provider_final_proof(marker, runtime, require_current_journal? \\ true) do
+  defp verify_provider_final_proof(marker, runtime, require_current_journal?) do
     path = Path.join(@provider_receipt_root, marker["issueId"] <> ".json")
 
     with {:ok, bytes} <- read_root_file(path, 1_048_576),
@@ -1460,23 +1456,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp apply_marker(marker, marker_path, runtime) do
-    with true <- marker["status"] in ["applying", "local_applied"],
-         :ok <- freeze_state_directories(marker, runtime),
-         :ok <- validate_current_pre_or_post(marker, runtime),
-         {:ok, images} <- marker_images(marker),
-         :ok <-
-           ConfirmedRecoveryWAL.apply_images(
-             images,
-             fn name -> read_marker_image(name, marker, runtime) end,
-             fn name, postimage_bytes, already_applied? ->
-               persist_marker_image(name, postimage_bytes, already_applied?, marker, runtime)
-             end
-           ),
-         :ok <- verify_postimages(marker, runtime),
-         {:ok, applied_marker} <- set_marker_applied(marker, marker_path) do
-      {:ok, applied_marker}
-    else
-      _ -> {:error, :hgs740_transaction_incomplete}
+    case marker_images(marker) do
+      {:ok, images} ->
+        ConfirmedRecoveryStateMachine.apply(marker, images, %{
+          freeze: fn -> freeze_state_directories(marker, runtime) end,
+          verify_pre_or_post: fn -> validate_current_pre_or_post(marker, runtime) end,
+          read_current: fn name -> read_marker_image(name, marker, runtime) end,
+          persist: fn name, bytes, already_applied? ->
+            persist_marker_image(name, bytes, already_applied?, marker, runtime)
+          end,
+          verify_postimages: fn -> verify_postimages(marker, runtime) end,
+          mark_local: fn current_marker -> set_marker_applied(current_marker, marker_path) end
+        })
+
+      _ ->
+        {:error, :hgs740_transaction_incomplete}
     end
   end
 
@@ -1655,33 +1649,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   end
 
   defp marker_postimages_valid(marker) when is_map(marker) do
-    postimages = marker["postimages"]
-    preimage_images = marker["preimageImages"]
-    ownership = marker["stateOwnership"]
+    valid? =
+      ConfirmedRecoveryStateMachine.valid_marker_images?(
+        marker,
+        @marker_version,
+        @state_names,
+        &valid_state_ownership?/1,
+        &marker_preimage_for(marker, &1),
+        &digest/1
+      )
 
-    with true <- marker["contractVersion"] == @marker_version,
-         true <- marker["status"] in ["applying", "local_applied", "complete"],
-         true <- is_map(postimages),
-         true <- is_map(preimage_images),
-         true <- valid_state_ownership?(ownership),
-         true <-
-           Enum.all?(@state_names, fn name ->
-             entry = postimages[name]
-
-             is_map(entry) and is_binary(entry["bytes"]) and
-               digest(Base.url_decode64!(entry["bytes"], padding: false)) == entry["sha256"]
-           end),
-         true <-
-           Enum.all?(@state_names, fn name ->
-             image = preimage_images[name]
-             is_binary(image) and digest(Base.url_decode64!(image, padding: false)) == marker_preimage_for(marker, name)
-           end) do
-      :ok
-    else
-      _ -> {:error, :invalid_hgs740_marker}
-    end
-  rescue
-    _ -> {:error, :invalid_hgs740_marker}
+    if valid?, do: :ok, else: {:error, :invalid_hgs740_marker}
   end
 
   defp marker_postimages_valid(_marker), do: {:error, :invalid_hgs740_marker}
@@ -1821,39 +1799,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   defp verify_marker_status(_marker), do: {:error, :hgs740_startup_held_closed}
 
   defp verify_completed_marker(marker) do
-    with {:ok, runtime} <- fixed_runtime_paths(marker["pool"]),
-         {:ok, final_proof, payload} <- verify_provider_final_proof(marker, runtime, false),
-         true <- digest(final_proof) == marker["providerFinalProofSHA256"],
-         true <- payload["journalSHA256"] == marker["providerJournalSHA256"],
-         :ok <- valid_completed_marker_postconditions(marker, payload),
-         :ok <- validate_state_directories(marker, runtime, :original),
-         :ok <- release_state_invariants(marker, runtime) do
-      :ok
-    else
-      _ -> {:error, :hgs740_startup_held_closed}
-    end
+    ConfirmedRecoveryStateMachine.verify_completed(marker, %{
+      runtime: &fixed_runtime_paths/1,
+      provider_final: fn current_marker, runtime, require_current? ->
+        verify_provider_final_proof(current_marker, runtime, require_current?)
+      end,
+      digest: &digest/1,
+      valid_postconditions: &valid_completed_marker_postconditions/2,
+      directories_original: fn current_marker, runtime ->
+        validate_state_directories(current_marker, runtime, :original)
+      end,
+      release_invariants: fn current_marker, runtime -> release_state_invariants(current_marker, runtime) end
+    })
   end
 
   defp valid_completed_marker_postconditions(marker, payload) do
-    with true <- marker["status"] == "complete",
-         true <- marker["generation"] == 2 and marker["pool"] in @pools,
-         true <- payload["localGenerationMax"] == 2 and payload["neverSpawned"] == true,
-         true <- payload["receipt"]["nextGenerationFloor"] == 3,
-         true <- payload["receipt"] == marker["providerReceipt"],
-         true <- payload["journalSHA256"] == marker["providerJournalSHA256"],
-         true <- marker["completionPostimages"] == expected_postimage_hashes(marker) do
-      :ok
-    else
-      _ -> {:error, :hgs740_completion_marker_invalid}
-    end
-  end
-
-  defp expected_postimage_hashes(marker) do
-    %{
-      "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
-      "fenceSHA256" => marker["postimages"]["fence"]["sha256"],
-      "responsibilityGraphSHA256" => marker["postimages"]["responsibilityGraph"]["sha256"]
-    }
+    if ConfirmedRecoveryStateMachine.valid_completed_postconditions?(marker, payload, @pools),
+      do: :ok,
+      else: {:error, :hgs740_completion_marker_invalid}
   end
 
   defp verify_signed_local_receipt(marker, issue_id) do
