@@ -12,7 +12,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   @claim_fields ~w(projectionId reservationId workspaceId companyId issueId runnerId managedProjectProfileId repositoryRef scopeKeys generation sessionId processId responsibleDelegationId executionFenceToken runtimeLeaseId nonceHash)
   @payload_fields ~w(contractVersion pool issueId generation reservationId assignmentSHA256 issuedAt expiresAt nonce observation providerHeld)
   @observation_fields ~w(expected localGenerationMax fenceSHA256 claimJournalSHA256 responsibilityGraphSHA256 globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent hostIdentity bootId observedAt witnesses witnessLogSHA256 dispatchPhase kubernetes predecessorRetirement serviceUnits witnessUnits turnsAbsent)
-  @provider_fields ~w(observedAt sourceIdentity assignmentDigest expected projectionState mutationState reservationState executionCapacityState scopeState)
+  @provider_fields ~w(observedAt sourceIdentity assignmentDigest expected projectionState mutationState reservationState executionCapacityState scopeState credentialLeaseInventory oauthSlotLeaseInventory)
+  @credential_inventory_fields ~w(observedAt complete leaseIds readbacks)
+  @oauth_slot_inventory_fields ~w(observedAt complete leaseCount leaseIds leases)
   @retirement_fields ~w(active_process evidence_ref generation issue_id linear_state local_claim provider_claim provider_projection_id retired_at_ms workspace type repository_ref managed_project_profile_id prior_accountable_id prior_responsible_id prior_accountable_digest prior_responsible_digest successor_accountable_id successor_responsible_id successor_accountable_digest successor_responsible_digest manifest_sha256 signer_key_sha256 observation_sha256)
   @execution_fields ~w(issue_id repository worker_host generation branch worktree status ownership leases terminal retirement cleanup cleanup_receipt termination_unconfirmed admitted_at_ms cleaned_at_ms)
   @lease_fields ~w(issue_id repository generation role session_id process_id branch worktree status registered_at_ms last_heartbeat_at linear_state pr_state head termination_required termination_confirmed_at_ms termination_evidence_ref termination_evidence supervisor_identity release_reason)
@@ -410,7 +412,32 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          {:ok, observed_at_ms} <- timestamp_ms(readback["observedAt"]),
          true <- fresh?(observed_at_ms, bindings.now_ms),
          {:ok, observation_at_ms} <- timestamp_ms(payload["observation"]["observedAt"]),
-         true <- observed_at_ms >= observation_at_ms do
+         true <- observed_at_ms >= observation_at_ms,
+         :ok <- validate_credential_lease_inventory(readback["credentialLeaseInventory"], observed_at_ms, bindings),
+         :ok <- validate_oauth_slot_lease_inventory(readback["oauthSlotLeaseInventory"], observed_at_ms, bindings) do
+      :ok
+    else
+      _ -> {:error, :invalid_confirmed_recovery_evidence}
+    end
+  end
+
+  defp validate_credential_lease_inventory(inventory, held_at_ms, bindings) do
+    with true <- is_map(inventory) and exact_keys?(inventory, @credential_inventory_fields),
+         true <- inventory["complete"] == true and inventory["leaseIds"] == [] and inventory["readbacks"] == [],
+         {:ok, observed_at_ms} <- timestamp_ms(inventory["observedAt"]),
+         true <- fresh?(observed_at_ms, bindings.now_ms) and observed_at_ms == held_at_ms do
+      :ok
+    else
+      _ -> {:error, :invalid_confirmed_recovery_evidence}
+    end
+  end
+
+  defp validate_oauth_slot_lease_inventory(inventory, held_at_ms, bindings) do
+    with true <- is_map(inventory) and exact_keys?(inventory, @oauth_slot_inventory_fields),
+         true <- inventory["complete"] == true and inventory["leaseCount"] == 0,
+         true <- inventory["leaseIds"] == [] and inventory["leases"] == [],
+         {:ok, observed_at_ms} <- timestamp_ms(inventory["observedAt"]),
+         true <- fresh?(observed_at_ms, bindings.now_ms) and observed_at_ms == held_at_ms do
       :ok
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}

@@ -107,6 +107,19 @@ defmodule SymphonyElixir.WorkPackageClaimDispatchTest do
     assert {:ok, ^pending} = Journal.load(path)
   end
 
+  test "the root-only confirmed recovery transition rejects allocated claims", %{journal: journal, key: key} do
+    {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
+    {:ok, confirmed} = Dispatch.confirm(submitted, key)
+
+    assert {:ok, pending} = Dispatch.begin_confirmed_recovery(confirmed, key)
+    assert pending.reservations[key].dispatch.phase == "recovery_pending"
+    assert pending.reservations[key].dispatch.authority_digest == confirmed.reservations[key].dispatch.authority_digest
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_confirmed_recovery(pending, key)
+
+    {:ok, allocated} = Dispatch.record_suspended_allocation(confirmed, key, @input, "allocation-uid")
+    assert {:error, :invalid_claim_dispatch_transition} = Dispatch.begin_confirmed_recovery(allocated, key)
+  end
+
   test "a suspended allocation survives pause and restart but cannot enter the local spawn path", %{journal: journal, key: key} do
     {:ok, submitted} = Dispatch.submit(journal, key, @input, @now)
     {:ok, confirmed} = Dispatch.confirm(submitted, key)

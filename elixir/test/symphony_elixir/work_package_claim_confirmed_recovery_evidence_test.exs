@@ -35,6 +35,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_valid(put_in(payload, ["providerHeld", "observedAt"], "2026-09-30T09:00:00Z"))
   end
 
+  test "requires complete empty credential and OAuth lease inventories from the same provider snapshot" do
+    payload = payload()
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "leaseIds"], ["credential-1"]))
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "readbacks"], [%{"state" => "released"}]))
+
+    refute_valid(put_in(payload, ["providerHeld", "oauthSlotLeaseInventory", "leaseCount"], 1))
+
+    refute_valid(put_in(payload, ["providerHeld", "oauthSlotLeaseInventory", "leases"], [%{"state" => "released"}]))
+
+    refute_valid(put_in(payload, ["providerHeld", "credentialLeaseInventory", "observedAt"], "2026-09-30T09:59:41Z"))
+  end
+
   test "rejects wrong dispatch phase, incomplete pool history, and a non-retired predecessor" do
     payload = payload()
     refute_valid(put_in(payload, ["observation", "dispatchPhase"], "recovery_pending"))
@@ -78,7 +92,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   test "canonical JSON and a detached Ed25519 envelope round-trip with an ephemeral key" do
     assert Evidence.canonical_json(%{"z" => 1, "a" => "é"}) == "{\"a\":\"é\",\"z\":1}"
 
-    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+    seed = :binary.list_to_bin(Enum.to_list(0..31))
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519, seed)
     payload_bytes = Evidence.canonical_json(payload())
     signature = :crypto.sign(:eddsa, :none, Evidence.signature_message(payload_bytes), [private, :ed25519])
 
@@ -90,6 +105,33 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
 
     assert {:ok, _payload} = Evidence.verify_test_envelope(envelope, public, bindings())
     assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(envelope, public, bindings())
+  end
+
+  test "malformed signed-input types and claim-bound nested fields fail closed" do
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify(nil, <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify("{}", "short", bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify_test_envelope(nil, <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.verify_test_envelope("{}", <<0::256>>, bindings())
+    assert {:error, :invalid_confirmed_recovery_evidence} = Evidence.validate_payload(nil, bindings())
+    assert nil == Evidence.tuple_digest(nil)
+    assert nil == Evidence.retirement_evidence_ref(nil)
+
+    payload = payload()
+    refute_valid(Map.put(payload, "issuedAt", nil))
+    refute_valid(Map.put(payload, "issuedAt", "2026-09-30T11:59:50+02:00"))
+    refute_valid(put_in(payload, ["observation", "expected", "scopeKeys"], nil))
+    refute_valid(put_in(payload, ["observation", "kubernetes", "cluster", "apiServer"], nil))
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement", "receipt"], nil))
+    refute_valid(put_in(payload, ["observation", "witnesses", Access.at(0), "source", "sourceHead"], "bad"))
+  end
+
+  test "predecessor retirement and claim digests reject missing custody and unrepresentable fields" do
+    payload = payload()
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement"], nil))
+    refute_valid(put_in(payload, ["observation", "predecessorRetirement", "execution", "leases"], %{}))
+    refute_valid(put_in(payload, ["observation", "kubernetes", "cluster", "apiServer"], "http://insecure.invalid"))
+
+    assert nil == Evidence.tuple_digest(Map.put(claim(), "projectionId", self()))
   end
 
   defp refute_valid(candidate), do: assert({:error, :invalid_confirmed_recovery_evidence} == Evidence.validate_payload(candidate, bindings()))
@@ -225,7 +267,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
       "mutationState" => "applied",
       "reservationState" => "claimed",
       "executionCapacityState" => "held",
-      "scopeState" => "held"
+      "scopeState" => "held",
+      "credentialLeaseInventory" => %{
+        "observedAt" => observed,
+        "complete" => true,
+        "leaseIds" => [],
+        "readbacks" => []
+      },
+      "oauthSlotLeaseInventory" => %{
+        "observedAt" => observed,
+        "complete" => true,
+        "leaseCount" => 0,
+        "leaseIds" => [],
+        "leases" => []
+      }
     }
   end
 

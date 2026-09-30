@@ -52,7 +52,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
   @spec save(Path.t(), ExecutionFence.state()) :: :ok | {:error, term()}
   def save(path, state) when is_binary(path) do
     with :ok <- ExecutionFence.validate(state),
-         {:ok, encoded} <- encode_state(state),
+         {:ok, encoded} <- encode_bytes(state),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- atomic_write(path, encoded) do
       :ok
@@ -60,6 +60,12 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
       {:error, reason} -> {:error, reason}
       other -> {:error, other}
     end
+  end
+
+  @doc "Encodes a validated execution-fence snapshot without writing it to disk."
+  @spec encode_bytes(ExecutionFence.state()) :: {:ok, binary()} | {:error, term()}
+  def encode_bytes(state) do
+    with :ok <- ExecutionFence.validate(state), do: encode_state(state)
   end
 
   defp encode_state(state) do
@@ -725,7 +731,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
     case :file.open(String.to_charlist(path), [:write, :binary, :raw, :sync]) do
       {:ok, handle} ->
         try do
-          :file.write(handle, contents)
+          with :ok <- File.chmod(path, 0o600), do: :file.write(handle, contents)
         after
           :file.close(handle)
         end

@@ -79,6 +79,14 @@ defmodule SymphonyElixir.ResponsibilityGraphPersistenceTest do
     assert ResponsibilityGraph.enforced?(restored)
   end
 
+  @tag skip: match?({:win32, _}, :os.type())
+  test "atomic save makes the graph snapshot private before replacing the target", %{path: path} do
+    File.mkdir_p!(Path.dirname(path))
+    assert :ok = Persistence.save(path, ResponsibilityGraph.new())
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
   test "rejects malformed snapshots and safely replaces an existing file", %{path: path} do
     File.mkdir_p!(Path.dirname(path))
     File.write!(path, ~s({"schema_version":1,"delegations":[],"events":[]}))

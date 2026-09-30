@@ -78,6 +78,49 @@ For retained pre-spawn incidents, the host may supply a signed provider recovery
 runtime verifies the old journal, complete unstarted history and released scope before normal
 admission advances the generation; it preserves the original evidence and never invents cleanup.
 
+### Paused confirmed-claim recovery
+
+HGS-740 handles a confirmed generation-2 provider claim when no RKE2 Job was allocated. The
+source-only root commands are:
+
+```text
+symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce> <issue-uuid> <pool-key>
+symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>
+symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key>
+```
+
+The installed runner calls startup verification from a root `ExecStartPre` with an empty
+environment. Before an apply marker exists, startup is allowed only when that issue has no HGS-740
+evidence directory; once candidate evidence exists without its durable transaction marker, startup
+fails closed until root applies or investigates it. `applying` markers always deny startup.
+`local_applied` markers deny startup until provider release is complete. The complete command
+accepts only the pinned HGS-485 final release receipt and fresh full Frigga Job/Pod snapshots;
+it also checks the released journal/fence/graph invariants. A completed marker rechecks its signed
+receipts and claim lineage at startup. Later valid generations may create new Jobs and leases.
+
+Evidence is stored root-only under
+`/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
+`candidate.json`, `confirmed-root-envelope.json`, `transaction.json`,
+`local-transition-candidate.json`, and `local-transition-receipt.json`. The transaction marker is
+written and synced before any of the three domain persistence APIs update local state. After that
+marker, root takes custody of the runner-writable `run/` and `workspaces/` trees by making those
+two directory inodes root-owned mode `0700`; a retry accepts only their recorded original or
+custody metadata and replays exact saved postimages. Completion restores the original directory
+metadata before publishing the complete marker. A crash leaves startup denied and root replayable.
+Contradictory bytes, missing evidence, uncertain Kubernetes pagination, an absent signer, or an
+unpaused gate keep the transition held.
+The completion command does not unpause admission. This source change does not install the
+ExecStartPre hook, run on a host, or qualify a live recovery.
+
+The apply and complete commands require all six pool units and both witness units stopped and
+masked, the state owner's user manager inactive, and no process running under the state owner's
+UID. State files retain their original UID, GID, and mode from the durable marker; after each
+domain save or replay the command restores and verifies that metadata before it advances the
+marker. Completed startup checks live generation-2 recovery, released fence and graph leases, and
+the recorded directory identities while allowing later generation-3 journal entries and workers.
+Provider-held evidence must include complete, empty broker-credential and OAuth-slot lease
+inventories from the same database snapshot as the held reservation readback.
+
 [![Symphony demo video preview](.github/media/symphony-demo-poster.jpg)](https://player.vimeo.com/video/1186371009?h=5626e4b899)
 
 _In this [demo video](https://player.vimeo.com/video/1186371009?h=5626e4b899), Symphony monitors a Linear board for work and spawns agents to handle the tasks. The agents complete the tasks and provide proof of work: CI status, PR review feedback, complexity analysis, and walkthrough videos. When accepted, the agents land the PR safely. Engineers do not need to supervise Codex; they can manage the work at a higher level._

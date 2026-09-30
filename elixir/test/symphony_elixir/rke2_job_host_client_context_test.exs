@@ -97,7 +97,8 @@ defmodule SymphonyElixir.RKE2JobHostClientContextTest do
       delete: "delete",
       abort_prepare: "abort_unstarted",
       abort_confirm: "abort_unstarted",
-      finalize: "finalize"
+      finalize: "finalize",
+      observe: "observe"
     ]
 
     for {operation, suffix} <- operations do
