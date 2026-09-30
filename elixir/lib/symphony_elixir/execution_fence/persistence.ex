@@ -731,7 +731,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
     case :file.open(String.to_charlist(path), [:write, :binary, :raw, :sync]) do
       {:ok, handle} ->
         try do
-          :file.write(handle, contents)
+          with :ok <- File.chmod(path, 0o600), do: :file.write(handle, contents)
         after
           :file.close(handle)
         end

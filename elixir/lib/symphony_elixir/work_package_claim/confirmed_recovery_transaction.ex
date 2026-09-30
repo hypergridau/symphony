@@ -15,7 +15,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
-  alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryEvidence, ConfirmedRecoveryKubernetes, Dispatch, Journal}
+
+  alias SymphonyElixir.WorkPackageClaim.{
+    ConfirmedRecoveryEvidence,
+    ConfirmedRecoveryKubernetes,
+    ConfirmedRecoveryWAL,
+    Dispatch,
+    Journal
+  }
 
   @evidence_root "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
   @runtime_state_root "/srv/dahlia-runner-state"
@@ -28,6 +35,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   @provider_proof_fields ~w(contractVersion recoveryId projectionId fenceRevision oldTupleDigest runnerId hostIdentity bootId observedAt evidenceRef globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent localGenerationMax fenceSHA256 claimJournalSHA256)
   @local_receipt_fields ~w(assignmentDigest assignmentSHA256 completedAt contractVersion evidenceRef expected generation issueId nonce observationSHA256 pool postconditions postimages preimages proofSHA256 reservationId transactionId)
   @state_file_metadata [:major_device, :minor_device, :inode, :uid, :gid, :mode, :links, :size, :mtime, :ctime]
+  @transaction_writable_roots [
+    "/srv/dahlia-runner-state/run",
+    "/srv/dahlia-runner-state/workspaces"
+  ]
   @marker_version "work-package-hgs740-local-transition.v1"
   @receipt_version "work-package-hgs740-local-transition-receipt.v1"
   @receipt_domain "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v1\0"
@@ -272,6 +283,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          :ok <- validate_marker_identity(marker, issue_id, pool, marker["nonce"]),
          true <- marker["status"] == "local_applied",
          :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
+         :ok <- freeze_state_directories(marker, runtime),
          :ok <- verify_signed_local_receipt(marker, issue_id),
          :ok <- verify_postimages(marker, runtime),
          {:ok, provider_proof, provider_payload} <- verify_provider_final_proof(marker, runtime),
@@ -712,6 +724,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          true <- completed["completionPostimages"]["claimJournalSHA256"] == marker["postimages"]["claimJournal"]["sha256"],
          true <- completed["completionPostimages"]["fenceSHA256"] == marker["postimages"]["fence"]["sha256"],
          true <- completed["completionPostimages"]["responsibilityGraphSHA256"] == marker["postimages"]["responsibilityGraph"]["sha256"],
+         :ok <- restore_state_directories(marker, runtime),
+         :ok <- validate_state_directories(marker, runtime, :original),
+         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
+         :ok <- release_state_invariants(marker, runtime),
          :ok <- durable_replace(path, Jason.encode!(completed)) do
       :ok
     else
@@ -741,6 +757,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
              :ok <- validate_marker_identity(marker, issue_id, pool, nonce),
              :ok <- marker_postimages_valid(marker),
              :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
+             :ok <- freeze_state_directories(marker, runtime),
              :ok <- validate_resumable_marker(marker, runtime) do
           {:ok, marker}
         else
@@ -1044,17 +1061,138 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   defp directory_ancestors("/", _acc), do: []
   defp directory_ancestors(path, acc), do: directory_ancestors(Path.dirname(path), [path | acc])
 
-  defp validate_state_directories(marker, runtime) do
+  defp validate_state_directories(marker, runtime, expected_state \\ :frozen) do
     ownership = marker["stateOwnership"]
     expected = ownership["directories"]
     owner = ownership["claimJournal"]["uid"]
 
     with true <- is_map(expected),
          {:ok, actual} <- state_directory_identity(runtime_state_paths(runtime), owner),
-         true <- actual == expected do
+         true <- state_directories_match?(actual, expected, expected_state) do
       :ok
     else
       _ -> {:error, :state_directory_identity_changed}
+    end
+  end
+
+  defp state_directories_match?(actual, expected, :original), do: actual == expected
+
+  defp state_directories_match?(actual, expected, :frozen) do
+    Enum.all?(expected, fn {path, original} ->
+      expected_record =
+        if path in @transaction_writable_roots do
+          %{original | "uid" => 0, "gid" => 0, "mode" => 0o700}
+        else
+          original
+        end
+
+      actual[path] == expected_record
+    end)
+  end
+
+  defp state_directories_match?(_actual, _expected, _state), do: false
+
+  defp freeze_state_directories(marker, runtime) do
+    ownership = marker["stateOwnership"]
+    directories = ownership["directories"]
+    owner = ownership["claimJournal"]["uid"]
+
+    with :ok <- validate_freezable_directories(directories),
+         :ok <- change_transaction_directories(directories, :freeze),
+         :ok <- validate_state_directories(marker, runtime, :frozen),
+         :ok <- no_processes_for_uid(owner) do
+      :ok
+    else
+      _ -> {:error, :transaction_state_directory_freeze_failed}
+    end
+  end
+
+  defp restore_state_directories(marker, runtime) do
+    directories = marker["stateOwnership"]["directories"]
+
+    with :ok <- validate_state_directories(marker, runtime, :frozen),
+         :ok <- change_transaction_directories(directories, :restore),
+         :ok <- validate_state_directories(marker, runtime, :original) do
+      :ok
+    else
+      _ -> {:error, :transaction_state_directory_restore_failed}
+    end
+  end
+
+  defp validate_freezable_directories(directories) when is_map(directories) do
+    if Enum.all?(@transaction_writable_roots, &is_map_key(directories, &1)),
+      do: :ok,
+      else: {:error, :transaction_state_directory_missing}
+  end
+
+  defp validate_freezable_directories(_directories), do: {:error, :transaction_state_directory_missing}
+
+  defp change_transaction_directories(directories, action) do
+    Enum.reduce_while(@transaction_writable_roots, :ok, fn path, :ok ->
+      original = directories[path]
+
+      case change_transaction_directory(path, original, action) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp change_transaction_directory(path, original, :freeze) do
+    with {:ok, current} <- directory_identity(path),
+         true <- directory_transition_allowed?(current, original, :freeze),
+         :ok <- :file.change_owner(String.to_charlist(path), 0, 0),
+         :ok <- File.chmod(path, 0o700),
+         {:ok, frozen} <- directory_identity(path),
+         true <- frozen == %{original | "uid" => 0, "gid" => 0, "mode" => 0o700} do
+      :ok
+    else
+      _ -> {:error, :transaction_state_directory_changed}
+    end
+  end
+
+  defp change_transaction_directory(path, original, :restore) do
+    with {:ok, current} <- directory_identity(path),
+         true <- directory_transition_allowed?(current, original, :restore),
+         :ok <- :file.change_owner(String.to_charlist(path), original["uid"], original["gid"]),
+         :ok <- File.chmod(path, original["mode"]),
+         {:ok, restored} <- directory_identity(path),
+         true <- restored == original do
+      :ok
+    else
+      _ -> {:error, :transaction_state_directory_changed}
+    end
+  end
+
+  defp same_directory_inode?(left, right) do
+    left["majorDevice"] == right["majorDevice"] and left["minorDevice"] == right["minorDevice"] and
+      left["inode"] == right["inode"]
+  end
+
+  defp directory_identity(path) do
+    case File.lstat(path, time: :posix) do
+      {:ok,
+       %File.Stat{
+         type: :directory,
+         major_device: major,
+         minor_device: minor,
+         inode: inode,
+         uid: uid,
+         gid: gid,
+         mode: mode
+       }} ->
+        {:ok,
+         %{
+           "majorDevice" => major,
+           "minorDevice" => minor,
+           "inode" => inode,
+           "uid" => uid,
+           "gid" => gid,
+           "mode" => band(mode, 0o777)
+         }}
+
+      _ ->
+        {:error, :untrusted_state_directory}
     end
   end
 
@@ -1297,10 +1435,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   defp apply_marker(marker, marker_path, runtime) do
     with true <- marker["status"] in ["applying", "local_applied"],
+         :ok <- freeze_state_directories(marker, runtime),
          :ok <- validate_current_pre_or_post(marker, runtime),
-         :ok <- apply_state_image(marker, "claimJournal", runtime.journal_path, runtime, &Journal.decode_bytes/1, &Journal.save/2),
-         :ok <- apply_state_image(marker, "fence", runtime.execution_fence_path, runtime, &FencePersistence.decode_bytes/1, &FencePersistence.save/2),
-         :ok <- apply_state_image(marker, "responsibilityGraph", runtime.responsibility_graph_path, runtime, &GraphPersistence.decode_bytes/1, &GraphPersistence.save/2),
+         :ok <-
+           ConfirmedRecoveryWAL.replay(@state_names, fn
+             "claimJournal" ->
+               apply_state_image(marker, "claimJournal", runtime.journal_path, runtime, &Journal.decode_bytes/1, &Journal.save/2)
+
+             "fence" ->
+               apply_state_image(marker, "fence", runtime.execution_fence_path, runtime, &FencePersistence.decode_bytes/1, &FencePersistence.save/2)
+
+             "responsibilityGraph" ->
+               apply_state_image(marker, "responsibilityGraph", runtime.responsibility_graph_path, runtime, &GraphPersistence.decode_bytes/1, &GraphPersistence.save/2)
+           end),
          :ok <- verify_postimages(marker, runtime),
          {:ok, applied_marker} <- set_marker_applied(marker, marker_path) do
       {:ok, applied_marker}
@@ -1486,6 +1633,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   def valid_state_ownership?(_ownership), do: false
 
+  @doc false
+  @spec directory_transition_allowed?(map(), map(), :freeze | :restore) :: boolean()
+  def directory_transition_allowed?(current, original, :freeze) when is_map(current) and is_map(original) do
+    same_directory_inode?(current, original) and
+      current in [
+        original,
+        %{original | "uid" => 0, "gid" => 0},
+        %{original | "mode" => 0o700}
+      ]
+  end
+
+  def directory_transition_allowed?(current, original, :restore) when is_map(current) and is_map(original) do
+    current == %{original | "uid" => 0, "gid" => 0, "mode" => 0o700} and
+      same_directory_inode?(current, original)
+  end
+
+  def directory_transition_allowed?(_current, _original, _action), do: false
+
   defp valid_state_owner_record?(%{"uid" => uid, "gid" => gid, "mode" => mode} = record) do
     exact_keys?(record, ~w(uid gid mode)) and is_integer(uid) and uid > 0 and is_integer(gid) and
       gid >= 0 and is_integer(mode) and band(mode, 0o077) == 0
@@ -1597,7 +1762,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
          {:ok, final_proof, payload} <- verify_provider_final_proof(marker, runtime, false),
          true <- digest(final_proof) == marker["providerFinalProofSHA256"],
          true <- payload["journalSHA256"] == marker["providerJournalSHA256"],
-         :ok <- valid_completed_marker_postconditions(marker, payload) do
+         :ok <- valid_completed_marker_postconditions(marker, payload),
+         :ok <- validate_state_directories(marker, runtime, :original),
+         :ok <- release_state_invariants(marker, runtime) do
       :ok
     else
       _ -> {:error, :hgs740_startup_held_closed}

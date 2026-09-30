@@ -102,9 +102,13 @@ Evidence is stored root-only under
 `/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
 `candidate.json`, `confirmed-root-envelope.json`, `transaction.json`,
 `local-transition-candidate.json`, and `local-transition-receipt.json`. The transaction marker is
-written and synced before any of the three domain persistence APIs update local state. A retry
-replays only exact saved postimages from exact preimages; contradictory bytes, missing evidence,
-uncertain Kubernetes pagination, an absent signer, or an unpaused gate keep the transition held.
+written and synced before any of the three domain persistence APIs update local state. After that
+marker, root takes custody of the runner-writable `run/` and `workspaces/` trees by making those
+two directory inodes root-owned mode `0700`; a retry accepts only their recorded original or
+custody metadata and replays exact saved postimages. Completion restores the original directory
+metadata before publishing the complete marker. A crash leaves startup denied and root replayable.
+Contradictory bytes, missing evidence, uncertain Kubernetes pagination, an absent signer, or an
+unpaused gate keep the transition held.
 The completion command does not unpause admission. This source change does not install the
 ExecStartPre hook, run on a host, or qualify a live recovery.
 
@@ -112,7 +116,8 @@ The apply and complete commands require all six pool units and both witness unit
 masked, the state owner's user manager inactive, and no process running under the state owner's
 UID. State files retain their original UID, GID, and mode from the durable marker; after each
 domain save or replay the command restores and verifies that metadata before it advances the
-marker. A crash during restoration remains fail-closed and can be replayed under the same gate.
+marker. Completed startup checks live generation-2 recovery, released fence and graph leases, and
+the recorded directory identities while allowing later generation-3 journal entries and workers.
 Provider-held evidence must include complete, empty broker-credential and OAuth-slot lease
 inventories from the same database snapshot as the held reservation readback.
 

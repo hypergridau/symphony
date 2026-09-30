@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
 
   test "WAL replay completes a crash after any partial prefix of state writes" do
     preimages = ["journal-before", "fence-before", "graph-before"]
@@ -40,6 +41,31 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
              Transaction.classify_image("changed-by-another-writer", sha256("expected-preimage"), postimage)
 
     assert {:error, :transaction_target_conflict} = Transaction.classify_image(nil, sha256("before"), postimage)
+  end
+
+  test "production WAL sequencer stops after the first failed state write" do
+    parent = self()
+
+    assert {:error, :synthetic_write_failure} =
+             ConfirmedRecoveryWAL.replay([:journal, :fence, :graph], fn
+               :journal ->
+                 send(parent, :journal_written)
+                 :ok
+
+               :fence ->
+                 send(parent, :fence_attempted)
+                 {:error, :synthetic_write_failure}
+
+               :graph ->
+                 send(parent, :graph_must_not_be_attempted)
+                 :ok
+             end)
+
+    assert_received :journal_written
+    assert_received :fence_attempted
+    refute_received :graph_must_not_be_attempted
+    assert {:error, :invalid_replay_request} = ConfirmedRecoveryWAL.replay(:not_a_list, fn _ -> :ok end)
+    assert {:error, :invalid_replay_result} = ConfirmedRecoveryWAL.replay([:bad], fn _ -> :skip end)
   end
 
   test "WAL replay resumes each partial state-write prefix and skips exact postimages" do
@@ -149,6 +175,26 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     refute Transaction.valid_state_ownership?(Map.delete(valid, "fence"))
     refute Transaction.valid_state_ownership?(put_in(valid, ["responsibilityGraph", "uid"], 0))
     refute Transaction.valid_state_ownership?(put_in(valid, ["directories", "/srv/dahlia-runner-state/workspaces/pools/midgard/.symphony", "inode"], -1))
+  end
+
+  test "directory custody replay accepts only the recorded inode and exact transition states" do
+    original = %{
+      "majorDevice" => 8,
+      "minorDevice" => 1,
+      "inode" => 1234,
+      "uid" => 1001,
+      "gid" => 1001,
+      "mode" => 0o700
+    }
+
+    frozen = %{original | "uid" => 0, "gid" => 0}
+
+    assert Transaction.directory_transition_allowed?(original, original, :freeze)
+    assert Transaction.directory_transition_allowed?(frozen, original, :freeze)
+    assert Transaction.directory_transition_allowed?(frozen, original, :restore)
+    refute Transaction.directory_transition_allowed?(%{original | "inode" => 9999}, original, :freeze)
+    refute Transaction.directory_transition_allowed?(%{original | "mode" => 0o755}, original, :freeze)
+    refute Transaction.directory_transition_allowed?(original, original, :restore)
   end
 
   test "local transition receipt requires exact candidate bytes and a timezone timestamp" do
@@ -285,18 +331,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp run_replay(state, preimage_hashes, postimages, should_write?) do
-    Enum.reduce_while(postimages, :ok, fn {name, postimage}, :ok ->
+    names = Enum.map(postimages, fn {name, _postimage} -> name end)
+
+    ConfirmedRecoveryWAL.replay(names, fn name ->
+      postimage = postimages[name]
       {current_images, writes} = Agent.get(state, & &1)
 
-      result =
-        Transaction.apply_image(current_images[name], preimage_hashes[name], postimage, fn bytes ->
-          persist_replay_image(state, name, current_images[name], writes, bytes, should_write?)
-        end)
-
-      case result do
-        :ok -> {:cont, :ok}
-        error -> {:halt, error}
-      end
+      Transaction.apply_image(current_images[name], preimage_hashes[name], postimage, fn bytes ->
+        persist_replay_image(state, name, current_images[name], writes, bytes, should_write?)
+      end)
     end)
   end
 
