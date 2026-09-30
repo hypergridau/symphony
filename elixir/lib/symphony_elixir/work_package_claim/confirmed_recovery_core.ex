@@ -1213,14 +1213,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
         cleanup: :pending,
         terminal: nil,
         cleanup_receipt: nil,
-        retirement: nil,
         termination_unconfirmed: false,
         leases: leases
-      }
+      } = execution
       when is_map(leases) ->
         lease = Map.get(leases, expected["sessionId"])
 
-        if is_map(lease) and lease.process_id == expected["processId"] and lease.status == :active and
+        if is_nil(Map.get(execution, :retirement)) and is_map(lease) and lease.process_id == expected["processId"] and lease.status == :active and
              lease.termination_required == false do
           :ok
         else
