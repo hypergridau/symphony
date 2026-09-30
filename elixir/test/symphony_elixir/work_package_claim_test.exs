@@ -70,6 +70,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   @repository "hypergridau/symphony"
   @issue_id "issue-349"
   @profile "profile-349"
+  @assignment_binding_digest String.duplicate("b", 64)
 
   @canonical_json_fixture ~s({"contractVersion":"work-package-runtime-attestation.v1","runnerId":"runner-349","managedProjectProfileId":"profile-349","reservationId":"reservation-349","reservationNonce":"nonce-349","issueId":"issue-349","generation":1,"sessionId":"worker-349","processId":"process-349","responsibleDelegationId":"delegation-349","executionFenceToken":"issue-349:1","runtimeLeaseId":"worker-349","repositoryRef":"hypergridau/symphony","scopeKeys":["repo:hypergridau/symphony","work:349"],"attestedAt":"2026-09-06T10:00:00.000Z"})
 
@@ -1615,14 +1616,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     {:ok, base} =
@@ -1633,12 +1635,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         "host-token"
       )
 
+    base = synthetic_assignment_binding(base)
+
     slot = %{
       slot_id: base.slot_id,
       claim_name: base.claim_name,
       claim_uid: "pvc-uid-one",
       lease_id: "12345678-1234-4123-8123-123456789abc",
       assignment_sha256: assignment.sha256,
+      binding_sha256: base.assignment_subject_digest,
       seat: assignment.seat
     }
 
@@ -1648,7 +1653,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         image: base.image,
         repository_id: base.repository_id,
         auth_slot: slot,
-        auth_slot_catalog: %{base.slot_id => base.claim_name}
+        auth_slot_catalog: %{base.slot_id => base.claim_name},
+        assignment_binding_digest: base.assignment_subject_digest
       })
 
     name = expected["metadata"]["name"]
@@ -1790,18 +1796,21 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     assert {:ok, config} =
              HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    config = synthetic_assignment_binding(config)
 
     caller = self()
 
@@ -2007,18 +2016,21 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     {:ok, base} =
       HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    base = synthetic_assignment_binding(base)
 
     caller = self()
 
@@ -2615,6 +2627,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       claim_uid: "pvc-uid-one",
       lease_id: "12345678-1234-4123-8123-123456789abc",
       assignment_sha256: assignment.sha256,
+      binding_sha256: base.assignment_subject_digest,
       seat: assignment.seat
     }
 
@@ -2624,7 +2637,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         image: base.image,
         repository_id: base.repository_id,
         auth_slot: slot,
-        auth_slot_catalog: %{base.slot_id => base.claim_name}
+        auth_slot_catalog: %{base.slot_id => base.claim_name},
+        assignment_binding_digest: base.assignment_subject_digest
       })
 
     name = expected["metadata"]["name"]
@@ -2648,6 +2662,57 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         Base.url_encode64(Jason.encode!([1, "frigga", name, uid, assignment.sha256]), padding: false)
 
     {allocation_id, job}
+  end
+
+  defp synthetic_assignment_binding(config) do
+    identifier = "HGS-349"
+    branch_ref = "refs/heads/hgs-349"
+
+    payload = %{
+      "schema_version" => 1,
+      "repository_ref" => @repository,
+      "entries" => [%{"issue_id" => @issue_id, "identifier" => identifier}]
+    }
+
+    bytes = Jason.encode!(payload)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+    signature =
+      :crypto.sign(
+        :eddsa,
+        :none,
+        "hypergrid.symphony.managed-delegation.v1\0" <> bytes,
+        [private_key, :ed25519]
+      )
+
+    manifest = %{
+      repository_ref: @repository,
+      schema_version: 1,
+      entries: [%{issue_id: @issue_id, identifier: identifier}],
+      source_bytes: bytes,
+      source_signature_hex: Base.encode16(signature, case: :lower),
+      source_public_key_hex: Base.encode16(public_key, case: :lower),
+      source_sha256: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
+      signer_key_sha256: Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
+    }
+
+    post_fun = fn _url, _options ->
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "status" => "bound",
+           "assignmentDigest" => @assignment_binding_digest,
+           "branchRef" => branch_ref
+         }
+       }}
+    end
+
+    Map.merge(config, %{
+      managed_delegations: manifest,
+      assignment_subject_digest: @assignment_binding_digest,
+      assignment_bind_post_fun: post_fun
+    })
   end
 
   defp owned_spawn_pod(job) do

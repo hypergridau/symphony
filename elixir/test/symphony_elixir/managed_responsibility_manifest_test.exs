@@ -117,10 +117,13 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
       %{root: root, path: path, env: env, now: now, private_key: private_key}
     end
 
-    test "loads a pinned regular file without activating queued grants", %{env: env, now: now} do
+    test "loads a pinned regular file without activating queued grants", %{path: path, env: env, now: now} do
       assert {:ok, manifest} = Manifest.load(env, now)
       assert manifest.source_sha256 == env["DAHLIA_MANAGED_DELEGATION_SHA256"]
       assert manifest.signer_key_sha256 == digest(Base.decode16!(env["DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"], case: :lower))
+      assert manifest.source_bytes == File.read!(path)
+      assert manifest.source_signature_hex == env["DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519"]
+      assert manifest.source_public_key_hex == env["DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"]
       assert length(manifest.entries) == 2
       refute Map.has_key?(manifest, :delegations)
     end

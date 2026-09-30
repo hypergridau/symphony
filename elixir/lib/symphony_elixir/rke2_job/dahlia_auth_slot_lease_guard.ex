@@ -20,18 +20,22 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @spec prepare_slot(map(), String.t(), map(), term()) :: {:ok, map()} | {:held, atom()}
   def prepare_slot(%{sha256: digest, seat: seat} = assignment, slot_id, catalog, context)
       when is_binary(digest) and is_binary(seat) and is_binary(slot_id) and is_map(catalog) do
+    binding_digest = subject_digest(context, assignment)
+
     preflight = %{
       slot_id: slot_id,
       claim_name: Map.get(catalog, slot_id),
       claim_uid: "preflight",
       lease_id: "preflight",
       assignment_sha256: digest,
+      binding_sha256: binding_digest,
       seat: seat
     }
 
-    with {:ok, _fragments} <- AuthSlotSpec.compile(assignment, preflight, catalog),
+    with true <- valid_digest?(binding_digest),
+         {:ok, _fragments} <- AuthSlotSpec.compile(assignment, preflight, catalog, binding_digest),
          {:ok, claim_uid} <- read_claim_uid(context, preflight.claim_name),
-         {:ok, data} <- post(context, "/reserve", %{assignmentDigest: digest, slotId: slot_id, claimUid: claim_uid}),
+         {:ok, data} <- post(context, "/reserve", %{assignmentDigest: binding_digest, slotId: slot_id, claimUid: claim_uid}),
          true <- is_boolean(data["replayed"]),
          slot = %{
            slot_id: data["slotId"],
@@ -39,10 +43,11 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
            claim_uid: data["claimUid"],
            lease_id: data["leaseId"],
            assignment_sha256: digest,
+           binding_sha256: binding_digest,
            seat: seat
          },
          true <- slot.slot_id == slot_id and slot.claim_uid == claim_uid and valid_lease_id?(slot.lease_id),
-         {:ok, _fragments} <- AuthSlotSpec.compile(assignment, slot, catalog) do
+         {:ok, _fragments} <- AuthSlotSpec.compile(assignment, slot, catalog, binding_digest) do
       {:ok, slot}
     else
       _ -> {:held, :codex_auth_slot_reservation_unverified}
@@ -66,12 +71,12 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @impl true
   def reserve(slot, assignment, context) do
-    with :ok <- matching_assignment?(slot, assignment),
+    with :ok <- matching_assignment?(slot, assignment, context),
          {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
          true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
            post(context, "/reserve", %{
-             assignmentDigest: assignment.sha256,
+             assignmentDigest: Map.get(slot, :binding_sha256, assignment.sha256),
              slotId: slot.slot_id,
              claimUid: claim_uid
            }),
@@ -87,7 +92,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @impl true
   def bind_uid(slot, assignment, allocation, context) do
-    with :ok <- matching_assignment?(slot, assignment),
+    with :ok <- matching_assignment?(slot, assignment, context),
          {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
          true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
@@ -103,7 +108,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @impl true
   def authorize(slot, assignment, allocation, context) do
-    with :ok <- matching_assignment?(slot, assignment),
+    with :ok <- matching_assignment?(slot, assignment, context),
          {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
          true <- claim_uid == slot.claim_uid,
          {:ok, data} <-
@@ -119,7 +124,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @impl true
   def verify_bound(slot, assignment, allocation, context) do
-    with :ok <- matching_assignment?(slot, assignment),
+    with :ok <- matching_assignment?(slot, assignment, context),
          {:ok, data} <-
            post(context, "/" <> slot.lease_id <> "/verify-bound", %{
              allocationId: allocation.id
@@ -133,7 +138,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @impl true
   def release(slot, assignment, allocation, context) do
-    with :ok <- matching_assignment?(slot, assignment),
+    with :ok <- matching_assignment?(slot, assignment, context),
          {:ok, namespace, uid} <- allocation_identity(allocation, assignment.sha256),
          {:ok, receipts} <- cleanup_receipts(context, slot, assignment, allocation, namespace, uid),
          :ok <- release_saved_receipts(context, slot, assignment, allocation, namespace, uid, receipts) do
@@ -268,17 +273,28 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   defp matching_assignment?(
          %{assignment_sha256: digest, seat: seat} = slot,
-         %{sha256: digest, seat: seat}
+         %{sha256: digest, seat: seat} = assignment,
+         context
        ) do
+    binding_digest = Map.get(slot, :binding_sha256, assignment.sha256)
+
     if valid_lease_id?(Map.get(slot, :lease_id)) and valid_slot_name?(Map.get(slot, :slot_id)) and
-         valid_slot_name?(Map.get(slot, :claim_name)) and valid_claim_uid?(Map.get(slot, :claim_uid)) do
+         valid_slot_name?(Map.get(slot, :claim_name)) and valid_claim_uid?(Map.get(slot, :claim_uid)) and
+         valid_digest?(binding_digest) and binding_digest == subject_digest(context, assignment) do
       :ok
     else
       :invalid_binding
     end
   end
 
-  defp matching_assignment?(_slot, _assignment), do: :invalid_binding
+  defp matching_assignment?(_slot, _assignment, _context), do: :invalid_binding
+
+  defp subject_digest(context, assignment) do
+    Map.get(context, :assignment_subject_digest, Map.get(assignment, :sha256))
+  end
+
+  defp valid_digest?(value) when is_binary(value), do: Regex.match?(~r/\A[a-f0-9]{64}\z/, value)
+  defp valid_digest?(_value), do: false
 
   defp valid_lease_id?(value) when is_binary(value),
     do: Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, value)
