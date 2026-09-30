@@ -106,26 +106,26 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
          true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
-         {:ok, bound_config} <- bind_assignment(assignment, binding, config),
-         {:ok, kube_context} <- client_context(assignment, bound_config),
-         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(bound_config, nil)),
+         {:ok, kube_context} <- client_context(assignment, config),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
          name = get_in(preflight_job, ["metadata", "name"]),
          {:ok, job} <- job_reader(config).(@namespace, name, kube_context),
-         {:ok, slot} <- retained_slot(job, assignment, bound_config),
-         {:ok, expected} <- JobSpec.compile(assignment, job_config(bound_config, slot)),
+         {:ok, slot} <- retained_slot(job, assignment, config),
+         {:ok, replay_config} <- restore_binding_digest(config, slot),
+         {:ok, expected} <- JobSpec.compile(assignment, job_config(replay_config, slot)),
          true <- JobSpec.owned_job_for_cleanup?(job, expected),
          true <- get_in(job, ["spec", "suspend"]) == suspended,
          true <- allocation_id == encoded_allocation_id(expected, job),
-         guard_context = guard_context(bound_config, binding, kube_context),
-         :ok <- slot_guard(bound_config).verify_claim_uid(slot, guard_context),
+         guard_context = guard_context(replay_config, binding, kube_context),
+         :ok <- slot_guard(replay_config).verify_claim_uid(slot, guard_context),
          :ok <-
-           slot_guard(bound_config).verify_bound(
+           slot_guard(replay_config).verify_bound(
              slot,
              assignment,
              %{id: allocation_id, status: :ready},
              guard_context
            ) do
-      {:ok, build_context(bound_config, binding, slot, guard_context)}
+      {:ok, build_context(replay_config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_retained_allocation_unverified}
     end

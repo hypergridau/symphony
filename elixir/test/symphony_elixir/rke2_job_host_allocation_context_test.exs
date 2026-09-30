@@ -24,6 +24,12 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     end
   end
 
+  defmodule UnstartedObservationClient do
+    def get_job("frigga", _name, _context), do: {:ok, Process.get(:unstarted_retained_job)}
+    def list_pods_snapshot("frigga", _context), do: {:ok, %{items: [], resource_version: "pod-list-1"}}
+    def delete_suspended_job(_namespace, _name, _uid, _version, _context), do: raise("prepare must not delete the Job")
+  end
+
   @image "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64)
   @lease_id "12345678-1234-4123-8123-123456789abc"
   @env %{
@@ -199,7 +205,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     refute_receive {:slot_post, _, _}
   end
 
-  test "reattaches only the exact suspended Job and bound OAuth slot without reserving a lease" do
+  test "reattaches the exact paused suspended Job from its saved binding after authority expires" do
     assignment = assignment()
     binding = claim_binding(assignment)
     {:ok, base} = host_configuration(assignment)
@@ -232,6 +238,8 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     job =
       expected
       |> put_in(["metadata", "uid"], "job-uid-one")
+      |> put_in(["metadata", "generation"], 1)
+      |> put_in(["metadata", "resourceVersion"], "job-version-1")
       |> put_in(["metadata", "labels"], Map.merge(expected["metadata"]["labels"], generated))
       |> put_in(["spec", "selector"], %{"matchLabels" => %{"batch.kubernetes.io/controller-uid" => "job-uid-one"}})
       |> put_in(["spec", "template", "metadata", "labels"], Map.merge(expected["spec"]["template"]["metadata"]["labels"], generated))
@@ -248,14 +256,19 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       base
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
       |> Map.put(:adapter, TerminalAdapter)
-      |> Map.put(:assignment_bind_post_fun, bind_post_fun(assignment, caller))
+      |> Map.put(:assignment_bind_post_fun, fn url, opts ->
+        send(caller, {:assignment_bind_denied, url, opts[:json]})
+        {:ok, %Req.Response{status: 409, body: %{"status" => "denied"}}}
+      end)
       |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
+      |> Map.put(:observation_client, UnstartedObservationClient)
       |> Map.put(:job_read_fun, fn "frigga", name, %{synthetic: true} ->
         send(caller, {:job_read, name})
         {:ok, Process.get(:retained_job)}
       end)
 
     Process.put(:retained_job, job)
+    Process.put(:unstarted_retained_job, job)
     assert {:ok, context} = HostAllocationContext.reattach(assignment, binding, allocation_id, config)
     assert_receive {:job_read, _name}
     assert_receive :claim_uid_verified
@@ -265,6 +278,16 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert context.result_journal_root == @env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
     assert context.auth_slot_lease_guard_context.result_journal_root == context.result_journal_root
     assert is_function(context.auth_slot_lease_guard_context.cleanup_receipt_fun, 3)
+    assert context.config.assignment_binding_digest == @binding_digest
+    refute_receive {:assignment_bind_denied, _, _}
+
+    assert {:ok, unstarted_context} =
+             HostAllocationContext.reattach_unstarted(assignment, binding, allocation_id, config)
+
+    assert unstarted_context.config.auth_slot == slot
+    assert_receive :claim_uid_verified
+    assert_receive :lease_binding_verified
+    refute_receive {:assignment_bind_denied, _, _}
 
     Process.put(:retained_job, put_in(job, ["metadata", "uid"], "replacement-uid"))
 
@@ -288,6 +311,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert started_context.config.auth_slot == slot
     assert_receive :claim_uid_verified
     assert_receive :lease_binding_verified
+    refute_receive {:assignment_bind_denied, _, _}
 
     assert {:held, :terminal_result_pending} = TerminalOwner.reconcile(assignment, binding, allocation_id, config)
     assert_receive {:terminal_finalization, ^allocation_id, assignment_sha256, finalize_key, ^slot}
@@ -396,7 +420,6 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert finalize_key == assignment.sha256 <> ":finalize"
     assert_receive :claim_uid_verified
     refute_receive :lease_binding_verified
-    assert_receive {:assignment_bind_denied, _, _}
     refute_receive {:assignment_bind_denied, _, _}
 
     altered_id = String.replace(allocation_id, "rke2job:v1:", "rke2job:v2:")
