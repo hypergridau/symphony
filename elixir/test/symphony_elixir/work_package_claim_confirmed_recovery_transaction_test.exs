@@ -420,10 +420,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   test "startup and completion hold orphan or applying evidence closed" do
     fixture = positive_apply_fixture()
     assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
-    marker = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+    files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(Map.fetch!(files, fixture.marker_path))
+    completion = install_completion_evidence(fixture, marker, files)
     Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(Map.put(marker, "status", "applying"))))
-    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(fixture.context)
-    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(fixture.context)
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete_with_test_context(completion.context)
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(completion.context)
+    assert {:read, completion.receipt_path} in Agent.get(fixture.vfs, & &1.events)
+    assert :public_key_read in Agent.get(fixture.vfs, & &1.events)
 
     Agent.update(fixture.vfs, fn state ->
       %{state | files: Map.delete(state.files, fixture.marker_path)}
@@ -442,7 +446,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         {:ok, ["candidate.json", "confirmed-root-envelope.json"]}
     end
 
-    context = %{fixture.context | host_ops: Map.put(fixture.context.host_ops, :ls, list_evidence)}
+    context = %{completion.context | host_ops: Map.put(completion.context.host_ops, :ls, list_evidence)}
 
     assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(context)
     assert_received :orphan_evidence_listed
