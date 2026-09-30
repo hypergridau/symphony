@@ -313,8 +313,8 @@ The managed spawn path retains the exact claim returned after provider and root-
 acknowledgement. It rebuilds the current assignment bundle and rejects a missing or mismatched
 claim before dispatch. A signed RKE2 assignment cannot fall through to the persistent local
 `AgentRunner`. When the trusted host supplies a disposable RKE2 context and the pause gate is
-open, the serialized dispatcher persists `allocation_pending` under the claim journal lock
-before calling `SuspendedController.allocate_pending/3` to create or reconcile one suspended
+open, `SuspendedController.allocate/3` atomically persists the exact assignment snapshot and
+`allocation_pending` under the claim journal lock before creating or reconciling one suspended
 Job and durably bind its exact allocation to the claim. Replay of a journaled
 allocation skips another adapter call. An uncertain allocation keeps the provider claim and
 local lease held. With the complete host context and a configured running pause gate,

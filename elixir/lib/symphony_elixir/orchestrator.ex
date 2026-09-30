@@ -2681,12 +2681,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp create_disposable_allocation(state, issue, dispatch, context, input, context_source) do
-    allocation =
-      WorkPackageClaim.allocate_suspended(input, fn ->
-        SuspendedController.allocate_pending(dispatch.assignment_bundle, input, context)
-      end)
-
-    case allocation do
+    case SuspendedController.allocate(dispatch.assignment_bundle, input, context) do
       {:ok, %{id: allocation_id}} ->
         if match?({:host, _config}, context_source) do
           activate_disposable_allocation(state, issue, dispatch, context, input, allocation_id)

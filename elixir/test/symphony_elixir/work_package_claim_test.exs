@@ -6,6 +6,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
       {:ok, journal} = Journal.load(context.claim_journal_path)
       [reservation] = Map.values(journal.reservations)
       send(context.test_pid, {:allocation_snapshot_observed, reservation.assignment_snapshot})
+      send(context.test_pid, {:allocation_intent_observed, reservation.dispatch.phase, reservation.assignment_snapshot})
     end
 
     send(context.test_pid, {:allocation_requested, key})
@@ -241,6 +242,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
              )
 
     refute_receive {:allocation_requested, _key}
+    assert {:ok, unchanged_journal} = Journal.load(path)
+    [unchanged_reservation] = Map.values(unchanged_journal.reservations)
+    assert unchanged_reservation.dispatch.phase == "confirmed"
 
     assert {:ok, %{id: allocation_id, status: :ready}} =
              SuspendedController.allocate(assignment, input, context)
@@ -248,6 +252,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert allocation_id == "rke2job:v1:fixture-allocation"
     assert_receive {:allocation_snapshot_observed, snapshot}
     assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(snapshot)
+    assert_receive {:allocation_intent_observed, "allocation_pending", ^snapshot}
     assert_receive {:allocation_requested, allocation_key}
     assert allocation_key == assignment.sha256 <> ":allocation"
 
@@ -1832,11 +1837,20 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
                now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
              )
 
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
     parent = self()
 
     allocation =
       Task.async(fn ->
-        WorkPackageClaim.allocate_suspended(input, fn ->
+        WorkPackageClaim.allocate_suspended(input, assignment, fn ->
           send(parent, :allocation_entered_locked_section)
           receive do: (:continue_allocation -> :ok)
           {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}}
@@ -1847,6 +1861,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert {:ok, pending_journal} = Journal.load(path)
     [pending_reservation] = Map.values(pending_journal.reservations)
     assert pending_reservation.dispatch.phase == "allocation_pending"
+    assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(pending_reservation.assignment_snapshot)
 
     recovery = Task.async(fn -> WorkPackageClaim.begin_pre_allocation_recovery(input) end)
     send(allocation.pid, :continue_allocation)
@@ -1875,8 +1890,17 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
                now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
              )
 
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
     assert {:held, :allocation_response_uncertain} =
-             WorkPackageClaim.allocate_suspended(input, fn -> {:held, :allocation_response_uncertain} end)
+             WorkPackageClaim.allocate_suspended(input, assignment, fn -> {:held, :allocation_response_uncertain} end)
 
     assert {:error, :preallocation_claim_state_changed} = WorkPackageClaim.begin_pre_allocation_recovery(input)
     assert {:ok, journal} = Journal.load(path)
