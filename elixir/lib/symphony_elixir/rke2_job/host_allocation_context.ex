@@ -144,17 +144,16 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
          true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
-         {:ok, bound_config} <- bind_assignment(assignment, binding, config),
-         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(bound_config, nil)),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
          {:ok, uid} <- terminal_allocation_uid(allocation_id, preflight_job),
          {:ok, _observation, slot} <- ResultJournal.load_with_slot(assignment, uid, config.result_journal_root),
          true <- is_map(slot) and slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
-         true <- slot.binding_sha256 == bound_config.assignment_subject_digest,
-         {:ok, kube_context} <- terminal_client_context(assignment, bound_config),
-         guard_context = guard_context(bound_config, binding, kube_context),
+         {:ok, replay_config} <- restore_binding_digest(config, slot),
+         {:ok, kube_context} <- terminal_client_context(assignment, replay_config),
+         guard_context = guard_context(replay_config, binding, kube_context),
          # The exact lease may already be released; Dahlia validates its retained receipt on replay.
-         :ok <- slot_guard(bound_config).verify_claim_uid(slot, guard_context) do
-      {:ok, build_context(bound_config, binding, slot, guard_context)}
+         :ok <- slot_guard(replay_config).verify_claim_uid(slot, guard_context) do
+      {:ok, build_context(replay_config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_terminal_allocation_unverified}
     end
@@ -374,6 +373,15 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       {:held, reason} -> {:held, reason}
     end
   end
+
+  defp restore_binding_digest(config, %{binding_sha256: digest})
+       when is_binary(digest) and byte_size(digest) == 64 do
+    if Regex.match?(~r/\A[a-f0-9]{64}\z/, digest),
+      do: {:ok, Map.put(config, :assignment_subject_digest, digest)},
+      else: {:held, :rke2_terminal_allocation_unverified}
+  end
+
+  defp restore_binding_digest(_config, _slot), do: {:held, :rke2_terminal_allocation_unverified}
 
   defp cleanup_receipt_fun(config) do
     fn slot, assignment, allocation ->

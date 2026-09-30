@@ -310,7 +310,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     refute_receive {:terminal_finalization, _, _, _, _}
   end
 
-  test "reattaches terminal cleanup after Job deletion and OAuth lease release" do
+  test "reattaches terminal cleanup from its saved binding after current authority expires" do
     assignment = assignment()
     binding = claim_binding(assignment)
     {:ok, base} = host_configuration(assignment)
@@ -368,7 +368,10 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     config =
       base
       |> Map.put(:result_journal_root, root)
-      |> Map.put(:assignment_bind_post_fun, bind_post_fun(assignment, self()))
+      |> Map.put(:assignment_bind_post_fun, fn url, opts ->
+        send(caller, {:assignment_bind_denied, url, opts[:json]})
+        {:ok, %Req.Response{status: 409, body: %{"status" => "denied"}}}
+      end)
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
       |> Map.put(:adapter, TerminalAdapter)
       |> Map.put(:client_context_fun, fn _assignment, :finalize, key, _config ->
@@ -379,11 +382,13 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
 
     assert {:ok, context} = HostAllocationContext.reattach_terminal(assignment, binding, allocation_id, config)
     assert context.config.auth_slot == slot
+    assert context.config.assignment_binding_digest == @binding_digest
     assert context.result_journal_root == root
     assert_receive {:finalize_context, finalize_key}
     assert finalize_key == assignment.sha256 <> ":finalize"
     assert_receive :claim_uid_verified
     refute_receive :lease_binding_verified
+    refute_receive {:assignment_bind_denied, _, _}
 
     assert {:held, :terminal_result_pending} = TerminalOwner.reconcile(assignment, binding, allocation_id, config)
     assert_receive {:terminal_finalization, ^allocation_id, assignment_sha256, finalize_key, ^slot}
@@ -391,6 +396,8 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert finalize_key == assignment.sha256 <> ":finalize"
     assert_receive :claim_uid_verified
     refute_receive :lease_binding_verified
+    assert_receive {:assignment_bind_denied, _, _}
+    refute_receive {:assignment_bind_denied, _, _}
 
     altered_id = String.replace(allocation_id, "rke2job:v1:", "rke2job:v2:")
 

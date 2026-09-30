@@ -40,7 +40,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAssignmentBinding do
   def bind(_assignment, _claim_binding, _config), do: {:held, :managed_assignment_binding_unverified}
 
   defp matching_claim?(
-         %{lease: %{issue_id: issue_id, generation: generation}, repository_ref: repository_ref, seat: runner_id},
+         %{lease: %{issue_id: issue_id, generation: generation}, repository_ref: repository_ref},
          %{
            issue_id: issue_id,
            generation: generation,
@@ -49,7 +49,8 @@ defmodule SymphonyElixir.RKE2Job.DahliaAssignmentBinding do
            reservation_id: reservation_id
          }
        )
-       when is_binary(reservation_id) and byte_size(reservation_id) in 1..256,
+       when is_binary(runner_id) and byte_size(runner_id) in 1..256 and is_binary(reservation_id) and
+              byte_size(reservation_id) in 1..256,
        do: :ok
 
   defp matching_claim?(_assignment, _claim_binding), do: {:error, :managed_assignment_claim_mismatch}
