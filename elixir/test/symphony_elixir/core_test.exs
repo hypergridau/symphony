@@ -1528,11 +1528,64 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
+  test "admission diagnostics identify local selection and report live admission predicates" do
+    write_workflow_file!(Workflow.workflow_file_path(), worker_ssh_hosts: [])
+    issue = admission_diagnostic_issue()
+    state = %Orchestrator.State{}
+
+    diagnostics = Orchestrator.admission_diagnostic_fields_for_test(issue, state)
+
+    assert diagnostics.selected_for_dispatch
+    assert diagnostics.candidate
+    assert diagnostics.budget
+    assert diagnostics.available_slots > 0
+    assert diagnostics.state_slot
+    assert diagnostics.worker_slot
+    assert diagnostics.worker_selection == "local"
+    assert diagnostics.reasons == "none"
+  end
+
+  test "admission diagnostics report a full SSH worker pool as a selection blocker" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      worker_ssh_hosts: ["worker-a"],
+      worker_max_concurrent_agents_per_host: 1
+    )
+
+    issue = admission_diagnostic_issue()
+    state = %Orchestrator.State{running: %{"another-issue" => %{worker_host: "worker-a"}}}
+
+    diagnostics = Orchestrator.admission_diagnostic_fields_for_test(issue, state)
+
+    refute diagnostics.selected_for_dispatch
+    refute diagnostics.worker_slot
+    assert diagnostics.worker_selection == "no_capacity"
+    assert diagnostics.reasons =~ "worker_slots_full"
+  end
+
+  test "admission diagnostics match only the configured exact issue ID" do
+    issue = admission_diagnostic_issue()
+
+    assert Orchestrator.admission_diagnostic_target_matches_for_test(issue.id, issue.id)
+    refute Orchestrator.admission_diagnostic_target_matches_for_test("another-issue", issue.id)
+    refute Orchestrator.admission_diagnostic_target_matches_for_test("  ", issue.id)
+  end
+
   defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
     remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
 
     assert remaining_ms >= min_remaining_ms
     assert remaining_ms <= max_remaining_ms
+  end
+
+  defp admission_diagnostic_issue do
+    %Issue{
+      id: "11111111-1111-4111-8111-000000000736",
+      identifier: "HGS-736",
+      title: "Admission diagnostic test",
+      state: "Todo",
+      labels: ["symphony-ready"],
+      dispatchable: true
+    }
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)
