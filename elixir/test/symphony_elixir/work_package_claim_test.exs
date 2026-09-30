@@ -6,6 +6,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
       {:ok, journal} = Journal.load(context.claim_journal_path)
       [reservation] = Map.values(journal.reservations)
       send(context.test_pid, {:allocation_snapshot_observed, reservation.assignment_snapshot})
+      send(context.test_pid, {:allocation_intent_observed, reservation.dispatch.phase, reservation.assignment_snapshot})
     end
 
     send(context.test_pid, {:allocation_requested, key})
@@ -241,6 +242,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
              )
 
     refute_receive {:allocation_requested, _key}
+    assert {:ok, unchanged_journal} = Journal.load(path)
+    [unchanged_reservation] = Map.values(unchanged_journal.reservations)
+    assert unchanged_reservation.dispatch.phase == "confirmed"
 
     assert {:ok, %{id: allocation_id, status: :ready}} =
              SuspendedController.allocate(assignment, input, context)
@@ -248,6 +252,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert allocation_id == "rke2job:v1:fixture-allocation"
     assert_receive {:allocation_snapshot_observed, snapshot}
     assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(snapshot)
+    assert_receive {:allocation_intent_observed, "allocation_pending", ^snapshot}
     assert_receive {:allocation_requested, allocation_key}
     assert allocation_key == assignment.sha256 <> ":allocation"
 
@@ -1739,7 +1744,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
     assert {:ok, journal} = Journal.load(path)
     [reservation] = Map.values(journal.reservations)
-    assert reservation.dispatch.phase == "confirmed"
+    assert reservation.dispatch.phase == "allocation_pending"
     assert reservation.reservation_id == "reservation-349"
   end
 
@@ -1779,6 +1784,129 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     [reservation] = Map.values(journal.reservations)
     assert reservation.dispatch.phase == "allocation_suspended"
     assert reservation.dispatch.allocation_id == allocation_id
+  end
+
+  test "host allocation context failure durably enters recovery before Job allocation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Host allocation context unavailable",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    host_config = %{
+      repository_ref: @repository,
+      client_context_fun: fn _assignment, :allocate, _key, _config ->
+        {:error, :synthetic_host_allocation_context_unavailable}
+      end
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_host_config: host_config)
+
+    refute_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "rke2_host_allocation_context_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    assert reservation.dispatch.allocation_id == nil
+    assert reservation.reservation_id == "reservation-349"
+  end
+
+  test "pre-allocation recovery cannot release the lease after a concurrent Job allocation wins" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
+    parent = self()
+
+    allocation =
+      Task.async(fn ->
+        WorkPackageClaim.allocate_suspended(input, assignment, fn ->
+          send(parent, :allocation_entered_locked_section)
+          receive do: (:continue_allocation -> :ok)
+          {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}}
+        end)
+      end)
+
+    assert_receive :allocation_entered_locked_section
+    assert {:ok, pending_journal} = Journal.load(path)
+    [pending_reservation] = Map.values(pending_journal.reservations)
+    assert pending_reservation.dispatch.phase == "allocation_pending"
+    assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(pending_reservation.assignment_snapshot)
+
+    recovery = Task.async(fn -> WorkPackageClaim.begin_pre_allocation_recovery(input) end)
+    send(allocation.pid, :continue_allocation)
+
+    assert {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}} = Task.await(allocation)
+    assert {:error, :preallocation_claim_state_changed} = Task.await(recovery)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == "rke2job:v1:race-allocation"
+  end
+
+  test "uncertain first allocation remains held and cannot enter pre-allocation recovery" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
+    assert {:held, :allocation_response_uncertain} =
+             WorkPackageClaim.allocate_suspended(input, assignment, fn -> {:held, :allocation_response_uncertain} end)
+
+    assert {:error, :preallocation_claim_state_changed} = WorkPackageClaim.begin_pre_allocation_recovery(input)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_pending"
+    assert is_nil(reservation.dispatch.allocation_id)
   end
 
   test "signed dispatch composes trusted host context before suspended allocation" do

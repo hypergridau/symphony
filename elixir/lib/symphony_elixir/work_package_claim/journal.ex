@@ -233,6 +233,24 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
     end
   end
 
+  @doc "Runs one claim-journal transition under a process-wide lock for its exact path."
+  @spec with_lock(Path.t(), (-> result)) :: result | {:error, :claim_journal_lock_unavailable}
+        when result: term()
+  def with_lock(path, callback) when is_binary(path) and is_function(callback, 0) do
+    lock_id = {{__MODULE__, Path.expand(path)}, self()}
+
+    case :global.trans(lock_id, callback) do
+      {:aborted, _reason} -> {:error, :claim_journal_lock_unavailable}
+      result -> result
+    end
+  rescue
+    _error -> {:error, :claim_journal_lock_unavailable}
+  catch
+    _kind, _reason -> {:error, :claim_journal_lock_unavailable}
+  end
+
+  def with_lock(_path, _callback), do: {:error, :claim_journal_lock_unavailable}
+
   @spec validate(state()) :: :ok | {:error, term()}
   def validate(%{schema_version: @schema_version, reservations: reservations}) when is_map(reservations) do
     if Enum.all?(reservations, fn {key, reservation} -> is_binary(key) and valid_reservation?(reservation) end) do

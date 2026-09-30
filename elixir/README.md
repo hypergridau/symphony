@@ -313,8 +313,9 @@ The managed spawn path retains the exact claim returned after provider and root-
 acknowledgement. It rebuilds the current assignment bundle and rejects a missing or mismatched
 claim before dispatch. A signed RKE2 assignment cannot fall through to the persistent local
 `AgentRunner`. When the trusted host supplies a disposable RKE2 context and the pause gate is
-open, the serialized dispatcher calls `SuspendedController.allocate/3` to create or reconcile
-one suspended Job and durably bind its exact allocation to the claim. Replay of a journaled
+open, `SuspendedController.allocate/3` atomically persists the exact assignment snapshot and
+`allocation_pending` under the claim journal lock before creating or reconciling one suspended
+Job and durably bind its exact allocation to the claim. Replay of a journaled
 allocation skips another adapter call. An uncertain allocation keeps the provider claim and
 local lease held. With the complete host context and a configured running pause gate,
 the same serialized callback now resumes the exact suspended allocation. It journals
@@ -322,6 +323,13 @@ the root spawn intent before the UID-fenced activation request. The final host g
 replays current claim and root authority, checks the assignment and allocation binding,
 and reads the pause gate again. A held guard or uncertain activation retains the claim,
 Job, and lease for reconciliation. No disposable runner has been qualified.
+
+If host allocation context preparation fails before Job allocation, the dispatcher uses the
+strict paused-recovery transition to durably mark only a confirmed claim with no allocation
+identity as `recovery_pending` and release its local execution lease. If create has begun or
+its result is uncertain, `allocation_pending` keeps the provider claim and local lease held.
+The provider claim remains held until signed host preflight proves the exact retained history
+and complete, current Job/Pod absence.
 
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
