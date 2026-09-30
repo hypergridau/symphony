@@ -44,6 +44,32 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert {:error, :transaction_target_conflict} = Transaction.classify_image(nil, sha256("before"), postimage)
   end
 
+  test "production image replay stops before persisting any image after a conflict" do
+    parent = self()
+
+    images = [
+      %{name: :journal, preimage_sha256: sha256("expected"), postimage_bytes: "journal-post"},
+      %{name: :fence, preimage_sha256: sha256("fence-before"), postimage_bytes: "fence-post"}
+    ]
+
+    assert {:error, :transaction_target_conflict} =
+             ConfirmedRecoveryWAL.apply_images(
+               images,
+               fn
+                 :journal ->
+                   "contradictory"
+
+                 :fence ->
+                   send(parent, :later_image_must_not_be_read)
+                   "fence-before"
+               end,
+               fn name, _bytes, _already_applied? -> send(parent, {:persist_must_not_run, name}) end
+             )
+
+    refute_received :later_image_must_not_be_read
+    refute_received {:persist_must_not_run, _name}
+  end
+
   test "production WAL sequencer stops after the first failed state write" do
     parent = self()
 
@@ -404,22 +430,28 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp run_replay(state, preimage_hashes, postimages, should_write?) do
-    names = Enum.map(postimages, fn {name, _postimage} -> name end)
-
-    ConfirmedRecoveryWAL.replay(names, fn name ->
-      postimage = postimages[name]
-      {current_images, writes} = Agent.get(state, & &1)
-
-      Transaction.apply_image(current_images[name], preimage_hashes[name], postimage, fn bytes ->
-        persist_replay_image(state, name, current_images[name], writes, bytes, should_write?)
+    images =
+      Enum.map(postimages, fn {name, postimage} ->
+        %{name: name, preimage_sha256: preimage_hashes[name], postimage_bytes: postimage}
       end)
-    end)
+
+    ConfirmedRecoveryWAL.apply_images(
+      images,
+      fn name ->
+        {current_images, _writes} = Agent.get(state, & &1)
+        Map.get(current_images, name)
+      end,
+      fn name, bytes, already_applied? ->
+        persist_replay_image(state, name, bytes, already_applied?, should_write?)
+      end
+    )
   end
 
-  defp persist_replay_image(_state, _name, current, _writes, bytes, _should_write?) when current == bytes,
-    do: :ok
+  defp persist_replay_image(_state, _name, _bytes, true, _should_write?), do: :ok
 
-  defp persist_replay_image(state, name, _current, writes, bytes, should_write?) do
+  defp persist_replay_image(state, name, bytes, false, should_write?) do
+    {_images, writes} = Agent.get(state, & &1)
+
     if should_write?.(writes) do
       Agent.update(state, fn {images, count} -> {Map.put(images, name, bytes), count + 1} end)
       :ok

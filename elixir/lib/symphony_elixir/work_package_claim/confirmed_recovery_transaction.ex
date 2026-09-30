@@ -1463,17 +1463,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     with true <- marker["status"] in ["applying", "local_applied"],
          :ok <- freeze_state_directories(marker, runtime),
          :ok <- validate_current_pre_or_post(marker, runtime),
+         {:ok, images} <- marker_images(marker),
          :ok <-
-           ConfirmedRecoveryWAL.replay(@state_names, fn
-             "claimJournal" ->
-               apply_state_image(marker, "claimJournal", runtime.journal_path, runtime, &Journal.decode_bytes/1, &Journal.save/2)
-
-             "fence" ->
-               apply_state_image(marker, "fence", runtime.execution_fence_path, runtime, &FencePersistence.decode_bytes/1, &FencePersistence.save/2)
-
-             "responsibilityGraph" ->
-               apply_state_image(marker, "responsibilityGraph", runtime.responsibility_graph_path, runtime, &GraphPersistence.decode_bytes/1, &GraphPersistence.save/2)
-           end),
+           ConfirmedRecoveryWAL.apply_images(
+             images,
+             fn name -> read_marker_image(name, marker, runtime) end,
+             fn name, postimage_bytes, already_applied? ->
+               persist_marker_image(name, postimage_bytes, already_applied?, marker, runtime)
+             end
+           ),
          :ok <- verify_postimages(marker, runtime),
          {:ok, applied_marker} <- set_marker_applied(marker, marker_path) do
       {:ok, applied_marker}
@@ -1509,20 +1507,59 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
     end
   end
 
-  defp apply_state_image(marker, name, path, runtime, decode, save) do
+  defp marker_images(marker) do
+    marker_images(@state_names, marker, [])
+  end
+
+  defp marker_images([], _marker, images), do: {:ok, Enum.reverse(images)}
+
+  defp marker_images([name | rest], marker, images) do
+    case Base.url_decode64(marker["postimages"][name]["bytes"], padding: false) do
+      {:ok, bytes} ->
+        if digest(bytes) == marker["postimages"][name]["sha256"] do
+          image = %{
+            name: name,
+            preimage_sha256: marker_preimage_for(marker, name),
+            postimage_bytes: bytes
+          }
+
+          marker_images(rest, marker, [image | images])
+        else
+          {:error, :invalid_transaction_postimage}
+        end
+
+      _ ->
+        {:error, :invalid_transaction_postimage}
+    end
+  end
+
+  defp read_marker_image(name, marker, runtime) do
+    {path, _decode, _save} = marker_image_adapter(name, runtime)
+
+    case read_state_file(path, marker["stateOwnership"][name]["uid"]) do
+      {:ok, bytes} -> bytes
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp persist_marker_image(name, postimage_bytes, already_applied?, marker, runtime) do
+    {path, decode, save} = marker_image_adapter(name, runtime)
     ownership = marker["stateOwnership"][name]
 
-    with {:ok, bytes} <- Base.url_decode64(marker["postimages"][name]["bytes"], padding: false),
-         true <- digest(bytes) == marker["postimages"][name]["sha256"],
-         {:ok, state} <- decode.(bytes),
-         {:ok, current} <- read_state_file(path, ownership["uid"]) do
-      apply_image(current, marker_preimage_for(marker, name), bytes, fn _postimage ->
-        persist_state_image(current == bytes, path, state, ownership, marker, runtime, save)
-      end)
-    else
+    case decode.(postimage_bytes) do
+      {:ok, state} -> persist_state_image(already_applied?, path, state, ownership, marker, runtime, save)
       _ -> {:error, :invalid_transaction_postimage}
     end
   end
+
+  defp marker_image_adapter("claimJournal", runtime),
+    do: {runtime.journal_path, &Journal.decode_bytes/1, &Journal.save/2}
+
+  defp marker_image_adapter("fence", runtime),
+    do: {runtime.execution_fence_path, &FencePersistence.decode_bytes/1, &FencePersistence.save/2}
+
+  defp marker_image_adapter("responsibilityGraph", runtime),
+    do: {runtime.responsibility_graph_path, &GraphPersistence.decode_bytes/1, &GraphPersistence.save/2}
 
   defp persist_state_image(already_applied, path, state, ownership, marker, runtime, save) do
     uid = ownership["uid"]
