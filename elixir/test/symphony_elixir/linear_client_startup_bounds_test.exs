@@ -67,7 +67,7 @@ defmodule SymphonyElixir.LinearClientStartupBoundsTest do
   end
 
   test "explicit project routes aggregate issues and fail closed on duplicate identity or a failed project" do
-    slugs = ["224f14ff3a24", "frigga-712f8a45bf36"]
+    slugs = ["224f14ff3a24", "712f8a45bf36"]
 
     graphql = fn _query, variables ->
       slug = variables[:projectSlug]
@@ -113,7 +113,7 @@ defmodule SymphonyElixir.LinearClientStartupBoundsTest do
       api_key: "test",
       project_slug: "224f14ff3a24",
       assignee: nil,
-      provider: %{"project_slugs" => ["224f14ff3a24", "frigga-712f8a45bf36"]}
+      provider: %{"project_slugs" => ["224f14ff3a24", "712f8a45bf36"]}
     }
 
     assert :ok = Adapter.validate_config(tracker)
@@ -122,7 +122,13 @@ defmodule SymphonyElixir.LinearClientStartupBoundsTest do
              Adapter.validate_config(%{tracker | provider: %{"project_slugs" => ["224f14ff3a24", "unknown"]}})
 
     assert {:error, :invalid_linear_project_slugs} =
-             Adapter.validate_config(%{tracker | project_slug: "frigga-712f8a45bf36"})
+             Adapter.validate_config(%{
+               tracker
+               | provider: %{"project_slugs" => ["224f14ff3a24", "frigga-712f8a45bf36"]}
+             })
+
+    assert {:error, :invalid_linear_project_slugs} =
+             Adapter.validate_config(%{tracker | project_slug: "712f8a45bf36"})
   end
 
   defp project_page(nodes) do

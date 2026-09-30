@@ -39,7 +39,7 @@ defmodule SymphonyElixir.Linear.Adapter do
         true
 
       slugs when is_list(slugs) ->
-        slugs == ["224f14ff3a24", "frigga-712f8a45bf36"] and
+        slugs == ["224f14ff3a24", "712f8a45bf36"] and
           tracker_settings.project_slug == "224f14ff3a24"
 
       _ ->
