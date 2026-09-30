@@ -3,7 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
 
   alias SymphonyElixir.{ExecutionFence, ResponsibilityGraph}
   alias SymphonyElixir.ManagedResponsibility.Admission
-  alias SymphonyElixir.WorkPackageClaim.{Abandonment, Dispatch, Journal, Unsubmitted}
+  alias SymphonyElixir.WorkPackageClaim.{Abandonment, Dispatch, Journal, Unsubmitted, UnsubmittedSuccessor}
 
   @doc "Computes a cleanup-bound retirement reference; it does not revoke or authorize a replacement grant."
   @spec authority_revocation_ref(map(), map(), map(), String.t()) :: {:ok, String.t()} | {:error, term()}
@@ -53,6 +53,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
       %{status: :terminal, cleanup: :cleaned} = execution ->
         completed_claim(runtime, issue.id, execution)
 
+      %{status: :retired, cleanup: :cleaned, retirement: %{type: "unsubmitted_successor"}} = execution ->
+        prepare_retired_unsubmitted_successor(runtime, fence, graph, issue, attempt, now_ms, execution)
+
       execution ->
         case Abandonment.check(runtime, fence, issue.id) do
           :authorized ->
@@ -64,6 +67,22 @@ defmodule SymphonyElixir.WorkPackageClaim.Recovery do
           {:error, _reason} = error ->
             error
         end
+    end
+  end
+
+  defp prepare_retired_unsubmitted_successor(runtime, fence, graph, issue, attempt, now_ms, execution) do
+    with %{entries: entries} = manifest <- runtime[:managed_delegations],
+         entry when is_map(entry) <- Enum.find(entries, &(&1.issue_id == issue.id)),
+         true <- execution.issue_id == issue.id,
+         {:ok, verified_fence, verified_graph, retirement_result} <-
+           UnsubmittedSuccessor.prepare(runtime, fence, graph, entry, now_ms),
+         true <- retirement_result in [:retired, :already_retired],
+         {:ok, candidate} <-
+           Admission.prepare(verified_graph, verified_fence, manifest, issue, attempt, now_ms, runtime) do
+      {:new, candidate}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :unsubmitted_successor_not_proven}
     end
   end
 

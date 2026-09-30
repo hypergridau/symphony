@@ -7,7 +7,7 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
   alias SymphonyElixir.ManagedResponsibility.Manifest
   alias SymphonyElixir.ManagedResponsibilityFixture, as: Fixture
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
-  alias SymphonyElixir.WorkPackageClaim.{Journal, UnsubmittedSuccessor}
+  alias SymphonyElixir.WorkPackageClaim.{Journal, Recovery, UnsubmittedSuccessor}
 
   @projection_id "workpkg_4446a7d851764ecf9bf62bfbae26d1cc"
   @grant_fields ~w(id parent_delegation_id role actor_id scope authority budget expires_at_ms expected_deliverable expected_evidence return_to_parent)a
@@ -128,6 +128,35 @@ defmodule SymphonyElixir.UnsubmittedSuccessorMigrationTest do
     assert :ok = ExecutionFence.validate(cold_fence)
     assert :ok = ResponsibilityGraph.validate(cold_graph)
     assert cold_fence.executions[context.issue.id].retirement.type == "unsubmitted_successor"
+  end
+
+  test "recovery admits only the exact signed successor after unsubmitted retirement", context do
+    {runtime, entry} = successor(context)
+
+    assert {:ok, retired_fence, retired_graph, :retired} =
+             UnsubmittedSuccessor.prepare(runtime, context.fence, context.graph, entry, context.now)
+
+    assert {:new, admitted_graph} =
+             Recovery.prepare(runtime, retired_fence, retired_graph, context.issue, nil, context.now + 1)
+
+    assert admitted_graph.delegations[entry.accountable.id].status == :active
+    assert admitted_graph.delegations[entry.responsible.id].status == :active
+    old = Enum.find(context.runtime.managed_delegations.entries, &(&1.issue_id == context.issue.id))
+    assert admitted_graph.delegations[old.accountable.id].status == :revoked
+    assert admitted_graph.delegations[old.responsible.id].status == :revoked
+
+    changed_entry = update_in(entry, [:responsible, :budget, :max_tokens], &(&1 + 1))
+    changed_manifest = replace_entry(runtime.managed_delegations, changed_entry)
+
+    assert {:error, _reason} =
+             Recovery.prepare(
+               %{runtime | managed_delegations: changed_manifest},
+               retired_fence,
+               retired_graph,
+               context.issue,
+               nil,
+               context.now + 1
+             )
   end
 
   test "claim, worker, scope, identity, stale observations and journal rows keep the transition closed", context do
