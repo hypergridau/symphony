@@ -106,6 +106,15 @@ Already-running workers continue; this protocol fences new Task spawns after
 pause completion, not ongoing work. A failed or interrupted
 barrier leaves the marker in place and admission closed for supported recovery.
 
+### Targeted admission diagnostics
+
+Set `SYMPHONY_ADMISSION_DIAGNOSTICS_ISSUE_ID` to one Linear issue UUID to emit target-only
+`Admission diagnostics` records. The poll record reports whether `maybe_dispatch` ran, the pause-gate
+state, whether the issue was returned by the tracker, each admission predicate, and whether worker
+selection chose local execution, an SSH host, or no available capacity. If selected, later records
+report the final gate and execution-fence admission result. The setting is unset by default and does
+not change dispatch behavior.
+
 Startup terminal-workspace cleanup is fence-aware: a terminal issue with no
 recorded execution generation in the current pool, or a generation already
 marked cleaned, can use the existing path-safe cleanup path. Any recorded

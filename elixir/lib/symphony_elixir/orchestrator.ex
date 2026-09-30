@@ -50,6 +50,7 @@ defmodule SymphonyElixir.Orchestrator do
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
   @execution_fence_lease_ttl_ms 300_000
+  @diagnostic_issue_id_pattern ~r/\A[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\z/i
   # Poll and reconciliation calls may spend several seconds in the Linear
   # client. Keep worker authorization bounded, but do not let the default
   # 5-second GenServer.call timeout race a healthy scheduler poll.
@@ -438,12 +439,17 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
       |> hold_review_handoff_claims()
 
-    if GlobalPause.paused?() or not state.retained_claim_journal_ready? do
+    global_pause = GlobalPause.snapshot()
+    global_pause? = global_pause.paused?
+
+    if global_pause? or not state.retained_claim_journal_ready? do
+      log_admission_diagnostic_hold(state, global_pause)
       Logger.debug("Mutable admission is held by the global pause or claim journal; skipping new worker dispatch")
       state
     else
       with :ok <- Config.validate!(),
            {:ok, issues} <- Tracker.fetch_issues_by_states(Config.settings!().tracker.active_states) do
+        log_admission_diagnostic(state, issues, global_pause)
         choose_issues(refresh_pending_claim_issues(state, issues), state)
       else
         {:error, :missing_linear_api_token} ->
@@ -1134,6 +1140,18 @@ defmodule SymphonyElixir.Orchestrator do
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec admission_diagnostic_fields_for_test(Issue.t(), term()) :: map()
+  def admission_diagnostic_fields_for_test(%Issue{} = issue, %State{} = state) do
+    admission_diagnostic_fields(issue, state)
+  end
+
+  @doc false
+  @spec admission_diagnostic_target_matches_for_test(String.t() | nil, String.t()) :: boolean()
+  def admission_diagnostic_target_matches_for_test(target_issue_id, issue_id) do
+    diagnostic_target_matches?(target_issue_id, issue_id)
   end
 
   @doc false
@@ -1965,6 +1983,145 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  defp log_admission_diagnostic_hold(%State{} = state, global_pause) do
+    case admission_diagnostic_target_id() do
+      nil ->
+        :ok
+
+      issue_id ->
+        Logger.info(
+          "Admission diagnostics issue_id=#{issue_id} phase=poll maybe_dispatch_running=true global_pause_gate=#{global_pause.state} journal_ready=#{state.retained_claim_journal_ready?} target_fetched=unknown selected_for_dispatch=false reasons=#{diagnostic_hold_reasons(global_pause.paused?, state.retained_claim_journal_ready?)}"
+        )
+    end
+  end
+
+  defp log_admission_diagnostic(%State{} = state, issues, global_pause) when is_list(issues) do
+    case admission_diagnostic_target_id() do
+      nil ->
+        :ok
+
+      issue_id ->
+        log_admission_diagnostic_for_target(issue_id, state, issues, global_pause)
+    end
+  end
+
+  defp admission_diagnostic_target_id do
+    case System.get_env("SYMPHONY_ADMISSION_DIAGNOSTICS_ISSUE_ID") do
+      issue_id when is_binary(issue_id) -> normalize_diagnostic_target_id(issue_id)
+      _ -> nil
+    end
+  end
+
+  defp normalize_diagnostic_target_id(issue_id) do
+    target = String.trim(issue_id)
+    if String.match?(target, @diagnostic_issue_id_pattern), do: target, else: nil
+  end
+
+  defp log_admission_diagnostic_for_target(issue_id, state, issues, global_pause) do
+    target =
+      Enum.find(issues, fn
+        %Issue{id: id} -> diagnostic_target_matches?(issue_id, id)
+        _ -> false
+      end)
+
+    log_admission_diagnostic_issue(issue_id, target, state, global_pause)
+  end
+
+  defp log_admission_diagnostic_issue(_issue_id, %Issue{} = issue, state, global_pause) do
+    diagnostics = admission_diagnostic_fields(issue, state)
+
+    Logger.info(
+      "Admission diagnostics issue_id=#{issue.id} issue_identifier=#{issue.identifier || "n/a"} phase=poll maybe_dispatch_running=true global_pause_gate=#{global_pause.state} journal_ready=#{state.retained_claim_journal_ready?} target_fetched=true selected_for_dispatch=#{diagnostics.selected_for_dispatch} #{diagnostic_fields_text(diagnostics)}"
+    )
+  end
+
+  defp log_admission_diagnostic_issue(issue_id, nil, state, global_pause) do
+    Logger.info(
+      "Admission diagnostics issue_id=#{issue_id} phase=poll maybe_dispatch_running=true global_pause_gate=#{global_pause.state} journal_ready=#{state.retained_claim_journal_ready?} target_fetched=false selected_for_dispatch=false reasons=target_not_returned_by_tracker"
+    )
+  end
+
+  defp diagnostic_target_matches?(target_issue_id, issue_id)
+       when is_binary(target_issue_id) and is_binary(issue_id) do
+    String.trim(target_issue_id) != "" and String.trim(target_issue_id) == issue_id
+  end
+
+  defp diagnostic_target_matches?(_target_issue_id, _issue_id), do: false
+
+  defp admission_diagnostic_fields(%Issue{} = issue, %State{} = state) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    issue_fields? = diagnostic_issue_fields_present?(issue)
+    routable? = issue_routable?(issue)
+    active_state? = active_issue_state?(issue.state, active_states)
+    terminal_state? = terminal_issue_state?(issue.state, terminal_states)
+    candidate? = candidate_issue?(issue, active_states, terminal_states)
+    budget? = ManagedBudget.admission(state, issue.id) == :ok
+    claimed? = MapSet.member?(state.claimed, issue.id)
+    running? = Map.has_key?(state.running, issue.id)
+    blocked? = Map.has_key?(state.blocked, issue.id)
+    retained_slot? = retained_claim_slot?(state, issue.id)
+    available? = available_slots(state) > 0 or retained_slot?
+    state_slot? = state_slots_available?(issue, state.running)
+    worker_selection = select_worker_host(state, nil)
+    worker_slot? = worker_selection != :no_worker_capacity
+
+    reasons =
+      []
+      |> maybe_diagnostic_reason(not issue_fields?, "issue_fields_missing")
+      |> maybe_diagnostic_reason(not routable?, "issue_not_routable")
+      |> maybe_diagnostic_reason(not active_state?, "issue_state_inactive")
+      |> maybe_diagnostic_reason(terminal_state?, "issue_state_terminal")
+      |> maybe_diagnostic_reason(not budget?, "managed_budget_unavailable_or_exhausted")
+      |> maybe_diagnostic_reason(claimed?, "already_claimed")
+      |> maybe_diagnostic_reason(running?, "already_running")
+      |> maybe_diagnostic_reason(blocked?, "already_blocked")
+      |> maybe_diagnostic_reason(not available?, "global_slots_full")
+      |> maybe_diagnostic_reason(not state_slot?, "state_slots_full")
+      |> maybe_diagnostic_reason(not worker_slot?, "worker_slots_full")
+
+    %{
+      selected_for_dispatch: should_dispatch_issue?(issue, state, active_states, terminal_states),
+      candidate: candidate?,
+      issue_fields: issue_fields?,
+      routable: routable?,
+      active_state: active_state?,
+      terminal_state: terminal_state?,
+      budget: budget?,
+      claimed: claimed?,
+      running: running?,
+      blocked: blocked?,
+      available_slots: available_slots(state),
+      retained_claim_slot: retained_slot?,
+      state_slot: state_slot?,
+      worker_slot: worker_slot?,
+      worker_selection: worker_selection_name(worker_selection),
+      reasons: if(reasons == [], do: "none", else: Enum.join(reasons, ","))
+    }
+  end
+
+  defp diagnostic_issue_fields_present?(%Issue{id: id, identifier: identifier, title: title, state: state}) do
+    Enum.all?([id, identifier, title, state], &present_string?/1)
+  end
+
+  defp maybe_diagnostic_reason(reasons, true, reason), do: reasons ++ [reason]
+  defp maybe_diagnostic_reason(reasons, false, _reason), do: reasons
+
+  defp diagnostic_fields_text(fields) do
+    fields
+    |> Map.delete(:selected_for_dispatch)
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map_join(" ", fn {key, value} -> "#{key}=#{value}" end)
+  end
+
+  defp diagnostic_hold_reasons(true, false), do: "global_pause,claim_journal_not_ready"
+  defp diagnostic_hold_reasons(true, true), do: "global_pause"
+  defp diagnostic_hold_reasons(false, false), do: "claim_journal_not_ready"
+
+  defp worker_selection_name(nil), do: "local"
+  defp worker_selection_name(:no_worker_capacity), do: "no_capacity"
+  defp worker_selection_name(_worker_host), do: "ssh_available"
+
   defp sort_issues_for_dispatch(issues) when is_list(issues) do
     Enum.sort_by(issues, fn
       %Issue{} = issue ->
@@ -2114,7 +2271,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
-    if GlobalPause.paused?() do
+    global_pause = GlobalPause.snapshot()
+
+    if global_pause.paused? do
+      log_dispatch_diagnostic(
+        issue,
+        "worker_selection",
+        "global_pause_gate=#{global_pause.state} result=held reason=global_pause"
+      )
+
       Logger.debug("Global mutable admission paused before worker selection for #{issue_context(issue)}")
       state
     else
@@ -2122,22 +2287,57 @@ defmodule SymphonyElixir.Orchestrator do
 
       case select_worker_host(state, preferred_worker_host) do
         :no_worker_capacity ->
+          log_dispatch_diagnostic(
+            issue,
+            "worker_selection",
+            "global_pause_gate=#{global_pause.state} result=held reason=worker_slots_full"
+          )
+
           Logger.debug("No SSH worker slots available for #{issue_context(issue)} preferred_worker_host=#{inspect(preferred_worker_host)}")
           state
 
         worker_host ->
+          log_dispatch_diagnostic(
+            issue,
+            "worker_selection",
+            "global_pause_gate=#{global_pause.state} worker_selection=#{worker_selection_name(worker_host)} result=continue"
+          )
+
           spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
       end
     end
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
-    if GlobalPause.paused?() or not state.retained_claim_journal_ready? do
+    global_pause = GlobalPause.snapshot()
+
+    if global_pause.paused? or not state.retained_claim_journal_ready? do
+      reason =
+        diagnostic_hold_reasons(global_pause.paused?, state.retained_claim_journal_ready?)
+
+      log_dispatch_diagnostic(
+        issue,
+        "execution_fence_admission",
+        "global_pause_gate=#{global_pause.state} journal_ready=#{state.retained_claim_journal_ready?} result=held reasons=#{reason}"
+      )
+
       Logger.debug("Global mutable admission paused before execution-fence admission for #{issue_context(issue)}")
       state
     else
+      log_dispatch_diagnostic(
+        issue,
+        "execution_fence_admission",
+        "global_pause_gate=#{global_pause.state} journal_ready=true worker_selection=#{worker_selection_name(worker_host)} result=attempting"
+      )
+
       case admit_execution(state, issue, worker_host, attempt) do
         {:ok, state, token, session_id, responsibility_delegation_id, runtime_lease} ->
+          log_dispatch_diagnostic(
+            issue,
+            "execution_fence_admission",
+            "global_pause_gate=#{global_pause.state} journal_ready=true result=admitted"
+          )
+
           case claim_work_package(state, issue, token, worker_host) do
             {:ok, state, provider_claim} ->
               spawn_claimed_issue(
@@ -2168,8 +2368,20 @@ defmodule SymphonyElixir.Orchestrator do
           end
 
         {:error, reason} ->
+          log_dispatch_diagnostic(
+            issue,
+            "execution_fence_admission",
+            "global_pause_gate=#{global_pause.state} journal_ready=true result=denied reason=#{inspect(reason, limit: 5, printable_limit: 120)}"
+          )
+
           handle_claim_admission_failure(state, issue, reason)
       end
+    end
+  end
+
+  defp log_dispatch_diagnostic(%Issue{id: issue_id, identifier: identifier}, phase, fields) do
+    if diagnostic_target_matches?(admission_diagnostic_target_id(), issue_id) do
+      Logger.info("Admission diagnostics issue_id=#{issue_id} issue_identifier=#{identifier || "n/a"} phase=#{phase} #{fields}")
     end
   end
 
