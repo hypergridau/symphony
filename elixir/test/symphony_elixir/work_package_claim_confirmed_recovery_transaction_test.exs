@@ -1,9 +1,12 @@
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage
-  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Facade
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
 
   test "WAL replay completes a crash after any partial prefix of state writes" do
@@ -231,10 +234,120 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   test "root entry points reject malformed arguments before any filesystem action" do
-    assert {:error, :invalid_confirmed_recovery_request} = Transaction.apply(nil, "midgard", "/workflow.md", "nonce")
-    assert {:error, :invalid_hgs740_completion_request} = Transaction.complete("issue", :midgard, "/workflow.md")
-    assert {:error, :invalid_hgs740_startup_request} = Transaction.verify_startup("/workflow.md", nil)
+    assert {:error, :invalid_confirmed_recovery_request} = Facade.apply(nil, "midgard", "/workflow.md", "nonce")
+    assert {:error, :invalid_hgs740_completion_request} = Facade.complete("issue", :midgard, "/workflow.md")
+    assert {:error, :invalid_hgs740_startup_request} = Facade.verify_startup("/workflow.md", nil)
     assert Transaction.marker_directory("issue") == "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/issue/generation-2"
+  end
+
+  test "Core rejects an unverified context before asking for canonical runtime paths" do
+    parent = self()
+
+    context =
+      core_context(
+        %{
+          fixed_runtime_paths: fn _pool ->
+            send(parent, :runtime_paths_must_not_be_read)
+            {:error, :should_not_run}
+          end
+        },
+        verified?: false
+      )
+
+    assert {:error, :invalid_verified_recovery_context} = Transaction.verify_startup(context)
+    refute_received :runtime_paths_must_not_be_read
+  end
+
+  test "Core startup admits an untouched evidence root and short-circuits an unsafe root" do
+    {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths("midgard")
+    evidence_root = "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
+
+    untouched =
+      core_context(%{
+        lstat: fn ^evidence_root -> {:error, :enoent} end
+      })
+
+    assert :ok = Transaction.validate_context(untouched)
+    assert :ok = Transaction.verify_startup(untouched)
+
+    parent = self()
+
+    writable_root =
+      core_context(%{
+        lstat: fn ^evidence_root ->
+          send(parent, :evidence_root_checked)
+          {:ok, %File.Stat{type: :directory, uid: 0, mode: 0o750}}
+        end,
+        ls: fn _path ->
+          send(parent, :directory_must_not_be_listed)
+          {:ok, []}
+        end
+      })
+
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup(writable_root)
+    assert_received :evidence_root_checked
+    refute_received :directory_must_not_be_listed
+    assert runtime.journal_path == "/srv/dahlia-runner-state/run/pools/midgard/work-package.json"
+  end
+
+  test "Core apply stops at the service gate before evidence, signer, or state callbacks" do
+    parent = self()
+
+    context =
+      core_context(%{
+        require_service_stopped: fn pool ->
+          send(parent, {:service_gate, pool})
+          {:error, :pool_service_not_proven_stopped}
+        end,
+        require_services_quiescent: fn ->
+          send(parent, :later_gate_must_not_run)
+          :ok
+        end,
+        read: fn _path ->
+          send(parent, :evidence_must_not_be_read)
+          {:ok, ""}
+        end,
+        verify_signed_evidence: fn _bytes, _bindings ->
+          send(parent, :signature_must_not_be_verified)
+          {:error, :invalid}
+        end
+      })
+
+    assert :ok = Transaction.validate_context(context)
+
+    assert {:error, :pool_service_not_proven_stopped} =
+             Transaction.apply(context)
+
+    assert_received {:service_gate, "midgard"}
+    refute_received :later_gate_must_not_run
+    refute_received :evidence_must_not_be_read
+    refute_received :signature_must_not_be_verified
+  end
+
+  test "Core completion preserves its held-closed result and stops after the service gate" do
+    parent = self()
+
+    context =
+      core_context(%{
+        require_service_stopped: fn _pool ->
+          send(parent, :service_gate)
+          {:error, :service_changed}
+        end,
+        require_services_quiescent: fn ->
+          send(parent, :later_gate_must_not_run)
+          :ok
+        end,
+        lstat: fn _path ->
+          send(parent, :marker_must_not_be_read)
+          {:error, :enoent}
+        end
+      })
+
+    assert :ok = Transaction.validate_context(context)
+    assert {:error, :hgs740_completion_held_closed} = Transaction.complete(context)
+    assert_received :service_gate
+    refute_received :later_gate_must_not_run
+    refute_received :marker_must_not_be_read
   end
 
   test "candidate decoder accepts only exact insertion-order Python JSON bytes" do
@@ -250,6 +363,282 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     assert {:error, :invalid_provider_response_json} =
              Transaction.decode_provider_response(~S({"data":{"state":"prepared","state":"released"}}))
+  end
+
+  test "Core binds the exact proof to persisted preimages, issue, pool, nonce, and verification time" do
+    paths = %{
+      journal: %{bytes: "journal-before"},
+      fence: %{bytes: "fence-before"},
+      graph: %{bytes: "graph-before"}
+    }
+
+    payload = %{"reservationId" => "reservation-2", "assignmentSHA256" => String.duplicate("a", 64)}
+
+    bindings =
+      Transaction.proof_bindings(
+        payload,
+        "midgard",
+        "24e34a86-b214-41bc-8a35-9e1d31bfb8e4",
+        "nonce-2",
+        paths,
+        1_790_762_400_000
+      )
+
+    assert bindings == %{
+             pool: "midgard",
+             issue_id: "24e34a86-b214-41bc-8a35-9e1d31bfb8e4",
+             generation: 2,
+             reservation_id: "reservation-2",
+             assignment_sha256: String.duplicate("a", 64),
+             nonce: "nonce-2",
+             fence_sha256: sha256("fence-before"),
+             claim_journal_sha256: sha256("journal-before"),
+             responsibility_graph_sha256: sha256("graph-before"),
+             now_ms: 1_790_762_400_000
+           }
+
+    changed = put_in(paths, [:graph, :bytes], "changed-graph")
+
+    refute Transaction.proof_bindings(payload, "midgard", "24e34a86-b214-41bc-8a35-9e1d31bfb8e4", "nonce-2", changed, 1_790_762_400_000) ==
+             bindings
+  end
+
+  test "Core loads bound evidence and delegates signature verification before accepting the observation" do
+    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    nonce = "nonce-2"
+    observation = %{"expected" => %{"issueId" => issue_id, "generation" => 2}, "globalPause" => true}
+
+    payload = %{
+      "reservationId" => "reservation-2",
+      "assignmentSHA256" => String.duplicate("a", 64),
+      "observation" => observation
+    }
+
+    fixture = core_proof_fixture(payload)
+    parent = self()
+
+    paths =
+      put_in(fixture.paths.runtime.host_ops.verify_signed_evidence, fn bytes, bindings ->
+        send(parent, {:signature_check, bytes, bindings})
+        {:ok, payload}
+      end).paths
+
+    assert {:ok, ^observation, observation_bytes, proof_bytes, ^payload, 1_790_762_400_000} =
+             Transaction.verify_signed_proof(issue_id, "midgard", nonce, paths)
+
+    assert observation_bytes == fixture.observation_bytes
+    assert proof_bytes == fixture.proof_bytes
+    assert_received {:signature_check, ^proof_bytes, bindings}
+
+    assert bindings == %{
+             pool: "midgard",
+             issue_id: issue_id,
+             generation: 2,
+             reservation_id: "reservation-2",
+             assignment_sha256: String.duplicate("a", 64),
+             nonce: nonce,
+             fence_sha256: sha256("fence-before"),
+             claim_journal_sha256: sha256("journal-before"),
+             responsibility_graph_sha256: sha256("graph-before"),
+             now_ms: 1_790_762_400_000
+           }
+  end
+
+  test "Core rejects a signature callback denial and never accepts evidence on callback error" do
+    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    observation = %{"expected" => %{"issueId" => issue_id, "generation" => 2}, "globalPause" => true}
+    payload = %{"reservationId" => "reservation-2", "assignmentSHA256" => String.duplicate("a", 64), "observation" => observation}
+    fixture = core_proof_fixture(payload)
+    parent = self()
+
+    paths =
+      put_in(fixture.paths.runtime.host_ops.verify_signed_evidence, fn _bytes, _bindings ->
+        send(parent, :signature_denied)
+        {:error, :invalid_confirmed_recovery_evidence}
+      end).paths
+
+    assert {:error, :invalid_confirmed_recovery_evidence} =
+             Transaction.verify_signed_proof(issue_id, "midgard", "nonce-2", paths)
+
+    assert_received :signature_denied
+  end
+
+  test "Core creates the initial marker only under private evidence directories and syncs before returning" do
+    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    context = core_context(%{})
+    host_ops = context.host_ops
+    runtime = Map.put(context.runtime, :host_ops, host_ops)
+    evidence_root = host_ops.paths.evidence_root
+    marker_path = Path.join([evidence_root, issue_id, "generation-2", "transaction.json"])
+    marker_directory = Path.dirname(marker_path)
+    parent = self()
+
+    host_ops =
+      Map.merge(host_ops, %{
+        lstat: fn path ->
+          cond do
+            path == evidence_root or String.starts_with?(path, evidence_root <> "/") ->
+              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}}
+
+            path in ["/", "/srv", "/srv/dahlia-runner-state", "/srv/dahlia-runner-state/evidence"] ->
+              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o755}}
+
+            true ->
+              {:error, :enoent}
+          end
+        end,
+        raw_open: fn path, modes ->
+          send(parent, {:marker_io, {:open, path, modes}})
+          {:ok, if(path == marker_path, do: :marker_file, else: :marker_directory)}
+        end,
+        raw_write: fn file, bytes ->
+          send(parent, {:marker_io, {:write, file, bytes}})
+          :ok
+        end,
+        raw_sync: fn file ->
+          send(parent, {:marker_io, {:sync, file}})
+          :ok
+        end,
+        chmod: fn path, mode ->
+          send(parent, {:marker_io, {:chmod, path, mode}})
+          :ok
+        end,
+        raw_close: fn file ->
+          send(parent, {:marker_io, {:close, file}})
+          :ok
+        end
+      })
+
+    runtime = Map.put(runtime, :host_ops, host_ops)
+    marker = %{"issueId" => issue_id, "status" => "applying"}
+    encoded_marker = Jason.encode!(marker)
+
+    assert :ok = Transaction.persist_initial_marker(marker_path, marker, runtime)
+    assert_received {:marker_io, {:open, ^marker_path, [:write, :binary, :raw, :exclusive, :sync]}}
+    assert_received {:marker_io, {:write, :marker_file, ^encoded_marker}}
+    assert_received {:marker_io, {:sync, :marker_file}}
+    assert_received {:marker_io, {:chmod, ^marker_path, 0o600}}
+    assert_received {:marker_io, {:close, :marker_file}}
+    assert_received {:marker_io, {:open, ^marker_directory, [:read, :raw]}}
+    assert_received {:marker_io, {:sync, :marker_directory}}
+    assert_received {:marker_io, {:close, :marker_directory}}
+    refute_received {:marker_io, _}
+  end
+
+  test "Core refuses initial marker creation before any write when evidence custody is untrusted" do
+    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    context = core_context(%{})
+    runtime = Map.put(context.runtime, :host_ops, Map.put(context.host_ops, :lstat, fn _path -> {:error, :eperm} end))
+    marker_path = Path.join([context.host_ops.paths.evidence_root, issue_id, "generation-2", "transaction.json"])
+
+    assert {:error, :untrusted_hgs740_path} =
+             Transaction.persist_initial_marker(marker_path, %{"issueId" => issue_id}, runtime)
+
+    refute_received {:marker_io, _}
+  end
+
+  test "Core permits only the exact active execution and runtime leases" do
+    expected = %{
+      "issueId" => "24e34a86-b214-41bc-8a35-9e1d31bfb8e4",
+      "sessionId" => "worker-session",
+      "processId" => "worker-process",
+      "repositoryRef" => "hypergrid.au/symphony",
+      "responsibleDelegationId" => "responsible-gen2"
+    }
+
+    fence = %{
+      executions: %{
+        expected["issueId"] => %{
+          generation: 2,
+          status: :active,
+          ownership: :reconciled,
+          cleanup: :pending,
+          terminal: nil,
+          cleanup_receipt: nil,
+          retirement: nil,
+          termination_unconfirmed: false,
+          leases: %{
+            expected["sessionId"] => %{
+              process_id: expected["processId"],
+              status: :active,
+              termination_required: false
+            }
+          }
+        }
+      }
+    }
+
+    graph = %{
+      delegations: %{
+        expected["responsibleDelegationId"] => %{
+          status: :active,
+          runtime_lease: %{
+            issue_id: expected["issueId"],
+            generation: 2,
+            session_id: expected["sessionId"],
+            process_id: expected["processId"],
+            repository: expected["repositoryRef"]
+          }
+        }
+      }
+    }
+
+    assert :ok = Transaction.exact_active_fence(fence, expected["issueId"], expected)
+    assert :ok = Transaction.exact_active_runtime_lease(graph, expected)
+
+    mismatched_generation = put_in(fence, [:executions, expected["issueId"], :generation], 3)
+
+    refute Transaction.exact_active_fence(mismatched_generation, expected["issueId"], expected) == :ok
+
+    termination_required =
+      put_in(fence, [:executions, expected["issueId"], :leases, expected["sessionId"], :termination_required], true)
+
+    refute Transaction.exact_active_fence(termination_required, expected["issueId"], expected) == :ok
+
+    wrong_process =
+      put_in(graph, [:delegations, expected["responsibleDelegationId"], :runtime_lease, :process_id], "another-process")
+
+    refute Transaction.exact_active_runtime_lease(wrong_process, expected) == :ok
+  end
+
+  test "Core accepts only a complete no-worker observation and denies every missing proof bit" do
+    observation = %{
+      "globalPause" => true,
+      "runnerStopped" => true,
+      "neverSpawned" => true,
+      "supervisedWorkerAbsent" => true,
+      "processCount" => 0,
+      "workspaceAbsent" => true,
+      "turnsAbsent" => true,
+      "dispatchPhase" => "confirmed"
+    }
+
+    assert :ok = Transaction.require_no_local_workers(observation)
+
+    for {key, value} <- [
+          {"globalPause", false},
+          {"runnerStopped", false},
+          {"neverSpawned", false},
+          {"supervisedWorkerAbsent", false},
+          {"processCount", 1},
+          {"workspaceAbsent", false},
+          {"turnsAbsent", false},
+          {"dispatchPhase", "recovery_pending"}
+        ] do
+      assert {:error, :worker_quiescence_not_proven} = Transaction.require_no_local_workers(Map.put(observation, key, value))
+    end
+  end
+
+  test "Core rejects a predecessor that is absent or fails the exact retirement shape" do
+    assert {:error, :predecessor_retirement_not_persisted} =
+             Transaction.exact_local_predecessor(%{}, %{}, %{})
+
+    assert {:error, :predecessor_retirement_not_persisted} =
+             Transaction.exact_local_predecessor(
+               %{journal: %{state: %{reservations: %{}}}, fence: %{state: %{}}, graph: %{state: %{delegations: %{}}}},
+               %{"execution" => %{}, "claim" => %{"issueId" => "issue", "generation" => 1}, "receipt" => %{}},
+               %{}
+             )
   end
 
   test "recorded state ownership metadata is exact and private" do
@@ -425,6 +814,86 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
                "17",
                proof
              )
+  end
+
+  defp core_context(overrides, opts \\ []) do
+    pool = "midgard"
+    {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths(pool)
+
+    host_ops = Map.merge(ConfirmedRecoveryRootHost.operations(), overrides)
+
+    %ConfirmedRecoveryContext{
+      issue_id: "24e34a86-b214-41bc-8a35-9e1d31bfb8e4",
+      pool: pool,
+      nonce: "test-nonce",
+      workflow_path: "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/midgard.md",
+      runtime: runtime,
+      host_ops: host_ops,
+      verified?: Keyword.get(opts, :verified?, true)
+    }
+  end
+
+  defp core_proof_fixture(payload) do
+    issue_id = payload["observation"]["expected"]["issueId"]
+    observation_bytes = Evidence.canonical_json(payload["observation"])
+    payload_bytes = Evidence.canonical_json(payload)
+
+    proof_bytes =
+      Evidence.canonical_json(%{
+        "payload" => Base.url_encode64(payload_bytes, padding: false),
+        "signature" => Base.url_encode64("synthetic-signature", padding: false)
+      })
+
+    {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths("midgard")
+    evidence_root = "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
+    directory = Path.join([evidence_root, issue_id, "generation-2"])
+    observation_path = Path.join(directory, "candidate.json")
+    proof_path = Path.join(directory, "confirmed-root-envelope.json")
+    files = %{observation_path => observation_bytes, proof_path => proof_bytes}
+    parent = self()
+
+    host_ops =
+      ConfirmedRecoveryRootHost.operations()
+      |> Map.merge(%{
+        lstat: fn path ->
+          cond do
+            Map.has_key?(files, path) ->
+              {:ok, %File.Stat{type: :regular, uid: 0, gid: 0, mode: 0o600, links: 1, size: byte_size(files[path])}}
+
+            path == evidence_root or String.starts_with?(path, evidence_root <> "/") ->
+              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}}
+
+            String.starts_with?(evidence_root, path <> "/") or path == "/" ->
+              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o755}}
+
+            true ->
+              send(parent, {:unexpected_lstat, path})
+              {:error, :enoent}
+          end
+        end,
+        read: fn path ->
+          Map.fetch(files, path)
+          |> case do
+            {:ok, bytes} -> {:ok, bytes}
+            :error -> {:error, :enoent}
+          end
+        end,
+        now_ms: fn -> 1_790_762_400_000 end,
+        verify_signed_evidence: fn _bytes, _bindings -> {:error, :synthetic_verifier_not_installed} end
+      })
+
+    runtime = Map.put(runtime, :host_ops, host_ops)
+
+    %{
+      observation_bytes: observation_bytes,
+      proof_bytes: proof_bytes,
+      paths: %{
+        runtime: runtime,
+        journal: %{bytes: "journal-before"},
+        fence: %{bytes: "fence-before"},
+        graph: %{bytes: "graph-before"}
+      }
+    }
   end
 
   defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)

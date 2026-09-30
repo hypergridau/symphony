@@ -158,6 +158,7 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     assert {:error, :untrusted_workflow_file} =
              Transaction.complete(@issue_id, @pool, Path.join(@fixture_root, "forged.md"))
 
+    assert {:error, :enoent} = File.lstat(@evidence_root)
     assert :ok = Transaction.verify_startup(@workflow, @pool)
 
     File.mkdir_p!(@evidence_root)
