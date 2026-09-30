@@ -360,6 +360,17 @@ the lease to be bound.
 Missing or conflicting records hold cleanup. A configured host context alone
 does not prove this source is installed or that a Job has run.
 
+After `AbortPrepareCaller.confirm/5` has verified the durable confirmed-delete
+checkpoint, it sends only `schemaVersion`, `operation`, `claimSHA256`,
+`assignmentDigest`, `allocationId`, and the retained blocked `resultReference`
+to `/run/dahlia-pre-execution-abort-input-publisher.sock`. The fixed root service
+must read the claim, authoritative issue mapping, four exact checkpoint files,
+blocked-result bytes, and proof context from its own trusted state before
+invoking Dahlia's root-only publisher. No checkpoint bytes, claim object, proof
+context, or filesystem path crosses this socket. The missing service, an
+uncertain response, or an acknowledgement for another claim leaves abort
+cleanup held; this client contract alone does not qualify publication.
+
 The host Kubernetes context accepts the controller's exact `:allocation` and
 `:abort_unstarted` idempotency keys for allocation and both abort phases. An
 allocated Job can be inspected by its recorded UID without another create,

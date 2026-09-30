@@ -19,6 +19,15 @@ defmodule SymphonyElixir.AbortPreparePermissiveGuard do
   def verify(_assignment, _allocation, _observation, _acknowledgement, _context), do: :ok
 end
 
+defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
+  def publish(request) do
+    case Process.get(:abort_root_input_publish_fun) do
+      fun when is_function(fun, 1) -> fun.(request)
+      _ -> :ok
+    end
+  end
+end
+
 defmodule SymphonyElixir.AbortPrepareCallerTest do
   use ExUnit.Case, async: false
 
@@ -979,6 +988,56 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert Agent.get(context.client, & &1.deletes) == []
   end
 
+  test "root publisher receives only exact selectors after confirmed delete", context do
+    on_exit(fn -> Process.delete(:abort_root_input_publish_fun) end)
+
+    assignment = assignment()
+    adapter = adapter_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, allocation_key(assignment), adapter)
+
+    witness_input = witness_input(fn _request -> {:ok, receipt(true, String.duplicate("8", 64))} end)
+
+    post_fun = fn _url, options ->
+      request = Jason.decode!(Keyword.fetch!(options, :body))
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "data" => %{
+             "prepareId" => request["prepareId"],
+             "projectionId" => "projection-one",
+             "reservationId" => "reservation-one",
+             "preparedAt" => "2026-09-27T12:00:00.000Z",
+             "replayed" => false
+           }
+         }
+       }}
+    end
+
+    Process.put(:abort_root_input_publish_fun, fn request ->
+      assert Enum.sort(Map.keys(request)) ==
+               Enum.sort(~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference))
+
+      assert request["schemaVersion"] == 1
+      assert request["operation"] == "publish_pre_execution_abort_inputs"
+      assert request["assignmentDigest"] == assignment.sha256
+      assert request["allocationId"] == allocation.id
+      assert request["resultReference"] == "managed-abort-result:v1:one"
+      refute Map.has_key?(request, "checkpoints")
+      refute Map.has_key?(request, "claim")
+      refute Map.has_key?(request, "proofContext")
+      :ok
+    end)
+
+    caller = caller_context(context, adapter, witness_input, post_fun)
+    assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
   test "confirmation holds before mutation when the root receipt disappears", context do
     assignment = assignment()
     adapter = adapter_context(context, assignment)
@@ -1198,7 +1257,9 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       provider_context: %{base_url: "https://dahlia.example", runner_token: "synthetic-token"},
       journal_root: context.root,
       workspace_root: Path.join(System.tmp_dir!(), "symphony-worker-workspaces"),
-      post_fun: post_fun
+      post_fun: post_fun,
+      root_abort_input_publisher: SymphonyElixir.AbortPrepareTestRootInputPublisher,
+      root_abort_result_reference: "managed-abort-result:v1:one"
     }
   end
 
