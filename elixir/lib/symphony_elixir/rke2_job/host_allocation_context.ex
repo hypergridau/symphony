@@ -10,7 +10,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
 
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.PathSafety
-  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAuthSlotLeaseGuard}
+  alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAssignmentBinding, DahliaAuthSlotLeaseGuard}
   alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter, ResultJournal}
   alias SymphonyElixir.RKE2Job.SuspendedAbort
@@ -26,6 +26,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     SYMPHONY_RKE2_RESULT_JOURNAL_ROOT
     SYMPHONY_RKE2_ABORT_JOURNAL_ROOT
     SYMPHONY_RKE2_WORKSPACE_ROOT
+    SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN
   )
   @digest_image ~r|\A[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}\z|
   @dns_label ~r/\A[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\z/
@@ -52,10 +53,11 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
          true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
-         {:ok, kube_context} <- client_context(assignment, config),
-         guard_context = guard_context(config, binding, kube_context),
-         {:ok, slot} <- prepare_slot(assignment, config, guard_context) do
-      {:ok, build_context(config, binding, slot, guard_context)}
+         {:ok, bound_config} <- bind_assignment(assignment, binding, config),
+         {:ok, kube_context} <- client_context(assignment, bound_config),
+         guard_context = guard_context(bound_config, binding, kube_context),
+         {:ok, slot} <- prepare_slot(assignment, bound_config, guard_context) do
+      {:ok, build_context(bound_config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_host_allocation_context_unavailable}
     end
@@ -104,25 +106,26 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
          true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
-         {:ok, kube_context} <- client_context(assignment, config),
-         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
+         {:ok, bound_config} <- bind_assignment(assignment, binding, config),
+         {:ok, kube_context} <- client_context(assignment, bound_config),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(bound_config, nil)),
          name = get_in(preflight_job, ["metadata", "name"]),
          {:ok, job} <- job_reader(config).(@namespace, name, kube_context),
-         {:ok, slot} <- retained_slot(job, assignment, config),
-         {:ok, expected} <- JobSpec.compile(assignment, job_config(config, slot)),
+         {:ok, slot} <- retained_slot(job, assignment, bound_config),
+         {:ok, expected} <- JobSpec.compile(assignment, job_config(bound_config, slot)),
          true <- JobSpec.owned_job_for_cleanup?(job, expected),
          true <- get_in(job, ["spec", "suspend"]) == suspended,
          true <- allocation_id == encoded_allocation_id(expected, job),
-         guard_context = guard_context(config, binding, kube_context),
-         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context),
+         guard_context = guard_context(bound_config, binding, kube_context),
+         :ok <- slot_guard(bound_config).verify_claim_uid(slot, guard_context),
          :ok <-
-           slot_guard(config).verify_bound(
+           slot_guard(bound_config).verify_bound(
              slot,
              assignment,
              %{id: allocation_id, status: :ready},
              guard_context
            ) do
-      {:ok, build_context(config, binding, slot, guard_context)}
+      {:ok, build_context(bound_config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_retained_allocation_unverified}
     end
@@ -141,15 +144,17 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          true <- assignment.repository_ref == config.repository_ref,
          true <- assignment.lease.issue_id == binding.issue_id and assignment.lease.generation == binding.generation,
          true <- binding.repository_ref == config.repository_ref and is_binary(binding.runner_id),
-         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(config, nil)),
+         {:ok, bound_config} <- bind_assignment(assignment, binding, config),
+         {:ok, preflight_job} <- JobSpec.compile(assignment, job_config(bound_config, nil)),
          {:ok, uid} <- terminal_allocation_uid(allocation_id, preflight_job),
          {:ok, _observation, slot} <- ResultJournal.load_with_slot(assignment, uid, config.result_journal_root),
          true <- is_map(slot) and slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
-         {:ok, kube_context} <- terminal_client_context(assignment, config),
-         guard_context = guard_context(config, binding, kube_context),
+         true <- slot.binding_sha256 == bound_config.assignment_subject_digest,
+         {:ok, kube_context} <- terminal_client_context(assignment, bound_config),
+         guard_context = guard_context(bound_config, binding, kube_context),
          # The exact lease may already be released; Dahlia validates its retained receipt on replay.
-         :ok <- slot_guard(config).verify_claim_uid(slot, guard_context) do
-      {:ok, build_context(config, binding, slot, guard_context)}
+         :ok <- slot_guard(bound_config).verify_claim_uid(slot, guard_context) do
+      {:ok, build_context(bound_config, binding, slot, guard_context)}
     else
       _ -> {:held, :rke2_terminal_allocation_unverified}
     end
@@ -194,12 +199,20 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   defp job_config(config, slot) do
     %{namespace: @namespace, image: config.image, repository_id: config.repository_id}
     |> maybe_slot(slot, config)
+    |> maybe_binding_digest(config)
   end
 
   defp maybe_slot(job_config, nil, _config), do: job_config
 
   defp maybe_slot(job_config, slot, config) do
     Map.merge(job_config, %{auth_slot: slot, auth_slot_catalog: %{config.slot_id => config.claim_name}})
+  end
+
+  defp maybe_binding_digest(job_config, config) do
+    case Map.get(config, :assignment_subject_digest) do
+      digest when is_binary(digest) -> Map.put(job_config, :assignment_binding_digest, digest)
+      _ -> job_config
+    end
   end
 
   defp retained_slot(job, assignment, config) do
@@ -212,6 +225,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       claim_uid: is_map(annotations) && annotations["symphony.hypergrid.au/codex-auth-claim-uid"],
       claim_name: retained_claim_name(volumes),
       assignment_sha256: assignment.sha256,
+      binding_sha256: is_map(annotations) && annotations["symphony.hypergrid.au/assignment-binding-sha256"],
       seat: assignment.seat
     }
 
@@ -246,7 +260,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     if @test_environment, do: Map.get(config, :observation_client, HTTPClient), else: HTTPClient
   end
 
-  defp validate_configuration(env, %{repository_ref: repository_ref}, provider_url, runner_token)
+  defp validate_configuration(env, %{repository_ref: repository_ref} = manifest, provider_url, runner_token)
        when is_binary(repository_ref) and is_binary(provider_url) and is_binary(runner_token) do
     api_server = env["SYMPHONY_RKE2_API_SERVER"]
     root = env["SYMPHONY_RKE2_CREDENTIAL_ROOT"]
@@ -257,9 +271,11 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     result_journal_root = env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
     abort_journal_root = env["SYMPHONY_RKE2_ABORT_JOURNAL_ROOT"]
     workspace_root = env["SYMPHONY_RKE2_WORKSPACE_ROOT"]
+    assignment_bind_origin = env["SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN"]
 
     if valid_host_values?(api_server, root, image, repository_id, slot_id, claim_name, result_journal_root) and
          valid_abort_roots?(abort_journal_root, workspace_root) and
+         https_origin?(assignment_bind_origin) and
          https_origin?(provider_url) and byte_size(repository_ref) > 0 and byte_size(runner_token) > 0 do
       {:ok,
        %{
@@ -274,6 +290,8 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
          workspace_root: workspace_root,
          repository_ref: repository_ref,
          provider_url: provider_url,
+         assignment_bind_origin: assignment_bind_origin,
+         managed_delegations: manifest,
          runner_token: runner_token
        }}
     else
@@ -340,6 +358,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       base_url: config.provider_url,
       runner_token: config.runner_token,
       reservation_id: binding.reservation_id,
+      assignment_subject_digest: config.assignment_subject_digest,
       pvc_namespace: @namespace,
       pvc_client_context: kube_context,
       result_journal_root: config.result_journal_root,
@@ -347,6 +366,13 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
     }
     |> maybe_test_port(config, :pvc_read_fun)
     |> maybe_test_port(config, :post_fun)
+  end
+
+  defp bind_assignment(assignment, binding, config) do
+    case DahliaAssignmentBinding.bind(assignment, binding, config) do
+      {:ok, %{assignment_digest: digest}} -> {:ok, Map.put(config, :assignment_subject_digest, digest)}
+      {:held, reason} -> {:held, reason}
+    end
   end
 
   defp cleanup_receipt_fun(config) do

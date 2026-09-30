@@ -334,7 +334,9 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
   defp normalize_slot(_assignment, nil), do: {:ok, nil}
 
   defp normalize_slot(assignment, slot) when is_map(slot) do
-    keys = ~w(slot_id claim_name claim_uid lease_id assignment_sha256 seat)a
+    base_keys = ~w(slot_id claim_name claim_uid lease_id assignment_sha256 seat)a
+    has_binding_digest = Map.has_key?(slot, :binding_sha256) or Map.has_key?(slot, "binding_sha256")
+    keys = if has_binding_digest, do: base_keys ++ [:binding_sha256], else: base_keys
 
     normalized =
       if Enum.all?(Map.keys(slot), &is_atom/1),
@@ -345,7 +347,12 @@ defmodule SymphonyElixir.RKE2Job.ResultJournal do
          Enum.sort(Map.keys(normalized)) == Enum.sort(keys) and
          match?(
            {:ok, _},
-           AuthSlotSpec.compile(assignment, normalized, %{normalized.slot_id => normalized.claim_name})
+           AuthSlotSpec.compile(
+             assignment,
+             normalized,
+             %{normalized.slot_id => normalized.claim_name},
+             Map.get(normalized, :binding_sha256)
+           )
          ) do
       {:ok, normalized}
     else

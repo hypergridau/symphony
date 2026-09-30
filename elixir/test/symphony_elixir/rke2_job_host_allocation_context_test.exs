@@ -28,15 +28,17 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
   @lease_id "12345678-1234-4123-8123-123456789abc"
   @env %{
     "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-    "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+    "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
     "SYMPHONY_RKE2_WORKER_IMAGE" => @image,
     "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
     "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
     "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-    "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-    "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-    "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+    "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+    "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+    "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+    "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
   }
+  @binding_digest String.duplicate("b", 64)
 
   test "host settings are all-or-nothing and pinned to a manifest repository" do
     manifest = %{repository_ref: "hypergridau/symphony"}
@@ -57,13 +59,18 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert {:error, :invalid_rke2_host_context} =
              HostAllocationContext.configuration(Map.put(@env, "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT", "relative/results"), manifest, "https://provider.example", "host-token")
 
-    assert {:ok, config} = HostAllocationContext.configuration(@env, manifest, "https://provider.example", "host-token")
+    assert {:error, {:incomplete_rke2_host_context, ["SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN"]}} =
+             HostAllocationContext.configuration(Map.delete(@env, "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN"), manifest, "https://provider.example", "host-token")
+
+    assert {:ok, config} =
+             HostAllocationContext.configuration(@env, manifest, "https://provider.example", "host-token")
+
     assert config.image == @image
     assert config.repository_ref == "hypergridau/symphony"
     assert config.slot_id == "slot-one"
-    assert config.result_journal_root == "/private/symphony/job-results"
-    assert config.abort_journal_root == "/private/symphony/abort-prepares"
-    assert config.workspace_root == "/private/symphony/workspaces"
+    assert config.result_journal_root == @env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
+    assert config.abort_journal_root == @env["SYMPHONY_RKE2_ABORT_JOURNAL_ROOT"]
+    assert config.workspace_root == @env["SYMPHONY_RKE2_WORKSPACE_ROOT"]
 
     assert {:error, :invalid_rke2_host_context} =
              HostAllocationContext.configuration(
@@ -74,6 +81,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
              )
   end
 
+  @tag skip: match?({:win32, _}, :os.type())
   test "abort journal cannot resolve through a link into the workspace" do
     root = Path.join(System.tmp_dir!(), "hgs733-abort-roots-#{System.unique_integer([:positive])}")
     workspace = Path.join(root, "workspaces")
@@ -102,8 +110,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       reservation_id: "reservation-one"
     }
 
-    {:ok, base} =
-      HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
+    {:ok, base} = host_configuration(assignment)
 
     caller = self()
 
@@ -113,6 +120,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
         send(caller, {:kube_context_requested, seen.sha256, operation, key})
         {:ok, %{synthetic: true}}
       end)
+      |> Map.put(:assignment_bind_post_fun, bind_post_fun(assignment, caller))
       |> Map.put(:pvc_read_fun, fn "frigga", "codex-oauth-slot-1", %{synthetic: true} ->
         {:ok,
          %{
@@ -133,16 +141,25 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       end)
 
     assert {:ok, context} = HostAllocationContext.prepare(assignment, binding, config)
+    assert_receive {:assignment_bind, bind_url, bind_body}
+    assert String.ends_with?(bind_url, "/v1/host/assignments/reservation-one/bind")
+    assert bind_body.issueIdentifier == "HGS-734"
+    assert Base.decode64!(bind_body.manifestBase64) == base.managed_delegations.source_bytes
+    assert bind_body.signatureHex == base.managed_delegations.source_signature_hex
     assert_receive {:kube_context_requested, digest, :allocate, key}
     assert digest == assignment.sha256
     assert key == digest <> ":allocation"
-    assert_receive {:slot_post, url, %{assignmentDigest: ^digest, slotId: "slot-one", claimUid: "pvc-uid-one"}}
+    assert_receive {:slot_post, url, %{assignmentDigest: @binding_digest, slotId: "slot-one", claimUid: "pvc-uid-one"}}
     assert String.ends_with?(url, "/reservation-one/codex-auth-slots/reserve")
     assert context.config.auth_slot.lease_id == @lease_id
+    assert context.config.auth_slot.binding_sha256 == @binding_digest
+    assert context.config.assignment_binding_digest == @binding_digest
+    assert {:ok, job_spec} = JobSpec.compile(assignment, context.config)
+    assert job_spec["metadata"]["annotations"]["symphony.hypergrid.au/assignment-binding-sha256"] == @binding_digest
     assert context.config.auth_slot.claim_uid == "pvc-uid-one"
     assert context.config.repository_id == "123456789"
     assert context.claim_binding == binding
-    assert context.result_journal_root == "/private/symphony/job-results"
+    assert context.result_journal_root == @env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
     assert context.auth_slot_lease_guard_context.result_journal_root == context.result_journal_root
     refute Map.has_key?(assignment, :runner_token)
 
@@ -162,10 +179,30 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     refute_receive {:slot_post, _, _}
   end
 
+  test "a denied assignment bind stops before Kubernetes credentials or OAuth slot reservation" do
+    assignment = assignment()
+    binding = claim_binding(assignment)
+    {:ok, base} = host_configuration(assignment)
+    caller = self()
+
+    config =
+      Map.put(base, :assignment_bind_post_fun, fn url, options ->
+        send(caller, {:assignment_bind, url, options[:json]})
+        {:ok, %Req.Response{status: 409, body: %{"status" => "denied"}}}
+      end)
+
+    assert {:held, :rke2_host_allocation_context_unavailable} =
+             HostAllocationContext.prepare(assignment, binding, config)
+
+    assert_receive {:assignment_bind, _, _}
+    refute_receive {:kube_context_requested, _, _, _}
+    refute_receive {:slot_post, _, _}
+  end
+
   test "reattaches only the exact suspended Job and bound OAuth slot without reserving a lease" do
     assignment = assignment()
     binding = claim_binding(assignment)
-    {:ok, base} = HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
+    {:ok, base} = host_configuration(assignment)
 
     slot = %{
       slot_id: base.slot_id,
@@ -173,6 +210,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       claim_uid: "pvc-uid-one",
       lease_id: @lease_id,
       assignment_sha256: assignment.sha256,
+      binding_sha256: @binding_digest,
       seat: assignment.seat
     }
 
@@ -182,7 +220,8 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
         image: base.image,
         repository_id: base.repository_id,
         auth_slot: slot,
-        auth_slot_catalog: %{base.slot_id => base.claim_name}
+        auth_slot_catalog: %{base.slot_id => base.claim_name},
+        assignment_binding_digest: @binding_digest
       })
 
     generated = %{
@@ -209,6 +248,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       base
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
       |> Map.put(:adapter, TerminalAdapter)
+      |> Map.put(:assignment_bind_post_fun, bind_post_fun(assignment, caller))
       |> Map.put(:client_context_fun, fn _assignment, :allocate, _key, _config -> {:ok, %{synthetic: true}} end)
       |> Map.put(:job_read_fun, fn "frigga", name, %{synthetic: true} ->
         send(caller, {:job_read, name})
@@ -222,7 +262,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     assert_receive :lease_binding_verified
     assert context.config.auth_slot == slot
     assert context.claim_binding == binding
-    assert context.result_journal_root == "/private/symphony/job-results"
+    assert context.result_journal_root == @env["SYMPHONY_RKE2_RESULT_JOURNAL_ROOT"]
     assert context.auth_slot_lease_guard_context.result_journal_root == context.result_journal_root
     assert is_function(context.auth_slot_lease_guard_context.cleanup_receipt_fun, 3)
 
@@ -273,7 +313,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
   test "reattaches terminal cleanup after Job deletion and OAuth lease release" do
     assignment = assignment()
     binding = claim_binding(assignment)
-    {:ok, base} = HostAllocationContext.configuration(@env, %{repository_ref: assignment.repository_ref}, "https://provider.example", "host-token")
+    {:ok, base} = host_configuration(assignment)
     root = Path.join(System.tmp_dir!(), "symphony-terminal-reattach-#{System.unique_integer([:positive])}")
     :ok = File.mkdir_p(root)
     if match?({:unix, _}, :os.type()), do: :ok = File.chmod(root, 0o700)
@@ -286,6 +326,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       claim_uid: "pvc-uid-one",
       lease_id: @lease_id,
       assignment_sha256: assignment.sha256,
+      binding_sha256: @binding_digest,
       seat: assignment.seat
     }
 
@@ -327,6 +368,7 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
     config =
       base
       |> Map.put(:result_journal_root, root)
+      |> Map.put(:assignment_bind_post_fun, bind_post_fun(assignment, self()))
       |> Map.put(:slot_guard, ReadOnlySlotGuard)
       |> Map.put(:adapter, TerminalAdapter)
       |> Map.put(:client_context_fun, fn _assignment, :finalize, key, _config ->
@@ -366,6 +408,45 @@ defmodule SymphonyElixir.RKE2JobHostAllocationContextTest do
       repository_ref: assignment.repository_ref,
       runner_id: assignment.seat,
       reservation_id: "reservation-one"
+    }
+  end
+
+  defp host_configuration(assignment) do
+    HostAllocationContext.configuration(@env, signed_manifest(assignment), "https://provider.example", "host-token")
+  end
+
+  defp bind_post_fun(assignment, caller) do
+    fn url, opts ->
+      send(caller, {:assignment_bind, url, opts[:json]})
+
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "status" => "bound",
+           "assignmentDigest" => @binding_digest,
+           "branchRef" => "refs/heads/" <> assignment.branch
+         }
+       }}
+    end
+  end
+
+  defp signed_manifest(assignment) do
+    bytes = Jason.encode!(%{"schema_version" => 1, "synthetic" => true})
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+    signature = :crypto.sign(:eddsa, :none, "hypergrid.symphony.managed-delegation.v1\0" <> bytes, [private_key, :ed25519])
+    public_hex = Base.encode16(public_key, case: :lower)
+    signature_hex = Base.encode16(signature, case: :lower)
+
+    %{
+      repository_ref: assignment.repository_ref,
+      schema_version: 1,
+      entries: [%{issue_id: assignment.lease.issue_id, identifier: "HGS-734"}],
+      source_bytes: bytes,
+      source_signature_hex: signature_hex,
+      source_public_key_hex: public_hex,
+      source_sha256: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
+      signer_key_sha256: Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
     }
   end
 

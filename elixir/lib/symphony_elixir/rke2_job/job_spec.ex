@@ -30,7 +30,8 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
           required(:image) => String.t(),
           required(:repository_id) => String.t(),
           optional(:auth_slot) => map(),
-          optional(:auth_slot_catalog) => map()
+          optional(:auth_slot_catalog) => map(),
+          optional(:assignment_binding_digest) => String.t()
         }
 
   @spec compile(map(), config()) :: {:ok, map()} | {:error, term()}
@@ -38,7 +39,15 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
     with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
          :ok <- valid_target(assignment),
          :ok <- valid_config(config),
-         {:ok, auth_slot} <- AuthSlotSpec.compile(assignment, Map.get(config, :auth_slot), Map.get(config, :auth_slot_catalog)),
+         binding_digest = Map.get(config, :assignment_binding_digest),
+         {:ok, auth_slot} <-
+           AuthSlotSpec.compile(
+             assignment,
+             Map.get(config, :auth_slot),
+             Map.get(config, :auth_slot_catalog),
+             binding_digest
+           ),
+         :ok <- valid_binding_digest(binding_digest),
          worker_mode = if(auth_slot.env == [], do: "preflight", else: "codex"),
          broker_identity_mounts = if(worker_mode == "codex", do: [broker_identity_mount()], else: []),
          broker_identity_volumes = if(worker_mode == "codex", do: [broker_identity_volume()], else: []),
@@ -60,7 +69,7 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
                  "symphony.hypergrid.au/assignment-issue-id" => assignment.lease.issue_id,
                  "symphony.hypergrid.au/assignment-generation" => Integer.to_string(assignment.lease.generation)
                },
-               auth_slot.annotations
+               Map.merge(auth_slot.annotations, binding_annotations(binding_digest))
              )
          },
          "spec" => %{
@@ -364,6 +373,18 @@ defmodule SymphonyElixir.RKE2Job.JobSpec do
   end
 
   defp valid_config(_config), do: {:error, :rke2_job_trusted_config_invalid}
+
+  defp valid_binding_digest(digest) do
+    cond do
+      is_nil(digest) -> :ok
+      is_binary(digest) and Regex.match?(~r/\A[a-f0-9]{64}\z/, digest) -> :ok
+      true -> {:error, :invalid_assignment_binding_digest}
+    end
+  end
+
+  defp binding_annotations(digest) do
+    if is_binary(digest), do: %{"symphony.hypergrid.au/assignment-binding-sha256" => digest}, else: %{}
+  end
 
   defp digest_image?(image) when is_binary(image) do
     byte_size(image) <= 512 and Regex.match?(~r|\A[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}\z|, image)

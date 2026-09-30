@@ -337,16 +337,21 @@ The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SE
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
 `SYMPHONY_RKE2_REPOSITORY_ID`, `SYMPHONY_RKE2_AUTH_SLOT_ID`,
 `SYMPHONY_RKE2_AUTH_CLAIM_NAME`, `SYMPHONY_RKE2_RESULT_JOURNAL_ROOT`,
-`SYMPHONY_RKE2_ABORT_JOURNAL_ROOT`, and `SYMPHONY_RKE2_WORKSPACE_ROOT` tuple.
+`SYMPHONY_RKE2_ABORT_JOURNAL_ROOT`, `SYMPHONY_RKE2_WORKSPACE_ROOT`, and
+`SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN` tuple. The assignment bind origin is a
+separate HTTPS origin; it has no fallback to the work-package provider URL.
 The journal root must be a host-private absolute directory outside worker workspaces;
 the result journal checks its ownership and mode before writing. Partial settings
 fail startup. The abort journal root must also be absolute and outside the declared
 workspace root; supervisor startup pins both paths for the root-only abort prepare
 caller. This configures its trust check but does not authorize an abort without an
-exact claim-bound abort intent and witness. For each new allocation, the host reads its rotating Kubernetes
-token, verifies the exact Bound PVC UID,
-reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
-configuration to the existing suspended controller. At terminal cleanup, the host
+exact claim-bound abort intent and witness. After fresh issue, responsibility-graph,
+and provider-claim checks, the host posts the exact root-owned manifest bytes and its
+detached signature to Dahlia's assignment bind route. It requires the returned digest
+and branch ref to match the assignment before it reads Kubernetes credentials, verifies
+the exact Bound PVC UID, reserves the OAuth slot against the returned digest, or creates
+the suspended Job. The verified bytes and signature remain in host memory and are not
+written to journals or logs. At terminal cleanup, the host
 reads a fresh Kubernetes token for the verifier Job and retains the result and
 OAuth slot cleanup receipts under that private root. The terminal result record also retains
 the exact non-secret OAuth slot binding before the Job is deleted. After a host

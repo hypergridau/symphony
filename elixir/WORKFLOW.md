@@ -61,6 +61,11 @@ The `DAHLIA_MANAGED_DELEGATION_PATH`, `DAHLIA_MANAGED_DELEGATION_SHA256`,
 `DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519` settings are required
 for declared managed pools and are
 host-controlled service configuration. Workers must not edit the manifest or graph snapshots.
+Hosts using the optional RKE2 adapter must also configure
+`SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN` as a separate HTTPS origin for the trusted
+assignment-binding broker. The host sends the original verified manifest bytes and detached
+signature only after fresh claim and graph admission; missing, unreachable, or denied binds hold
+allocation before OAuth slot reservation and Job creation.
 Loading this input grants no worker lease: fresh native eligibility, exact responsibility,
 execution fencing and the provider's durable claim remain required before a turn starts.
 
