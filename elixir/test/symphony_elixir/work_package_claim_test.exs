@@ -1472,8 +1472,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     {blocked, _runtime} = post_claim_revalidation_failure(path, issue, issue, disposable_rke2_context: context)
     {:ok, journal} = Journal.load(path)
     [{key, reservation}] = Map.to_list(journal.reservations)
-    allocation_id = "rke2job:v1:historical-allocation"
-    reservation = %{reservation | dispatch: %{reservation.dispatch | phase: "spawn_started", allocation_id: allocation_id}}
+    dispatch = reservation.dispatch |> Map.put(:phase, "spawn_started") |> Map.delete(:allocation_id)
+    reservation = %{reservation | dispatch: dispatch}
     {:ok, journal} = Journal.put(journal, key, reservation)
     head = String.duplicate("a", 40)
 
@@ -1520,6 +1520,10 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     refute MapSet.member?(released.claimed, @issue_id)
     refute Map.has_key?(released.blocked, @issue_id)
 
+    current_fence = %{fence | executions: %{@issue_id => historical}, history: []}
+    current_generation = %{restarted | execution_fence: current_fence}
+    assert Orchestrator.restore_retained_disposable_claims_for_test(current_generation).retained_claim_journal_ready?
+
     repository_receipt = Map.fetch!(complete_journal.reservations[key].cleanup_receipts, "repository_cleanup_verified")
     repository_ack = repository_receipt.acknowledgement
     mismatched_ack = Map.put(repository_ack, :accepted_head, String.duplicate("c", 40))
@@ -1539,8 +1543,22 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     no_history = %{restarted | execution_fence: %{fence | history: []}}
     refute Orchestrator.restore_retained_disposable_claims_for_test(no_history).retained_claim_journal_ready?
 
+    mismatched_head = %{historical | terminal: %{state: "Done", accepted_head: String.duplicate("c", 40)}}
+    wrong_head = %{current_generation | execution_fence: %{current_fence | executions: %{@issue_id => mismatched_head}}}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(wrong_head).retained_claim_journal_ready?
+
+    mismatched_repository = %{historical | repository: "hypergridau/other"}
+    wrong_repository_fence = %{current_fence | executions: %{@issue_id => mismatched_repository}}
+    wrong_repository = %{current_generation | execution_fence: wrong_repository_fence}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(wrong_repository).retained_claim_journal_ready?
+
     active_current = %{restarted | execution_fence: %{fence | executions: %{@issue_id => %{current | status: :active}}}}
     refute Orchestrator.restore_retained_disposable_claims_for_test(active_current).retained_claim_journal_ready?
+
+    headless = %{current | terminal: %{state: "Done"}}
+    headless_fence = %{fence | executions: %{@issue_id => headless}}
+    headless_current = %{restarted | execution_fence: headless_fence}
+    refute Orchestrator.restore_retained_disposable_claims_for_test(headless_current).retained_claim_journal_ready?
 
     missing_current = %{restarted | execution_fence: %{fence | executions: %{}}}
     refute Orchestrator.restore_retained_disposable_claims_for_test(missing_current).retained_claim_journal_ready?

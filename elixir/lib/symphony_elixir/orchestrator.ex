@@ -781,11 +781,45 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp historical_disposable_claim_released?(state, journal, key, reservation, current_execution)
        when is_map(current_execution) do
+    case Map.get(reservation.dispatch, :allocation_id) do
+      nil ->
+        legacy_spawn_started_claim_released?(state, journal, key, reservation, current_execution)
+
+      allocation_id when is_binary(allocation_id) ->
+        historical_allocated_claim_released?(state, journal, key, reservation, current_execution)
+
+      _invalid ->
+        false
+    end
+  end
+
+  defp historical_disposable_claim_released?(_state, _journal, _key, _reservation, _current_execution), do: false
+
+  defp legacy_spawn_started_claim_released?(state, journal, key, reservation, current_execution) do
+    generation = reservation.generation
+
+    with true <- reservation.dispatch[:phase] == "spawn_started",
+         true <- reservation.runner_id == get_in(state.work_package_runtime, [:runner_id]),
+         true <- current_execution.issue_id == reservation.issue_id,
+         true <- current_execution.repository == reservation.repository_ref,
+         true <- fully_cleaned_terminal_execution?(current_execution),
+         true <- is_binary(execution_accepted_head(current_execution)),
+         proof when is_map(proof) <- released_execution_for_generation(state, current_execution, generation),
+         true <- proof.repository == reservation.repository_ref,
+         true <- fully_cleaned_terminal_execution?(proof),
+         true <- is_binary(execution_accepted_head(proof)),
+         true <- cleanup_receipts_match_execution?(journal, key, reservation, proof) do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp historical_allocated_claim_released?(state, journal, key, reservation, current_execution) do
     issue_id = reservation.issue_id
     generation = reservation.generation
 
     with true <- reservation.dispatch[:phase] == "spawn_started",
-         true <- is_binary(reservation.dispatch[:allocation_id]),
          true <- current_execution.generation > generation,
          true <- fully_cleaned_terminal_execution?(current_execution),
          historical when is_map(historical) <-
@@ -795,15 +829,27 @@ defmodule SymphonyElixir.Orchestrator do
          true <- historical.repository == reservation.repository_ref,
          true <- fully_cleaned_terminal_execution?(historical),
          true <- is_binary(historical.terminal[:accepted_head]),
-         true <- valid_historical_cleanup_receipt?(journal, key, reservation, "termination_confirmed", historical.terminal.accepted_head),
-         true <- valid_historical_cleanup_receipt?(journal, key, reservation, "repository_cleanup_verified", historical.terminal.accepted_head) do
+         true <- cleanup_receipts_match_execution?(journal, key, reservation, historical) do
       true
     else
       _ -> false
     end
   end
 
-  defp historical_disposable_claim_released?(_state, _journal, _key, _reservation, _current_execution), do: false
+  defp released_execution_for_generation(state, current_execution, generation) do
+    case current_execution.generation do
+      ^generation ->
+        current_execution
+
+      current_generation when current_generation > generation ->
+        Enum.find(state.execution_fence.history, fn execution ->
+          execution.issue_id == current_execution.issue_id and execution.generation == generation
+        end)
+
+      _ ->
+        nil
+    end
+  end
 
   defp fully_cleaned_terminal_execution?(%{status: :terminal, cleanup: :cleaned, ownership: :reconciled} = execution) do
     Map.get(execution, :termination_unconfirmed, false) == false and map_size(execution.leases) > 0 and
@@ -824,6 +870,17 @@ defmodule SymphonyElixir.Orchestrator do
       _ -> false
     end
   end
+
+  defp cleanup_receipts_match_execution?(journal, key, reservation, execution) do
+    accepted_head = execution_accepted_head(execution)
+
+    is_binary(accepted_head) and
+      valid_historical_cleanup_receipt?(journal, key, reservation, "termination_confirmed", accepted_head) and
+      valid_historical_cleanup_receipt?(journal, key, reservation, "repository_cleanup_verified", accepted_head)
+  end
+
+  defp execution_accepted_head(%{terminal: %{accepted_head: head}}) when is_binary(head), do: head
+  defp execution_accepted_head(_execution), do: nil
 
   defp reconcile_retained_disposable_terminal(state, %{dispatch: %{phase: "spawn_started", allocation_id: allocation_id}} = reservation) do
     runtime = state.work_package_runtime || %{}
