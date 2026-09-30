@@ -187,9 +187,9 @@ defmodule SymphonyElixir.WorkPackageClaim do
   @spec begin_pre_allocation_recovery(input()) :: :ok | {:error, term()}
   def begin_pre_allocation_recovery(input) when is_map(input) do
     with_confirmed_unstarted_claim(input, fn _authority, journal, key, _reservation ->
-      with {:ok, next_journal} <- Dispatch.begin_recovery(journal, key, input),
-           :ok <- Journal.save(input.journal_path, next_journal) do
-        :ok
+      case Dispatch.begin_recovery(journal, key, input) do
+        {:ok, next_journal} -> Journal.save(input.journal_path, next_journal)
+        {:error, _reason} = error -> error
       end
     end)
   end
@@ -198,30 +198,54 @@ defmodule SymphonyElixir.WorkPackageClaim do
 
   @doc "Serializes the first suspended Job create with pre-allocation recovery for this journal."
   @spec allocate_suspended(input(), (-> term())) :: {:ok, map()} | {:held, term()} | {:error, term()}
-  def allocate_suspended(input, allocation_fun) when is_map(input) and is_function(allocation_fun, 0) do
+  def allocate_suspended(input, allocation_fun)
+      when is_map(input) and is_function(allocation_fun, 0) do
     with_confirmed_unstarted_claim(input, fn _authority, journal, key, _reservation ->
-      with {:ok, allocation_intent} <- Dispatch.begin_suspended_allocation(journal, key, input),
-           :ok <- Journal.save(input.journal_path, allocation_intent) do
-        case safely_allocate(allocation_fun) do
-          {:ok, %{id: allocation_id, status: :ready} = allocation} when is_binary(allocation_id) ->
-            with {:ok, current_journal} <- Journal.load(input.journal_path),
-                 {:ok, next_journal} <- Dispatch.record_suspended_allocation(current_journal, key, input, allocation_id),
-                 :ok <- Journal.save(input.journal_path, next_journal) do
-              {:ok, allocation}
-            else
-              {:error, reason} -> {:held, {:allocation_journal_uncertain, reason}}
-            end
-
-          result ->
-            allocation_uncertain_result(result)
-        end
-      else
-        {:error, reason} -> {:error, reason}
-      end
+      allocate_suspended_locked(input, journal, key, allocation_fun)
     end)
   end
 
   def allocate_suspended(_input, _allocation_fun), do: {:error, :preallocation_claim_state_changed}
+
+  defp allocate_suspended_locked(input, journal, key, allocation_fun) do
+    case Dispatch.begin_suspended_allocation(journal, key, input) do
+      {:ok, allocation_intent} ->
+        case Journal.save(input.journal_path, allocation_intent) do
+          :ok -> allocate_and_record_suspended(input, key, allocation_fun)
+          {:error, reason} -> {:error, reason}
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp allocate_and_record_suspended(input, key, allocation_fun) do
+    case safely_allocate(allocation_fun) do
+      {:ok, %{id: allocation_id, status: :ready} = allocation} when is_binary(allocation_id) ->
+        case Journal.load(input.journal_path) do
+          {:ok, journal} -> persist_suspended_allocation(input, journal, key, allocation_id, allocation)
+          {:error, reason} -> {:held, {:allocation_journal_uncertain, reason}}
+          :missing -> {:held, {:allocation_journal_uncertain, :claim_journal_missing}}
+        end
+
+      result ->
+        allocation_uncertain_result(result)
+    end
+  end
+
+  defp persist_suspended_allocation(input, journal, key, allocation_id, allocation) do
+    case Dispatch.record_suspended_allocation(journal, key, input, allocation_id) do
+      {:ok, next_journal} ->
+        case Journal.save(input.journal_path, next_journal) do
+          :ok -> {:ok, allocation}
+          {:error, reason} -> {:held, {:allocation_journal_uncertain, reason}}
+        end
+
+      {:error, reason} ->
+        {:held, {:allocation_journal_uncertain, reason}}
+    end
+  end
 
   @doc "Durably binds a ready, still-suspended allocation to its journaled claim."
   @spec record_suspended_allocation(input(), %{id: String.t(), status: :ready}) :: :ok | {:error, term()}
