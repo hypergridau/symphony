@@ -331,6 +331,16 @@ its result is uncertain, `allocation_pending` keeps the provider claim and local
 The provider claim remains held until signed host preflight proves the exact retained history
 and complete, current Job/Pod absence.
 
+The HGS-740 confirmed-claim evidence verifier is a pure source boundary. It accepts only a
+domain-separated `work-package-paused-confirmed-recovery.v1` root signature, pinned to the
+existing HGS-485 recovery signer fingerprint. The signed observation must bind the confirmed
+generation-2 claim, the retired generation-1 successor receipt, the six-pool no-spawn history,
+all stopped and masked services, no process/workspace/turn, complete claim-scoped RKE2 Job and
+Pod absence snapshots, and a fresh provider readback showing the exact claimed/held reservation.
+Unknown fields, incomplete snapshots, a changed tuple, stale evidence, or another signing key
+fail closed. The verifier does not write state or provide a recovery command; a separate
+write-ahead transition and startup guard are required before this evidence can authorize recovery.
+
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the
