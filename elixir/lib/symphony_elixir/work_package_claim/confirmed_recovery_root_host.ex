@@ -63,7 +63,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       verified_context("f77e349e-21d9-4bdf-bad3-ce08b302e7e8", pool, "", workflow_path, runtime)
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :hgs740_startup_held_closed}
     end
   end
 

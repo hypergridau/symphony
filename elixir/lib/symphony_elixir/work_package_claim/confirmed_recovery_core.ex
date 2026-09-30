@@ -42,7 +42,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   def apply(issue_id, pool, workflow_path, nonce)
       when is_binary(issue_id) and is_binary(pool) and is_binary(workflow_path) and is_binary(nonce) do
     with {:ok, context} <- ConfirmedRecoveryRootHost.authorize_apply(issue_id, pool, workflow_path, nonce),
-         {:ok, {:ok, result}} <-
+         {:ok, result} <-
            ConfirmedRecoveryRootHost.with_pool_lock(context, fn -> apply_authorized_context(context) end) do
       {:ok, result}
     else
@@ -62,7 +62,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   def complete(issue_id, pool, workflow_path)
       when is_binary(issue_id) and is_binary(pool) and is_binary(workflow_path) do
     with {:ok, context} <- ConfirmedRecoveryRootHost.authorize_completion(issue_id, pool, workflow_path),
-         {:ok, :ok} <-
+         :ok <-
            ConfirmedRecoveryRootHost.with_pool_lock(context, fn -> complete_authorized_context(context) end) do
       :ok
     else
@@ -85,7 +85,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       :ok
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :hgs740_startup_held_closed}
     end
   rescue
     _ -> {:error, :hgs740_startup_held_closed}
@@ -142,8 +141,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     _, _ -> {:error, :confirmed_recovery_held_closed}
   end
 
-  defp apply_authorized_context(_context), do: {:error, :confirmed_recovery_held_closed}
-
   defp complete_authorized_context(%ConfirmedRecoveryContext{} = context) do
     runtime = runtime_with_host(context)
 
@@ -152,15 +149,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       :ok
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :hgs740_completion_held_closed}
     end
   rescue
     _ -> {:error, :hgs740_completion_held_closed}
   catch
     _, _ -> {:error, :hgs740_completion_held_closed}
   end
-
-  defp complete_authorized_context(_context), do: {:error, :hgs740_completion_held_closed}
 
   defp verify_startup_authorized_context(%ConfirmedRecoveryContext{} = context) do
     runtime = runtime_with_host(context)
@@ -170,15 +164,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       :ok
     else
       {:error, _reason} = error -> error
-      _ -> {:error, :hgs740_startup_held_closed}
     end
   rescue
     _ -> {:error, :hgs740_startup_held_closed}
   catch
     _, _ -> {:error, :hgs740_startup_held_closed}
   end
-
-  defp verify_startup_authorized_context(_context), do: {:error, :hgs740_startup_held_closed}
 
   @doc false
   @spec marker_directory(String.t()) :: Path.t()
@@ -1021,8 +1012,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
         end
       end)
   end
-
-  defp state_directories_match?(_actual, _expected, _state, _runtime), do: false
 
   defp state_directory_keys_match?(actual, expected) do
     actual |> Map.keys() |> Enum.sort() == expected |> Map.keys() |> Enum.sort()
@@ -2060,7 +2049,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp require_pool(_pool), do: {:error, :invalid_pool}
 
   defp require_issue_id(issue_id) do
-    if is_binary(issue_id) and Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, issue_id),
+    if Regex.match?(~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\z/, issue_id),
       do: :ok,
       else: {:error, :invalid_issue_id}
   end

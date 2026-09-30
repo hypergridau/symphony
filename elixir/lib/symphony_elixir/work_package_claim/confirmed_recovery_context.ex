@@ -11,7 +11,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext do
           required(:responsibility_graph_path) => Path.t()
         }
 
-  @type host_ops :: %{atom() => function()}
+  @type host_ops :: %{atom() => function() | map()}
 
   @type t :: %__MODULE__{
           issue_id: String.t(),

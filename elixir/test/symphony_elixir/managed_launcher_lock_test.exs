@@ -95,6 +95,7 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
       assert {:error, _reason} = ManagedLauncherLock.with_exclusive_lock(path, fn -> flunk("second lock entered") end)
       send(holder.pid, :release_launcher_lock)
       assert :released = Task.await(holder, 2_000)
+      assert {:ok, :applied} = ManagedLauncherLock.with_exclusive_lock(path, fn -> {:ok, :applied} end)
       assert :ok = ManagedLauncherLock.with_exclusive_lock(path, fn -> :ok end)
 
       File.chmod!(path, 0o644)
