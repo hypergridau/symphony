@@ -266,9 +266,11 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     File.rm!(other)
     File.write!(other, bytes)
     assert {:ok, _context} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+    install_recovery_workflows("")
+    assert {:error, :missing_tracker_kind} = RootHost.authorize_completion(@issue_id, @pool, recovery)
   end
 
-  defp install_recovery_workflows do
+  defp install_recovery_workflows(tracker_config \\ "tracker:\n  kind: memory\n") do
     root = "/srv/dahlia-runner-state/dahlia"
     output = "config/symphony/recovery-workflows"
     pools = ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
@@ -279,7 +281,7 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
       Enum.map(pools, fn pool ->
         workspace = "/srv/dahlia-runner-state/workspaces/pools/" <> pool
         source = workflow_entry(root, "config/symphony/workflows/" <> pool <> ".md", "synthetic source " <> pool)
-        bytes = "---\nworkspace:\n  root: \"" <> workspace <> "\"\n---\n"
+        bytes = "---\n" <> tracker_config <> "workspace:\n  root: \"" <> workspace <> "\"\n---\n"
         derived = workflow_entry(root, output <> "/" <> pool <> ".md", bytes) |> Map.delete("blob")
         {Map.merge(derived, %{"pool" => pool, "source" => source, "workspaceRoot" => workspace}), source}
       end)

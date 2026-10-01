@@ -387,6 +387,8 @@ root-controlled reads. Partial exports, changed unselected pools and alternate
 paths fail closed. Startup verification retains its original canonical workflow
 path and fixed-runtime-path check. Export and preflight do not authorize replacing
 held evidence or bypassing freshness checks.
+Recovery authorization also requires a successful workflow-store reload; it never
+uses the normal runner's last known good fallback to validate a different workflow.
 
 `symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
 --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the

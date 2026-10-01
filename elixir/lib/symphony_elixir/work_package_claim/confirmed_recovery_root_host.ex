@@ -8,7 +8,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
 
   import Bitwise, only: [band: 2]
 
-  alias SymphonyElixir.{Config, ManagedLauncherLock, Workflow}
+  alias SymphonyElixir.{Config, ManagedLauncherLock, Workflow, WorkflowStore}
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
@@ -38,6 +38,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- require_paused_gate(),
          :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
+         :ok <- WorkflowStore.force_reload(),
          {:ok, runtime} <- runtime_paths(pool) do
       verified_context(issue_id, pool, nonce, workflow_path, runtime)
     end
@@ -51,6 +52,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- require_issue_id(issue_id),
          :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
+         :ok <- WorkflowStore.force_reload(),
          {:ok, runtime} <- runtime_paths(pool) do
       verified_context(issue_id, pool, issue_id, workflow_path, runtime)
     end
@@ -78,6 +80,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- require_paused_gate(),
          :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
+         :ok <- WorkflowStore.force_reload(),
          {:ok, _runtime} <- runtime_paths(pool) do
       require_services_quiescent()
     end
