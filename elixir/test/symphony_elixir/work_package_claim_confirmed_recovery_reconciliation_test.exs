@@ -16,13 +16,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
 
     operations = %{
       trusted: fn _ -> :ok end,
-      lstat: fn _ -> {:ok, %File.Stat{mode: 0o700}} end,
+      lstat: fn path -> if String.ends_with?(path, "epoch-3"), do: {:error, :enoent}, else: {:ok, %File.Stat{mode: 0o700}} end,
       ls: fn _ -> {:ok, inputs} end
     }
 
     assert :ok = EpochHost.successor_custody_for_test("epoch-2", operations)
+    assert :ok = EpochHost.successor_custody_for_test("epoch-3", operations)
+    reserved = %{operations | lstat: fn _ -> {:ok, %File.Stat{mode: 0o700}} end}
+    assert {:error, :reconciliation_epoch_downgrade} = EpochHost.successor_custody_for_test("epoch-2", reserved)
     signed = %{operations | ls: fn _ -> {:ok, ["issued-envelope.json" | inputs]} end}
     assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-2", signed)
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-3", signed)
     inaccessible = %{operations | trusted: fn _ -> {:error, :untrusted} end}
     assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-2", inaccessible)
     assert {:error, :reconciliation_epoch_downgrade} = EpochHost.successor_custody_for_test("epoch-1", operations)

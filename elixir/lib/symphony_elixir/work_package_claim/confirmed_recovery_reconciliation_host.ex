@@ -61,7 +61,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
   end
 
   @spec require_directory(String.t(), String.t()) :: :ok | {:error, term()}
-  def require_directory(issue_id, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2"] do
+  def require_directory(issue_id, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3"] do
     base = Host.marker_directory(issue_id)
     directory = Epoch.epoch_directory(base, epoch)
 
@@ -73,14 +73,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
     do: successor_custody_with(base, epoch, &trusted_directory/1, &File.lstat/1, &File.ls/1)
 
   defp successor_custody_with(base, "epoch-1", _trusted, lstat, _ls) do
-    case lstat.(Epoch.epoch_directory(base, "epoch-2")) do
-      {:error, :enoent} -> :ok
+    if Enum.all?(["epoch-2", "epoch-3"], &(lstat.(Epoch.epoch_directory(base, &1)) == {:error, :enoent})),
+      do: :ok,
+      else: {:error, :reconciliation_epoch_downgrade}
+  end
+
+  defp successor_custody_with(base, "epoch-2", trusted, lstat, ls) do
+    case lstat.(Epoch.epoch_directory(base, "epoch-3")) do
+      {:error, :enoent} -> unsigned_predecessor(base, "epoch-1", trusted, lstat, ls)
       _ -> {:error, :reconciliation_epoch_downgrade}
     end
   end
 
-  defp successor_custody_with(base, "epoch-2", trusted, lstat, ls) do
-    predecessor = Epoch.epoch_directory(base)
+  defp successor_custody_with(base, "epoch-3", trusted, lstat, ls) do
+    with :ok <- unsigned_predecessor(base, "epoch-1", trusted, lstat, ls),
+         do: unsigned_predecessor(base, "epoch-2", trusted, lstat, ls)
+  end
+
+  defp unsigned_predecessor(base, epoch, trusted, lstat, ls) do
+    predecessor = Epoch.epoch_directory(base, epoch)
 
     with :ok <- require_directory_with(predecessor, trusted, lstat, ls),
          {:ok, entries} <- ls.(predecessor),
@@ -156,7 +167,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
     directory = Host.marker_directory(context.issue_id)
 
     epoch =
-      Enum.find(["epoch-1", "epoch-2"], fn name ->
+      Enum.find(["epoch-1", "epoch-2", "epoch-3"], fn name ->
         bundle_path == Path.join(Epoch.epoch_directory(directory, name), "issuer-input.json")
       end)
 

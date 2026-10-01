@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedEpoch
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: FailedSecondEpoch
 
   @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @historical %{
@@ -17,7 +18,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   def historical_hashes, do: @historical
 
   @spec epoch_directory(String.t(), String.t()) :: String.t()
-  def epoch_directory(directory, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2"],
+  def epoch_directory(directory, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3"],
     do: Path.join([directory, "reconciliation", epoch])
 
   @spec validate(map()) :: :ok | {:error, :invalid_reconciliation_epoch}
@@ -51,6 +52,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
     do:
       Enum.sort(Map.keys(metadata)) == Enum.sort(["predecessorEpoch" | @fields]) and
         metadata["contractVersion"] == "hgs740-reconciliation-observation.v2" and FailedEpoch.valid?(metadata)
+
+  defp valid_metadata?(%{"epoch" => "epoch-3"} = metadata),
+    do:
+      Enum.sort(Map.keys(metadata)) == Enum.sort(["predecessorEpoch2", "ancestorEpoch1" | @fields]) and
+        metadata["contractVersion"] == "hgs740-reconciliation-observation.v3" and FailedSecondEpoch.valid?(metadata)
 
   defp valid_metadata?(_metadata), do: false
 
@@ -91,6 +97,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
 
   defp verify_predecessor(%{"epoch" => "epoch-2"} = metadata, directory, read),
     do: FailedEpoch.verify(metadata, directory, read)
+
+  defp verify_predecessor(%{"epoch" => "epoch-3"} = metadata, directory, read),
+    do: FailedSecondEpoch.verify(metadata, directory, read)
 
   defp verify_predecessor(_metadata, _directory, _read), do: :ok
 

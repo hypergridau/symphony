@@ -12,6 +12,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryWorkflow, Journal}
@@ -85,7 +86,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- WorkflowStore.force_reload(),
          {:ok, runtime} <- runtime_paths(pool),
          {:ok, context} <- verified_context("f77e349e-21d9-4bdf-bad3-ce08b302e7e8", pool, "", workflow_path, runtime) do
-      with_pool_lock(context, fn -> :ok end)
+      with_pool_lock(context, fn ->
+        ConfirmedRecoveryIssuerPreflight.verify(marker_directory(context.issue_id))
+      end)
     end
   end
 
@@ -231,7 +234,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
   def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
     epoch =
-      Enum.find(["epoch-1", "epoch-2"], fn name ->
+      Enum.find(["epoch-1", "epoch-2", "epoch-3"], fn name ->
         path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id), name), "issuer-input.json")
       end)
 

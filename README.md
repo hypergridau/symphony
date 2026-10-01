@@ -196,6 +196,10 @@ collected, and recovery verifies the held inode throughout the operation.
 The observed unsigned epoch-1 lock failure permits one explicit epoch-2
 successor bound to its unchanged five files and retained failure seal. Reserving
 that successor prevents fallback to epoch 1.
+The sealed unsigned epoch-2 HTTP startup failure permits one fixed epoch-3
+successor with a V3 manifest binding both failed histories and seals. Reserving
+it prohibits earlier fallback. Native issuer preflight now proves fresh
+Jobs/Pods/Jobs absence under the existing root recovery lock before collection.
 The cold recovery executable starts Req's HTTP dependencies only after validating
 the fixed Kubernetes identity, credential context and CA. It does not start
 Symphony or its workers; failed HTTP startup or readback keeps recovery held.

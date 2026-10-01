@@ -1559,8 +1559,15 @@ Its observed unsigned launcher-lock failure is pinned separately by
 `ConfirmedRecoveryFailedEpoch`; the explicit fixed `epoch-2` successor uses
 `hgs740-reconciliation-observation.v2` metadata binding all five failed epoch
 files and the root-private failure seal. Those bytes and timestamps stay
-unchanged. There is no automatic epoch allocation or third epoch. Once epoch 2
-is reserved, issuer, WAL and provider verification reject epoch-1 fallback.
+unchanged. The sealed unsigned epoch-2 HTTP startup failure permits only the
+explicit fixed `epoch-3` successor. Its V3 manifest binds `predecessorEpoch2`
+and `ancestorEpoch1`, including both five-file histories and failure seals;
+the second predecessor's manifest must retain the first ancestor binding.
+There is no automatic epoch allocation or fourth epoch. Once a successor is
+reserved, issuer, WAL and provider verification reject older epoch fallback.
+Native issuer-context preflight checks all pinned original history files and
+fresh Jobs/Pods/Jobs absence under the same root lock before collection reserves
+an epoch. HTTP unavailability therefore fails before the observation store exists.
 `ConfirmedRecoveryReconciliation` verifies the pinned three historical hashes,
 unchanged claim/state/fence/graph/predecessor/witness bindings and immutable
 fresh input manifest. The existing v3 signature covers its explicit nested
