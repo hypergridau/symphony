@@ -241,10 +241,74 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     assert {:error, :hgs740_transaction_marker_missing} = Transaction.no_marker_startup_policy(@issue_id, false)
     # The public verifier intentionally collapses issue-level denials to one startup hold.
     assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup(@workflow, @pool)
-    assert {:error, :configured_state_path_mismatch} = Transaction.complete(@issue_id, @pool, @workflow)
+    assert {:error, :untrusted_workflow_file} = Transaction.complete(@issue_id, @pool, @workflow)
 
     assert {:error, :untrusted_workflow_file} =
              Transaction.verify_startup(Path.join(@fixture_root, "forged.md"), @pool)
+
+    recovery = install_recovery_workflows()
+    assert {:ok, context} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+
+    assert context.runtime.execution_fence_path ==
+             "/srv/dahlia-runner-state/workspaces/pools/midgard/.symphony/execution-fence.json"
+
+    other = Path.join(Path.dirname(recovery), "grid.md")
+    File.chown!(other, @owner)
+    assert {:error, :untrusted_workflow_file} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+    File.chown!(other, 0)
+    File.chmod!(other, 0o666)
+    assert {:error, :untrusted_workflow_file} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+    File.chmod!(other, 0o644)
+    bytes = File.read!(other)
+    File.rm!(other)
+    File.ln_s!(recovery, other)
+    assert {:error, :untrusted_workflow_file} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+    File.rm!(other)
+    File.write!(other, bytes)
+    assert {:ok, _context} = RootHost.authorize_completion(@issue_id, @pool, recovery)
+  end
+
+  defp install_recovery_workflows do
+    root = "/srv/dahlia-runner-state/dahlia"
+    output = "config/symphony/recovery-workflows"
+    pools = ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
+    renderer_path = "scripts/symphony/linux-workflow.mjs"
+    renderer = workflow_entry(root, renderer_path, "synthetic canonical renderer")
+
+    {outputs, sources} =
+      Enum.map(pools, fn pool ->
+        workspace = "/srv/dahlia-runner-state/workspaces/pools/" <> pool
+        source = workflow_entry(root, "config/symphony/workflows/" <> pool <> ".md", "synthetic source " <> pool)
+        bytes = "---\nworkspace:\n  root: \"" <> workspace <> "\"\n---\n"
+        derived = workflow_entry(root, output <> "/" <> pool <> ".md", bytes) |> Map.delete("blob")
+        {Map.merge(derived, %{"pool" => pool, "source" => source, "workspaceRoot" => workspace}), source}
+      end)
+      |> Enum.unzip()
+
+    commit = String.duplicate("a", 40)
+    controls = %{"schemaVersion" => 1, "sourceCommit" => commit, "files" => [renderer | sources]}
+
+    receipt = %{
+      "schemaVersion" => 1,
+      "derivation" => "canonical-linux-workflow-v1",
+      "sourceCommit" => commit,
+      "runtimeRoot" => "/srv/dahlia-runner-state",
+      "renderer" => renderer,
+      "files" => outputs
+    }
+
+    workflow_entry(root, "linux-control-receipt.json", Jason.encode!(controls))
+    workflow_entry(root, output <> "/recovery-workflow-receipt.json", Jason.encode!(receipt))
+    Path.join([root, output, @pool <> ".md"])
+  end
+
+  defp workflow_entry(root, relative, bytes) do
+    path = Path.join(root, relative)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, bytes)
+    File.chmod!(path, 0o644)
+    blob = :crypto.hash(:sha, ["blob ", Integer.to_string(byte_size(bytes)), <<0>>, bytes])
+    %{"path" => relative, "bytes" => byte_size(bytes), "mode" => "100644", "sha256" => sha256(bytes), "blob" => Base.encode16(blob, case: :lower)}
   end
 
   defp images(directory, names) do
