@@ -364,6 +364,18 @@ keep their full predecessor-claim and two-witness requirements. V3 proof, marker
 local receipt versions use separate signature domains; WAL replay consumes the same
 precomputed postimages and never emits another lease-release event.
 
+Before creating any immutable collector input, run
+`symphony --verify-hgs740-issuer-context --workflow <trusted-WORKFLOW.md> <pool-key>`
+as root under the exact configured pool environment that will be used for issuance.
+This read-only preflight checks the paused gate, trusted workflow, complete runtime
+configuration, fixed execution-fence path, and stopped pool/witness services. It does
+not collect evidence, sign, write state, or authorize recovery. Startup verification
+uses fixed paths and may run with an empty environment; issuance and this preflight
+require the configured pool credentials, including `LINEAR_API_KEY`. Missing settings
+return sanitized configuration reasons without raising or printing credential values.
+Preflight success does not relax the issuer's fresh evidence and state-owner checks.
+Existing expired one-shot inputs remain held; this command does not refresh or replace them.
+
 `symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
 --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the
 paused gate, stopped and masked pool/witness services, and state-owner quiescence; refreshes complete

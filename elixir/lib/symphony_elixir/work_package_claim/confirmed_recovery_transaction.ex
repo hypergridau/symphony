@@ -8,6 +8,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
 
   @type result :: {:ok, :applied | :already_applied} | {:error, term()}
 
@@ -30,6 +31,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction do
   @spec verify_startup(String.t(), String.t()) :: :ok | {:error, term()}
   def verify_startup(workflow_path, pool),
     do: ConfirmedRecoveryCore.verify_startup(workflow_path, pool)
+
+  @doc false
+  @spec verify_issuer_context(String.t(), String.t()) :: :ok | {:error, term()}
+  def verify_issuer_context(workflow_path, pool),
+    do: ConfirmedRecoveryRootHost.verify_issuer_context(workflow_path, pool)
 
   @doc false
   @spec marker_directory(String.t()) :: Path.t()

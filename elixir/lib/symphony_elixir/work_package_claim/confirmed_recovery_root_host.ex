@@ -71,6 +71,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   @doc false
+  @spec verify_issuer_context(String.t(), String.t()) :: :ok | {:error, term()}
+  def verify_issuer_context(workflow_path, pool) do
+    with :ok <- require_root(),
+         :ok <- require_pool(pool),
+         :ok <- require_paused_gate(),
+         :ok <- trusted_workflow_file(workflow_path, pool),
+         :ok <- Workflow.set_workflow_file_path(workflow_path),
+         {:ok, _runtime} <- runtime_paths(pool) do
+      require_services_quiescent()
+    end
+  end
+
+  @doc false
   @spec with_pool_lock(ConfirmedRecoveryContext.t(), (-> term())) :: term()
   def with_pool_lock(%ConfirmedRecoveryContext{runtime: runtime, pool: pool}, fun) when is_function(fun, 0) do
     with {:ok, lock_path} <- ManagedLauncherLock.pool_lock_path(runtime.journal_path, pool) do
@@ -403,11 +416,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     end
   end
 
-  defp runtime_paths(pool) do
+  defp runtime_paths(pool), do: runtime_paths(pool, &Config.settings/0)
+
+  defp runtime_paths(pool, settings) do
     with {:ok, paths} <- fixed_runtime_paths(pool),
-         true <- Config.execution_fence_state_path() == paths.execution_fence_path do
+         {:ok, config} <- settings.(),
+         true <- config.execution_fence.state_path == paths.execution_fence_path do
       {:ok, paths}
     else
+      {:error, _reason} = error -> error
       _ -> {:error, :configured_state_path_mismatch}
     end
   end
@@ -478,6 +495,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   if Mix.env() == :test do
+    @doc false
+    @spec runtime_paths_for_test(String.t(), (-> {:ok, map()} | {:error, term()})) :: {:ok, map()} | {:error, term()}
+    def runtime_paths_for_test(pool, settings), do: runtime_paths(pool, settings)
+
     @doc false
     @spec decode_private_key_for_test(binary()) :: {:ok, binary()} | {:error, :untrusted_recovery_key}
     def decode_private_key_for_test(pem), do: decode_private_key(pem)

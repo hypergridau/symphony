@@ -28,7 +28,7 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery", "--issue-hgs740-confirmed-recovery"])) do
+    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--verify-hgs740-issuer-context", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery", "--issue-hgs740-confirmed-recovery"])) do
       dispatch_hgs740(args)
     else
       if "--retire-unsubmitted-successor" in args do
@@ -42,15 +42,20 @@ defmodule SymphonyElixir.CLI do
   @spec dispatch_hgs740([String.t()]) :: no_return()
   defp dispatch_hgs740(args) do
     result =
-      if "--issue-hgs740-confirmed-recovery" in args do
-        evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
-      else
-        evaluate_hgs740(
-          args,
-          &ConfirmedRecoveryTransaction.verify_startup/2,
-          &ConfirmedRecoveryTransaction.apply/4,
-          &ConfirmedRecoveryTransaction.complete/3
-        )
+      cond do
+        "--issue-hgs740-confirmed-recovery" in args ->
+          evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
+
+        "--verify-hgs740-issuer-context" in args ->
+          evaluate_hgs740_issuer_context(args, &ConfirmedRecoveryTransaction.verify_issuer_context/2)
+
+        true ->
+          evaluate_hgs740(
+            args,
+            &ConfirmedRecoveryTransaction.verify_startup/2,
+            &ConfirmedRecoveryTransaction.apply/4,
+            &ConfirmedRecoveryTransaction.complete/3
+          )
       end
 
     case result do
@@ -58,8 +63,20 @@ defmodule SymphonyElixir.CLI do
         System.halt(0)
 
       {:error, reason} ->
-        IO.puts(:stderr, "HGS-740 recovery guard held closed: #{safe_hgs740_reason(reason)}")
+        IO.puts(:stderr, "HGS-740 recovery guard held closed: #{reason}")
         System.halt(1)
+    end
+  end
+
+  @doc false
+  @spec evaluate_hgs740_issuer_context([String.t()], (String.t(), String.t() -> term())) :: :ok | {:error, String.t()}
+  def evaluate_hgs740_issuer_context(args, verify_context) when is_function(verify_context, 2) do
+    case args do
+      ["--verify-hgs740-issuer-context", "--workflow", workflow_path, pool] ->
+        normalize_hgs740_result(verify_context.(workflow_path, pool))
+
+      _ ->
+        {:error, "Usage: symphony --verify-hgs740-issuer-context --workflow <trusted-WORKFLOW.md> <pool-key>"}
     end
   end
 

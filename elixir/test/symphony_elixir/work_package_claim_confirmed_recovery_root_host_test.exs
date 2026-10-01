@@ -3,6 +3,26 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
 
+  test "issuer context returns configuration failure without raising and keeps the fixed state path" do
+    assert {:error, :missing_linear_api_token} =
+             ConfirmedRecoveryRootHost.runtime_paths_for_test("midgard", fn -> {:error, :missing_linear_api_token} end)
+
+    assert {:ok, expected} = ConfirmedRecoveryRootHost.fixed_runtime_paths("midgard")
+
+    assert {:ok, ^expected} =
+             ConfirmedRecoveryRootHost.runtime_paths_for_test("midgard", fn ->
+               {:ok, %{execution_fence: %{state_path: expected.execution_fence_path}}}
+             end)
+
+    assert {:error, :configured_state_path_mismatch} =
+             ConfirmedRecoveryRootHost.runtime_paths_for_test("midgard", fn ->
+               {:ok, %{execution_fence: %{state_path: "/tmp/alternate-fence.json"}}}
+             end)
+
+    assert {:error, :invalid_pool} =
+             ConfirmedRecoveryRootHost.runtime_paths_for_test("unknown", fn -> flunk("invalid pool must not load settings") end)
+  end
+
   test "decodes an Ed25519 PKCS8 signer seed without accepting another key algorithm" do
     seed = :binary.copy(<<7>>, 32)
     {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519, seed)

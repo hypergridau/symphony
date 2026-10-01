@@ -6,6 +6,27 @@ defmodule SymphonyElixir.CLITest do
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
   @activate_flag "--activate-responsibility-graph"
 
+  test "issuer context preflight preserves configuration reasons and redacts arbitrary error text" do
+    args = ["--verify-hgs740-issuer-context", "--workflow", "/trusted/WORKFLOW.md", "midgard"]
+
+    assert {:error, "missing_linear_api_token"} =
+             CLI.evaluate_hgs740_issuer_context(args, fn workflow, pool ->
+               assert {workflow, pool} == {"/trusted/WORKFLOW.md", "midgard"}
+               {:error, :missing_linear_api_token}
+             end)
+
+    assert {:error, "invalid_authority_or_evidence"} =
+             CLI.evaluate_hgs740_issuer_context(args, fn _, _ -> {:error, "secret provider response"} end)
+
+    assert {:error, "configured_state_path_mismatch"} =
+             CLI.evaluate_hgs740_issuer_context(args, fn _, _ -> {:error, {:configured_state_path_mismatch, "secret detail"}} end)
+
+    assert {:error, _usage} =
+             CLI.evaluate_hgs740_issuer_context(args ++ ["--bundle", "/not/read"], fn _, _ ->
+               flunk("malformed context preflight must not run")
+             end)
+  end
+
   test "routes HGS-740 startup verification before ordinary service startup" do
     parent = self()
 
