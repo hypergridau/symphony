@@ -86,6 +86,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
          true <- valid_assignment_binding?(claim, snapshot_state),
          {:ok, context, ca_sha256} <- context_loader.(claim),
          true <- ca_sha256 == expected_cluster["caSha256"],
+         {:ok, _applications} <- Application.ensure_all_started(:req),
          {:ok, jobs} <- list_jobs.(@namespace, context),
          :ok <- complete_resources_absent(jobs.items, claim, :job),
          {:ok, pods} <- list_pods.(@namespace, context),

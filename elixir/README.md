@@ -1542,6 +1542,13 @@ errors remain at `spawn_started` until exact root-log replay resolves them.
 
 ### HGS-740 append-only observation reconciliation
 
+The `app: nil` recovery escript starts Req alone after its native observer checks
+the fixed API, claim, credential context and CA digest. It never starts Symphony
+or the orchestrator for recovery. A fresh-VM regression exercises three real
+HTTP reads and proves that a CA mismatch denies before Req starts. Before any
+new collection, qualify this same native read-only observer in a cold process;
+the issuer-context lock check alone does not prove Kubernetes connectivity.
+
 The recovery workflow verifier accepts at most 130 canonical control entries,
 matching Dahlia's exporter after the two reconciliation files were added. A
 131st entry remains a denial; workflow byte, path and hash checks are unchanged.
