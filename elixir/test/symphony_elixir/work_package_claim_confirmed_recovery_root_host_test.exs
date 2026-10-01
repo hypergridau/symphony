@@ -3,6 +3,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
 
+  test "malformed root issuance inputs fail closed before files or keys are read" do
+    assert {:error, :untrusted_issuer_bundle} = ConfirmedRecoveryRootHost.read_issuer_bundle(nil, nil)
+    assert {:error, :issuer_output_conflict} = ConfirmedRecoveryRootHost.persist_issuer_outputs(nil, nil, nil)
+    assert {:error, :untrusted_recovery_key} = ConfirmedRecoveryRootHost.sign_recovery_payload(nil)
+  end
+
   test "recovery apply uses the same masked quiescence contract as issuer preflight" do
     for state <- ["inactive", "failed"] do
       properties = "ActiveState=#{state}\nControlGroup=\nMainPID=0\n"

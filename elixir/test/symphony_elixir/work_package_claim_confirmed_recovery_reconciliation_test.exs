@@ -211,6 +211,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
     ancestor = fn ^metadata, @directory, _ -> :ok end
 
     assert :ok = Signed.verify_for_test(metadata, @directory, read, binding, ancestor)
+    unavailable = fn _, _ -> raise "historical custody read unavailable" end
+
+    assert {:error, :invalid_reconciliation_epoch} =
+             Signed.verify_for_test(metadata, @directory, unavailable, binding, ancestor)
+
     refute Signed.valid?(metadata)
     assert Signed.valid?(Map.put(metadata, "signedPredecessorEpoch3", Signed.predecessor_binding()))
     assert {:error, _} = Signed.verify(metadata, @directory, read)
