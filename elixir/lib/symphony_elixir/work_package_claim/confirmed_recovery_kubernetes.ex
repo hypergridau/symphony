@@ -32,6 +32,24 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
 
   def observe(_claim, _expected_cluster), do: {:error, :kubernetes_observation_unavailable}
 
+  @doc "Reads fresh complete Jobs and Pods for a claim whose journal has no assignment snapshot."
+  @spec observe_without_assignment_snapshot(map(), map()) ::
+          {:ok, map()} | {:error, :claim_resources_present | :kubernetes_observation_unavailable}
+  def observe_without_assignment_snapshot(claim, expected_cluster)
+      when is_map(claim) and is_map(expected_cluster) do
+    observe_with_mode(
+      claim,
+      expected_cluster,
+      &client_context/1,
+      &HTTPClient.list_jobs_complete/2,
+      &HTTPClient.list_pods_complete/2,
+      :absent
+    )
+  end
+
+  def observe_without_assignment_snapshot(_claim, _expected_cluster),
+    do: {:error, :kubernetes_observation_unavailable}
+
   if Mix.env() == :test do
     @doc false
     @spec observe_with_test_adapter(
@@ -44,13 +62,28 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
             {:ok, map()} | {:error, :kubernetes_observation_unavailable}
     def observe_with_test_adapter(claim, expected_cluster, context, jobs, pods),
       do: observe_with(claim, expected_cluster, context, jobs, pods)
+
+    @doc false
+    @spec observe_without_assignment_snapshot_with_test_adapter(
+            map(),
+            map(),
+            (map() -> term()),
+            (String.t(), term() -> term()),
+            (String.t(), term() -> term())
+          ) :: {:ok, map()} | {:error, :kubernetes_observation_unavailable}
+    def observe_without_assignment_snapshot_with_test_adapter(claim, expected_cluster, context, jobs, pods),
+      do: observe_with_mode(claim, expected_cluster, context, jobs, pods, :absent)
   end
 
   defp observe_with(claim, expected_cluster, context_loader, list_jobs, list_pods) do
+    observe_with_mode(claim, expected_cluster, context_loader, list_jobs, list_pods, :present)
+  end
+
+  defp observe_with_mode(claim, expected_cluster, context_loader, list_jobs, list_pods, snapshot_state) do
     with true <- claim["generation"] == 2,
          true <- expected_cluster["apiServer"] == @api_server,
-         true <- is_binary(claim["issueId"]) and is_binary(claim["assignmentSHA256"]),
-         true <- Regex.match?(~r/\A[0-9a-f]{64}\z/, claim["assignmentSHA256"]),
+         true <- is_binary(claim["issueId"]),
+         true <- valid_assignment_binding?(claim, snapshot_state),
          {:ok, context, ca_sha256} <- context_loader.(claim),
          true <- ca_sha256 == expected_cluster["caSha256"],
          {:ok, jobs} <- list_jobs.(@namespace, context),
@@ -89,6 +122,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
     _, _ -> {:error, :kubernetes_observation_unavailable}
   end
 
+  defp valid_assignment_binding?(%{"assignmentSHA256" => assignment_sha} = claim, :present)
+       when is_binary(assignment_sha) do
+    not Map.has_key?(claim, "assignmentSnapshotState") and
+      Regex.match?(~r/\A[0-9a-f]{64}\z/, assignment_sha)
+  end
+
+  defp valid_assignment_binding?(%{"assignmentSHA256" => nil, "assignmentSnapshotState" => "absent"} = claim, :absent) do
+    not is_nil(claim["issueId"]) and claim["generation"] == 2
+  end
+
+  defp valid_assignment_binding?(_claim, _snapshot_state), do: false
+
   @doc false
   @spec complete_resources_absent([map()], map(), :job | :pod) :: :ok | {:error, :claim_resources_present}
   def complete_resources_absent(items, claim, kind) when is_list(items) and is_map(claim) and kind in [:job, :pod] do
@@ -100,7 +145,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes do
   def complete_resources_absent(_items, _claim, _kind), do: {:error, :claim_resources_present}
 
   defp client_context(claim) do
-    digest = ConfirmedRecoveryEvidence.tuple_digest(Map.delete(claim, "assignmentSHA256"))
+    digest =
+      claim
+      |> Map.delete("assignmentSHA256")
+      |> Map.delete("assignmentSnapshotState")
+      |> ConfirmedRecoveryEvidence.tuple_digest()
+
     assignment = %{sha256: digest, environment: %{target_environment: :rke2}}
     idempotency_key = digest <> ":observe"
     config = %{api_server: @api_server, credential_root: @credential_root}

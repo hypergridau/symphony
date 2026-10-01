@@ -2,9 +2,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
   @receipt_domain "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v1\0"
+  @receipt_domain_v2 "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v2\0"
 
   alias SymphonyElixir.ExecutionFence
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
+  alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.ResponsibilityGraph
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
@@ -623,6 +625,195 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(decoded_marker)))
 
     Agent.stop(fixture.vfs)
+  end
+
+  test "v2 crash replay and completion preserve explicit absent-snapshot state across the local receipt" do
+    fixture = positive_apply_fixture(:absent)
+    original_save = fixture.context.host_ops.save_state
+
+    crashing_context = %{
+      fixture.context
+      | host_ops:
+          Map.put(fixture.context.host_ops, :save_state, fn kind, path, state ->
+            writes = Agent.get(fixture.vfs, & &1.state_write_calls)
+            if writes == 1, do: {:error, :synthetic_crash}, else: original_save.(kind, path, state)
+          end)
+    }
+
+    assert {:error, :hgs740_transaction_incomplete} = Transaction.apply_with_test_context(crashing_context)
+    applying = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+    assert applying["contractVersion"] == "work-package-hgs740-local-transition.v2"
+    assert applying["assignmentSnapshotState"] == "absent"
+    assert is_nil(applying["assignmentSHA256"])
+    assert applying["status"] == "applying"
+
+    observer = fn claim, cluster ->
+      assert claim["assignmentSnapshotState"] == "absent"
+      assert is_nil(claim["assignmentSHA256"])
+      {:ok, synthetic_kubernetes_observation(cluster)}
+    end
+
+    replay_context = %{
+      fixture.context
+      | host_ops: Map.put(fixture.context.host_ops, :observe_kubernetes_for_test, observer)
+    }
+
+    assert {:ok, :applied} = Transaction.apply_with_test_context(replay_context)
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+    applied_files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(Map.fetch!(applied_files, fixture.marker_path))
+    assert marker["status"] == "local_applied"
+
+    current_journal = Map.fetch!(applied_files, fixture.state_paths.journal)
+    assert :absent = Journal.assignment_snapshot_state(current_journal, reservation_key(fixture.expected))
+
+    completion = install_completion_evidence(fixture, marker, applied_files)
+
+    completion_context = %{
+      completion.context
+      | host_ops: Map.put(completion.context.host_ops, :observe_kubernetes_for_test, observer)
+    }
+
+    assert :ok = Transaction.complete_with_test_context(completion_context)
+    completed = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+    assert completed["status"] == "complete"
+    assert completed["contractVersion"] == "work-package-hgs740-local-transition.v2"
+    assert completed["assignmentSnapshotState"] == "absent"
+
+    assert :ok = Transaction.complete_with_test_context(completion_context)
+    assert :ok = Transaction.verify_startup_with_test_context(completion_context)
+
+    receipt_bytes = Agent.get(fixture.vfs, &Map.fetch!(&1.files, completion.receipt_path))
+    receipt_envelope = Jason.decode!(receipt_bytes)
+    receipt_payload_bytes = Base.url_decode64!(receipt_envelope["payload"], padding: false)
+    receipt_payload = Jason.decode!(receipt_payload_bytes)
+    assert receipt_payload["contractVersion"] == "work-package-hgs740-local-transition-receipt.v2"
+
+    tampered_payload =
+      receipt_payload
+      |> Map.put("assignmentSnapshotState", "present")
+      |> Evidence.canonical_json()
+
+    tampered_receipt =
+      Evidence.canonical_json(%{
+        "payload" => Base.url_encode64(tampered_payload, padding: false),
+        "signature" => receipt_envelope["signature"]
+      })
+
+    Agent.update(fixture.vfs, &put_in(&1.files[completion.receipt_path], tampered_receipt))
+    assert {:error, :hgs740_startup_held_closed} = Transaction.verify_startup_with_test_context(completion_context)
+    Agent.update(fixture.vfs, &put_in(&1.files[completion.receipt_path], receipt_bytes))
+    assert :ok = Transaction.verify_startup_with_test_context(completion_context)
+    Agent.stop(fixture.vfs)
+  end
+
+  test "v1 admission requires a present assignment snapshot matching the signed digest" do
+    fixture = positive_apply_fixture()
+    envelope = Jason.decode!(fixture.proof_bytes)
+    payload_bytes = Base.url_decode64!(envelope["payload"], padding: false)
+    payload = Jason.decode!(payload_bytes)
+
+    present_paths = %{
+      fixture.predecessor_paths
+      | journal: %{bytes: fixture.journal_bytes, state: fixture.predecessor_paths.journal.state}
+    }
+
+    assert :ok = Transaction.verify_local_claim(present_paths, payload, fixture.context.runtime)
+
+    absent_bytes = remove_journal_snapshot(fixture.journal_bytes, fixture.expected)
+    null_bytes = put_journal_snapshot_null(fixture.journal_bytes, fixture.expected)
+
+    for bytes <- [absent_bytes, null_bytes] do
+      {:ok, journal_state} = Journal.decode_bytes(bytes)
+      changed_paths = %{present_paths | journal: %{bytes: bytes, state: journal_state}}
+
+      assert {:error, :confirmed_claim_precondition_changed} =
+               Transaction.verify_local_claim(changed_paths, payload, fixture.context.runtime)
+    end
+
+    Agent.stop(fixture.vfs)
+  end
+
+  test "v1 local-applied replay rejects absent and explicit-null snapshots even with matching postimage hashes" do
+    for snapshot_change <- [:absent, :explicit_null] do
+      fixture = positive_apply_fixture()
+      assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+
+      files = Agent.get(fixture.vfs, & &1.files)
+      marker_bytes = Map.fetch!(files, fixture.marker_path)
+      marker = Jason.decode!(marker_bytes)
+      journal_bytes = Map.fetch!(files, fixture.state_paths.journal)
+
+      changed_journal =
+        case snapshot_change do
+          :absent -> remove_journal_snapshot(journal_bytes, fixture.expected)
+          :explicit_null -> put_journal_snapshot_null(journal_bytes, fixture.expected)
+        end
+
+      changed_marker =
+        update_in(marker, ["postimages", "claimJournal"], fn _image ->
+          %{
+            "sha256" => sha256(changed_journal),
+            "bytes" => Base.url_encode64(changed_journal, padding: false)
+          }
+        end)
+
+      Agent.update(fixture.vfs, fn state ->
+        %{
+          state
+          | files:
+              state.files
+              |> Map.put(fixture.state_paths.journal, changed_journal)
+              |> Map.put(fixture.marker_path, Jason.encode!(changed_marker))
+        }
+      end)
+
+      assert {:error, :existing_hgs740_marker_conflict} = Transaction.apply_with_test_context(fixture.context)
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+      Agent.stop(fixture.vfs)
+    end
+  end
+
+  test "v2 Core rejects an explicitly present null assignment_snapshot before marker or WAL writes" do
+    fixture = positive_apply_fixture(:explicit_null)
+
+    assert {:error, :confirmed_claim_precondition_changed} = Transaction.apply_with_test_context(fixture.context)
+    state = Agent.get(fixture.vfs, & &1)
+    refute Map.has_key?(state.files, fixture.marker_path)
+    assert state.state_write_calls == 0
+    Agent.stop(fixture.vfs)
+  end
+
+  test "v2 replay rejects a marker whose absent state or null assignment digest changed" do
+    mutations = [
+      &Map.put(&1, "assignmentSnapshotState", "present"),
+      &Map.put(&1, "assignmentSHA256", String.duplicate("f", 64))
+    ]
+
+    for mutate <- mutations do
+      fixture = positive_apply_fixture(:absent)
+      original_save = fixture.context.host_ops.save_state
+
+      crashing_context = %{
+        fixture.context
+        | host_ops:
+            Map.put(fixture.context.host_ops, :save_state, fn kind, path, state ->
+              writes = Agent.get(fixture.vfs, & &1.state_write_calls)
+              if writes == 1, do: {:error, :synthetic_crash}, else: original_save.(kind, path, state)
+            end)
+      }
+
+      assert {:error, :hgs740_transaction_incomplete} = Transaction.apply_with_test_context(crashing_context)
+
+      marker = Jason.decode!(Agent.get(fixture.vfs, &Map.fetch!(&1.files, fixture.marker_path)))
+      assert marker["contractVersion"] == "work-package-hgs740-local-transition.v2"
+      changed_marker = mutate.(marker)
+      Agent.update(fixture.vfs, &put_in(&1.files[fixture.marker_path], Jason.encode!(changed_marker)))
+
+      assert {:error, :existing_hgs740_marker_conflict} = Transaction.apply_with_test_context(fixture.context)
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 1
+      Agent.stop(fixture.vfs)
+    end
   end
 
   test "Core preserves the marker and holds replay after a durability failure" do
@@ -1501,13 +1692,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     }
   end
 
-  defp positive_apply_fixture do
+  defp positive_apply_fixture(snapshot_state \\ :present) do
     issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
     nonce = "11111111-2222-4333-8444-555555555501"
     now_ms = 1_790_762_400_000
 
-    {expected, _old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor} =
+    {expected, _old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor, present_assignment_sha} =
       confirmed_preimages(issue_id, now_ms)
+
+    journal_bytes = fixture_journal_bytes(snapshot_state, journal_bytes, expected)
+    contract = fixture_recovery_contract(snapshot_state, present_assignment_sha)
 
     expected_hashes = %{
       "fenceSHA256" => sha256(fence_bytes),
@@ -1543,10 +1737,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       "issueId" => issue_id,
       "generation" => 2,
       "reservationId" => expected["reservationId"],
-      "assignmentSHA256" => String.duplicate("a", 64),
       "nonce" => nonce,
       "observation" => observation
     }
+
+    payload = Map.merge(payload, contract.payload_fields)
 
     payload_bytes = Evidence.canonical_json(payload)
     {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
@@ -1555,7 +1750,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       :crypto.sign(
         :eddsa,
         :none,
-        Evidence.signature_message(payload_bytes),
+        Evidence.signature_message(payload_bytes, contract.version),
         [private_key, :ed25519]
       )
 
@@ -1709,6 +1904,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       host_ops: host_ops
     }
 
+    bindings = %{
+      pool: "midgard",
+      issue_id: issue_id,
+      generation: 2,
+      reservation_id: expected["reservationId"],
+      assignment_sha256: payload["assignmentSHA256"],
+      nonce: nonce,
+      fence_sha256: expected_hashes["fenceSHA256"],
+      claim_journal_sha256: expected_hashes["claimJournalSHA256"],
+      responsibility_graph_sha256: expected_hashes["responsibilityGraphSHA256"],
+      now_ms: now_ms
+    }
+
+    bindings = Map.merge(bindings, contract.binding_fields)
+
     %{
       context: context,
       vfs: vfs,
@@ -1729,22 +1939,91 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       proof_bytes: proof_bytes,
       test_public_key: public_key,
       test_private_key: private_key,
-      bindings: %{
-        pool: "midgard",
-        issue_id: issue_id,
-        generation: 2,
-        reservation_id: expected["reservationId"],
-        assignment_sha256: payload["assignmentSHA256"],
-        nonce: nonce,
-        fence_sha256: expected_hashes["fenceSHA256"],
-        claim_journal_sha256: expected_hashes["claimJournalSHA256"],
-        responsibility_graph_sha256: expected_hashes["responsibilityGraphSHA256"],
-        now_ms: now_ms
-      },
+      bindings: bindings,
       journal_bytes: journal_bytes,
       fence_bytes: fence_bytes,
       graph_bytes: graph_bytes,
       reservation_id: expected["reservationId"]
+    }
+  end
+
+  defp reservation_key(expected) do
+    Journal.reservation_key(
+      expected["issueId"],
+      expected["managedProjectProfileId"],
+      expected["repositoryRef"],
+      2
+    )
+  end
+
+  defp put_journal_snapshot_null(journal_bytes, expected) do
+    document = Jason.decode!(journal_bytes)
+    key = reservation_key(expected)
+
+    document
+    |> put_in(["reservations", key, "assignment_snapshot"], nil)
+    |> Jason.encode!()
+  end
+
+  defp remove_journal_snapshot(journal_bytes, expected) do
+    document = Jason.decode!(journal_bytes)
+    key = reservation_key(expected)
+    reservations = Map.update!(document["reservations"], key, &Map.delete(&1, "assignment_snapshot"))
+
+    document
+    |> Map.put("reservations", reservations)
+    |> Jason.encode!()
+  end
+
+  defp fixture_journal_bytes(:explicit_null, journal_bytes, expected),
+    do: put_journal_snapshot_null(journal_bytes, expected)
+
+  defp fixture_journal_bytes(:absent, journal_bytes, expected),
+    do: remove_journal_snapshot(journal_bytes, expected)
+
+  defp fixture_journal_bytes(_snapshot_state, journal_bytes, _expected), do: journal_bytes
+
+  defp fixture_recovery_contract(:present, assignment_sha) do
+    version = "work-package-paused-confirmed-recovery.v1"
+
+    %{
+      version: version,
+      assignment_sha: assignment_sha,
+      payload_fields: %{"contractVersion" => version, "assignmentSHA256" => assignment_sha},
+      binding_fields: %{}
+    }
+  end
+
+  defp fixture_recovery_contract(:absent, _assignment_sha), do: fixture_absent_recovery_contract()
+  defp fixture_recovery_contract(:explicit_null, _assignment_sha), do: fixture_absent_recovery_contract()
+
+  defp fixture_absent_recovery_contract do
+    version = "work-package-paused-confirmed-recovery.v2"
+
+    %{
+      version: version,
+      assignment_sha: nil,
+      payload_fields: %{
+        "contractVersion" => version,
+        "assignmentSHA256" => nil,
+        "assignmentSnapshotState" => "absent"
+      },
+      binding_fields: %{assignment_snapshot_state: "absent"}
+    }
+  end
+
+  defp synthetic_kubernetes_observation(cluster) do
+    %{
+      "observedAt" => "2026-09-30T12:01:00Z",
+      "apiServer" => cluster["apiServer"],
+      "namespace" => "frigga",
+      "jobs" => %{
+        "firstResourceVersion" => "1",
+        "confirmingResourceVersion" => "2",
+        "sha256" => sha256("[]"),
+        "claimAbsent" => true
+      },
+      "pods" => %{"resourceVersion" => "1", "sha256" => sha256("[]"), "claimAbsent" => true}
     }
   end
 
@@ -1757,7 +2036,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
              :crypto.verify(
                :eddsa,
                :none,
-               Evidence.signature_message(signed_payload),
+               Evidence.signature_message(signed_payload, payload["contractVersion"]),
                signature,
                [public_key, :ed25519]
              ),
@@ -1766,6 +2045,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
            true <- bindings.generation == payload["generation"] and bindings.nonce == payload["nonce"],
            true <- bindings.reservation_id == payload["reservationId"],
            true <- bindings.assignment_sha256 == payload["assignmentSHA256"],
+           true <- snapshot_binding_matches?(bindings, payload),
            true <- bindings.fence_sha256 == expected_hashes["fenceSHA256"],
            true <- bindings.claim_journal_sha256 == expected_hashes["claimJournalSHA256"],
            true <- bindings.responsibility_graph_sha256 == expected_hashes["responsibilityGraphSHA256"],
@@ -1776,6 +2056,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       end
     end
   end
+
+  defp snapshot_binding_matches?(bindings, %{"contractVersion" => "work-package-paused-confirmed-recovery.v2"}) do
+    Map.get(bindings, :assignment_snapshot_state) == "absent" and
+      Map.has_key?(bindings, :assignment_snapshot_state)
+  end
+
+  defp snapshot_binding_matches?(bindings, %{"contractVersion" => "work-package-paused-confirmed-recovery.v1"}) do
+    not Map.has_key?(bindings, :assignment_snapshot_state)
+  end
+
+  defp snapshot_binding_matches?(_bindings, _payload), do: false
 
   defp vfs_raw_write(vfs, path, bytes, marker_path) do
     event =
@@ -1829,8 +2120,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   defp signed_local_receipt(candidate_bytes, private_key) do
+    domain =
+      case Jason.decode(candidate_bytes) do
+        {:ok, %{"contractVersion" => "work-package-hgs740-local-transition-receipt.v2"}} -> @receipt_domain_v2
+        _ -> @receipt_domain
+      end
+
     signature =
-      :crypto.sign(:eddsa, :none, @receipt_domain <> candidate_bytes, [private_key, :ed25519])
+      :crypto.sign(:eddsa, :none, domain <> candidate_bytes, [private_key, :ed25519])
       |> Base.url_encode64(padding: false)
 
     Evidence.canonical_json(%{
@@ -2034,10 +2331,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       "nonceHash" => sha256(nonce2)
     }
 
+    {assignment, assignment_snapshot} = test_assignment_snapshot(expected)
+
     journal =
       Journal.new()
       |> put_reservation(issue_id, old_claim, nonce1, "confirmed")
       |> put_reservation(issue_id, expected, nonce2, "confirmed")
+
+    key = reservation_key(expected)
+    reservation = Map.fetch!(journal.reservations, key)
+    {:ok, journal} = Journal.put(journal, key, Map.put(reservation, :assignment_snapshot, assignment_snapshot))
 
     {:ok, journal_bytes} = Journal.encode_bytes(journal)
     {fence, _old_execution} = confirmed_fence(issue_id, now_ms)
@@ -2052,7 +2355,36 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       "receipt" => old_execution_json["retirement"]
     }
 
-    {expected, old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor}
+    {expected, old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor, assignment.sha256}
+  end
+
+  defp test_assignment_snapshot(expected) do
+    attrs = %{
+      objective: %{id: "objective-gen2", identity: "objective-gen2", content: "Synthetic recovery assignment"},
+      repository_ref: expected["repositoryRef"],
+      base_ref: "main",
+      branch: "codex/hgs740-test",
+      seat: expected["runnerId"],
+      lease: %{
+        issue_id: expected["issueId"],
+        repository: expected["repositoryRef"],
+        session_id: expected["sessionId"],
+        process_id: expected["processId"],
+        generation: expected["generation"]
+      },
+      intent_ancestry: ["HGS-740", expected["responsibleDelegationId"]],
+      acceptance: %{deliverable: "Synthetic assignment", evidence: "Fixture only"},
+      context_secret_refs: [],
+      platform: "linux-x86_64",
+      environment_classification: "repository",
+      environment_constraints: ["synthetic"],
+      placement: :internal_beta,
+      target_environment: :rke2
+    }
+
+    {:ok, assignment} = ManagedAssignmentBundle.build(attrs)
+    {:ok, snapshot} = ManagedAssignmentBundle.snapshot(assignment)
+    {assignment, snapshot}
   end
 
   defp put_reservation(journal, issue_id, claim, nonce, phase) do

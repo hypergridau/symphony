@@ -5,12 +5,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   transition.
   """
 
-  @contract "work-package-paused-confirmed-recovery.v1"
-  @signature_domain "hypergrid-work-package-recovery:hgs740-confirmed-root.v1\0"
+  @contract_v1 "work-package-paused-confirmed-recovery.v1"
+  @contract_v2 "work-package-paused-confirmed-recovery.v2"
+  @signature_domain_v1 "hypergrid-work-package-recovery:hgs740-confirmed-root.v1\0"
+  @signature_domain_v2 "hypergrid-work-package-recovery:hgs740-confirmed-root.v2\0"
   @hgs485_fingerprint "903b66d70e23219ee947bdbbdd738b29851302a24985edd4a69abc8a2875d8e6"
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
   @claim_fields ~w(projectionId reservationId workspaceId companyId issueId runnerId managedProjectProfileId repositoryRef scopeKeys generation sessionId processId responsibleDelegationId executionFenceToken runtimeLeaseId nonceHash)
-  @payload_fields ~w(contractVersion pool issueId generation reservationId assignmentSHA256 issuedAt expiresAt nonce observation providerHeld)
+  @payload_fields_v1 ~w(contractVersion pool issueId generation reservationId assignmentSHA256 issuedAt expiresAt nonce observation providerHeld)
+  @payload_fields_v2 ~w(assignmentSnapshotState contractVersion pool issueId generation reservationId assignmentSHA256 issuedAt expiresAt nonce observation providerHeld)
   @observation_fields ~w(expected localGenerationMax fenceSHA256 claimJournalSHA256 responsibilityGraphSHA256 globalPause runnerStopped neverSpawned supervisedWorkerAbsent processCount workspaceAbsent hostIdentity bootId observedAt witnesses witnessLogSHA256 dispatchPhase kubernetes predecessorRetirement serviceUnits witnessUnits turnsAbsent)
   @provider_fields ~w(observedAt sourceIdentity assignmentDigest expected projectionState mutationState reservationState executionCapacityState scopeState credentialLeaseInventory oauthSlotLeaseInventory)
   @credential_inventory_fields ~w(observedAt complete leaseIds readbacks)
@@ -26,12 +29,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
           required(:issue_id) => String.t(),
           required(:generation) => pos_integer(),
           required(:reservation_id) => String.t(),
-          required(:assignment_sha256) => String.t(),
+          required(:assignment_sha256) => String.t() | nil,
           required(:nonce) => String.t(),
           required(:fence_sha256) => String.t(),
           required(:claim_journal_sha256) => String.t(),
           required(:responsibility_graph_sha256) => String.t(),
-          required(:now_ms) => non_neg_integer()
+          required(:now_ms) => non_neg_integer(),
+          optional(:assignment_snapshot_state) => String.t()
         }
 
   @doc "Verifies the detached, domain-separated root signature and every claim-bound precondition."
@@ -82,8 +86,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          {:ok, payload_bytes} <- Base.url_decode64(envelope["payload"], padding: false),
          {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
          true <- byte_size(signature) == 64,
-         true <- verify_signature(payload_bytes, signature, public_key),
-         {:ok, payload} <- decode_canonical_object(payload_bytes) do
+         {:ok, payload} <- decode_canonical_object(payload_bytes),
+         true <- verify_signature(payload_bytes, signature, public_key, payload["contractVersion"]) do
       {:ok, payload}
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}
@@ -112,13 +116,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   @doc false
   @spec signature_message(binary()) :: binary()
-  def signature_message(payload) when is_binary(payload), do: @signature_domain <> payload
+  def signature_message(payload) when is_binary(payload), do: @signature_domain_v1 <> payload
+
+  @doc false
+  @spec signature_message(binary(), String.t()) :: binary() | nil
+  def signature_message(payload, @contract_v1) when is_binary(payload), do: @signature_domain_v1 <> payload
+  def signature_message(payload, @contract_v2) when is_binary(payload), do: @signature_domain_v2 <> payload
+  def signature_message(_payload, _contract), do: nil
 
   @doc false
   @spec validate_payload(map(), bindings()) :: :ok | {:error, :invalid_confirmed_recovery_evidence}
   def validate_payload(payload, bindings) when is_map(payload) and is_map(bindings) do
-    with true <- exact_keys?(payload, @payload_fields),
-         true <- payload["contractVersion"] == @contract,
+    with :ok <- validate_contract(payload),
          :ok <- valid_bindings(payload, bindings),
          {:ok, issued_at_ms} <- timestamp_ms(payload["issuedAt"]),
          {:ok, expires_at_ms} <- timestamp_ms(payload["expiresAt"]),
@@ -144,16 +153,31 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   def validate_payload(_payload, _bindings),
     do: {:error, :invalid_confirmed_recovery_evidence}
 
+  defp validate_contract(%{"contractVersion" => @contract_v1} = payload) do
+    if exact_keys?(payload, @payload_fields_v1), do: :ok, else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp validate_contract(%{"contractVersion" => @contract_v2, "assignmentSnapshotState" => "absent"} = payload) do
+    if exact_keys?(payload, @payload_fields_v2) and is_nil(payload["assignmentSHA256"]),
+      do: :ok,
+      else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp validate_contract(_payload), do: {:error, :invalid_confirmed_recovery_evidence}
+
   defp valid_bindings(payload, bindings) do
-    with true <-
-           Enum.sort(Map.keys(bindings)) ==
-             Enum.sort(~w(assignment_sha256 claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a),
+    expected_binding_keys =
+      if payload["contractVersion"] == @contract_v2,
+        do: ~w(assignment_sha256 assignment_snapshot_state claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a,
+        else: ~w(assignment_sha256 claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a
+
+    with true <- Enum.sort(Map.keys(bindings)) == Enum.sort(expected_binding_keys),
          true <- payload["pool"] in @pools,
          true <- payload["pool"] == bindings.pool,
          true <- payload["issueId"] == bindings.issue_id and uuid?(payload["issueId"]),
          true <- payload["generation"] == 2 and payload["generation"] == bindings.generation,
          true <- payload["reservationId"] == bindings.reservation_id and text?(payload["reservationId"]),
-         true <- digest?(payload["assignmentSHA256"]) and payload["assignmentSHA256"] == bindings.assignment_sha256,
+         :ok <- valid_assignment_binding(payload, bindings),
          true <- uuid?(payload["nonce"]) and payload["nonce"] == bindings.nonce,
          true <- is_integer(bindings.now_ms) and bindings.now_ms >= 0 do
       :ok
@@ -161,6 +185,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
       _ -> {:error, :invalid_confirmed_recovery_evidence}
     end
   end
+
+  defp valid_assignment_binding(%{"contractVersion" => @contract_v1} = payload, bindings) do
+    if digest?(payload["assignmentSHA256"]) and payload["assignmentSHA256"] == bindings.assignment_sha256,
+      do: :ok,
+      else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp valid_assignment_binding(%{"contractVersion" => @contract_v2, "assignmentSnapshotState" => "absent"} = payload, bindings) do
+    if is_nil(payload["assignmentSHA256"]) and is_nil(bindings.assignment_sha256) and
+         bindings.assignment_snapshot_state == "absent",
+       do: :ok,
+       else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp valid_assignment_binding(_payload, _bindings), do: {:error, :invalid_confirmed_recovery_evidence}
 
   defp validate_observation(observation, payload, bindings) do
     with true <- is_map(observation) and exact_keys?(observation, @observation_fields),
@@ -542,8 +581,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   defp trusted_public_key(_key), do: {:error, :untrusted_recovery_key}
 
-  defp verify_signature(payload, signature, key) do
-    :crypto.verify(:eddsa, :none, signature_message(payload), signature, [key, :ed25519])
+  defp verify_signature(payload, signature, key, contract) do
+    case signature_message(payload, contract) do
+      message when is_binary(message) -> :crypto.verify(:eddsa, :none, message, signature, [key, :ed25519])
+      _ -> false
+    end
   rescue
     _ -> false
   end

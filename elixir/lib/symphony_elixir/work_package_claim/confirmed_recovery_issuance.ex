@@ -5,11 +5,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
   durably creates the two immutable artifacts consumed by the recovery transaction.
   """
 
+  alias SymphonyElixir.ManagedAssignmentBundle
+
   alias SymphonyElixir.WorkPackageClaim.{
     ConfirmedRecoveryEvidence,
     ConfirmedRecoveryIssuer,
     ConfirmedRecoveryKubernetes,
-    ConfirmedRecoveryRootHost
+    ConfirmedRecoveryRootHost,
+    Journal
   }
 
   @spec issue(String.t(), String.t(), String.t(), String.t(), String.t()) :: :ok | {:error, term()}
@@ -48,8 +51,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
     with {:ok, bundle} when is_map(bundle) <- Jason.decode(bundle_bytes),
          true <- ConfirmedRecoveryEvidence.canonical_json(bundle) == bundle_bytes,
          :ok <- verify_preimage_hashes(runtime, bundle["observation"], host),
+         :ok <- verify_absent_snapshot_precondition(runtime, bundle, host),
          {:ok, observation} when is_map(observation) <- observe_kubernetes.(bundle["observation"], bundle["assignmentSHA256"]),
          bundle <- Map.put(bundle, "observation", observation),
+         :ok <- verify_absent_snapshot_precondition(runtime, bundle, host),
          now_ms <- host.now_ms.(),
          bindings <- ConfirmedRecoveryIssuer.bindings(bundle, context.pool, context.issue_id, context.nonce, now_ms),
          {:ok, payload, _payload_bytes, envelope_bytes} <-
@@ -76,14 +81,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
     @spec issue_bundle_with_test_context(
             SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext.t(),
             binary(),
-            (map(), binary() -> {:ok, map()} | {:error, term()})
+            (map(), binary() | nil -> {:ok, map()} | {:error, term()})
           ) :: :ok | {:error, term()}
     def issue_bundle_with_test_context(context, bundle_bytes, observe_kubernetes)
         when is_function(observe_kubernetes, 2),
         do: issue_bundle_bytes(context, bundle_bytes, observe_kubernetes)
 
     @doc false
-    @spec fresh_kubernetes_with_test_observer(map(), binary(), (map(), map() -> term())) ::
+    @spec fresh_kubernetes_with_test_observer(map(), binary() | nil, (map(), map() -> term())) ::
             {:ok, map()} | {:error, :kubernetes_observation_unavailable}
     def fresh_kubernetes_with_test_observer(observation, assignment_sha, observe)
         when is_function(observe, 2),
@@ -121,23 +126,132 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
 
   defp verify_preimage_hashes(_runtime, _observation, _host), do: {:error, :local_preimage_changed}
 
+  defp verify_absent_snapshot_precondition(runtime, %{"assignmentSnapshotState" => "absent"} = bundle, host) do
+    observation = bundle["observation"]
+    expected = if is_map(observation), do: observation["expected"], else: nil
+
+    with true <- is_nil(bundle["assignmentSHA256"]),
+         true <- is_map(observation) and is_map(expected),
+         true <- observation["dispatchPhase"] == "confirmed" and observation["localGenerationMax"] == 2,
+         true <- is_binary(expected["issueId"]),
+         key <- Journal.reservation_key(expected["issueId"], expected["managedProjectProfileId"], expected["repositoryRef"], 2),
+         {:ok, journal_bytes} <- host.read.(runtime.journal_path),
+         true <- digest(journal_bytes) == observation["claimJournalSHA256"],
+         :absent <- Journal.assignment_snapshot_state(journal_bytes, key),
+         {:ok, journal} <- Journal.decode_bytes(journal_bytes),
+         reservation when is_map(reservation) <- journal.reservations[key],
+         true <- reservation_matches_expected?(reservation, expected),
+         %{dispatch: %{phase: "confirmed", allocation_id: nil}} <- reservation,
+         true <- map_size(Map.get(reservation, :failed_worker_turns, %{})) == 0,
+         true <- map_size(Map.get(reservation, :cleanup_receipts, %{})) == 0 do
+      :ok
+    else
+      _ -> {:error, :local_preimage_changed}
+    end
+  rescue
+    _ -> {:error, :local_preimage_changed}
+  end
+
+  defp verify_absent_snapshot_precondition(runtime, %{"assignmentSHA256" => assignment_sha} = bundle, host)
+       when is_binary(assignment_sha) do
+    observation = bundle["observation"]
+    expected = if is_map(observation), do: observation["expected"], else: nil
+
+    with true <- is_map(observation) and is_map(expected),
+         true <- is_binary(expected["issueId"]),
+         key <- Journal.reservation_key(expected["issueId"], expected["managedProjectProfileId"], expected["repositoryRef"], 2),
+         {:ok, journal_bytes} <- host.read.(runtime.journal_path),
+         true <- digest(journal_bytes) == observation["claimJournalSHA256"],
+         :present <- Journal.assignment_snapshot_state(journal_bytes, key),
+         {:ok, journal} <- Journal.decode_bytes(journal_bytes),
+         reservation when is_map(reservation) <- journal.reservations[key],
+         true <- reservation_matches_expected?(reservation, expected),
+         snapshot when is_binary(snapshot) <- Map.get(reservation, :assignment_snapshot),
+         {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(snapshot),
+         true <- assignment_matches_reservation?(assignment, reservation),
+         true <- assignment.sha256 == assignment_sha do
+      :ok
+    else
+      _ -> {:error, :local_preimage_changed}
+    end
+  rescue
+    _ -> {:error, :local_preimage_changed}
+  end
+
+  defp verify_absent_snapshot_precondition(_runtime, _bundle, _host),
+    do: {:error, :local_preimage_changed}
+
+  defp reservation_matches_expected?(reservation, expected) do
+    expected_claim = %{
+      "projectionId" => reservation.projection_id,
+      "reservationId" => reservation.reservation_id,
+      "workspaceId" => Map.get(reservation, :workspace_id),
+      "companyId" => Map.get(reservation, :company_id),
+      "issueId" => reservation.issue_id,
+      "runnerId" => reservation.runner_id,
+      "managedProjectProfileId" => reservation.managed_project_profile_id,
+      "repositoryRef" => reservation.repository_ref,
+      "scopeKeys" => Enum.sort(reservation.scope_keys),
+      "generation" => reservation.generation,
+      "sessionId" => reservation.session_id,
+      "processId" => reservation.process_id,
+      "responsibleDelegationId" => reservation.responsible_delegation_id,
+      "executionFenceToken" => reservation.execution_fence_token,
+      "runtimeLeaseId" => reservation.runtime_lease_id,
+      "nonceHash" => digest(reservation.reservation_nonce)
+    }
+
+    expected_claim == expected
+  rescue
+    _ -> false
+  end
+
+  defp assignment_matches_reservation?(assignment, reservation) do
+    lease = assignment.lease
+
+    lease.issue_id == reservation.issue_id and
+      lease.repository == reservation.repository_ref and
+      lease.generation == reservation.generation and
+      lease.session_id == reservation.session_id and
+      lease.process_id == reservation.process_id
+  rescue
+    _ -> false
+  end
+
   defp digest(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp fresh_kubernetes(observation, assignment_sha) when is_map(observation) and is_binary(assignment_sha) do
     fresh_kubernetes(observation, assignment_sha, &ConfirmedRecoveryKubernetes.observe/2)
   end
 
+  defp fresh_kubernetes(observation, nil) when is_map(observation) do
+    fresh_kubernetes(observation, nil, &ConfirmedRecoveryKubernetes.observe_without_assignment_snapshot/2)
+  end
+
   defp fresh_kubernetes(_observation, _assignment_sha), do: {:error, :kubernetes_observation_unavailable}
 
   defp fresh_kubernetes(observation, assignment_sha, observe)
        when is_map(observation) and is_binary(assignment_sha) and is_function(observe, 2) do
+    fresh_kubernetes_with_observer(observation, assignment_sha, observe, :present)
+  end
+
+  defp fresh_kubernetes(observation, nil, observe) when is_map(observation) and is_function(observe, 2) do
+    fresh_kubernetes_with_observer(observation, nil, observe, :absent)
+  end
+
+  defp fresh_kubernetes(_observation, _assignment_sha, _observe),
+    do: {:error, :kubernetes_observation_unavailable}
+
+  defp fresh_kubernetes_with_observer(observation, assignment_sha, observe, snapshot_state) do
     kube = observation["kubernetes"]
     claim = observation["expected"]
 
     with %{} = kube <- kube,
          %{} = claim <- claim,
          %{} = cluster <- kube["cluster"],
-         {:ok, snapshot} <- observe.(Map.put(claim, "assignmentSHA256", assignment_sha), cluster),
+         kube_claim <- Map.put(claim, "assignmentSHA256", assignment_sha),
+         kube_claim <- if(snapshot_state == :absent, do: Map.put(kube_claim, "assignmentSnapshotState", "absent"), else: kube_claim),
+         {:ok, snapshot} <- observe.(kube_claim, cluster),
          fresh_kube <- kubernetes_contract(kube, claim, snapshot, assignment_sha),
          observation <- Map.put(observation, "kubernetes", fresh_kube) do
       {:ok, observation}
@@ -147,9 +261,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
   rescue
     _ -> {:error, :kubernetes_observation_unavailable}
   end
-
-  defp fresh_kubernetes(_observation, _assignment_sha, _observe),
-    do: {:error, :kubernetes_observation_unavailable}
 
   defp kubernetes_contract(original, claim, snapshot, assignment_sha) do
     %{

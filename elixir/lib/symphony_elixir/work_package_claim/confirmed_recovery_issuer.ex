@@ -9,8 +9,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
 
-  @contract "work-package-paused-confirmed-recovery.v1"
-  @bundle_fields ~w(assignmentSHA256 observation providerHeld reservationId)
+  @contract_v1 "work-package-paused-confirmed-recovery.v1"
+  @contract_v2 "work-package-paused-confirmed-recovery.v2"
+  @bundle_fields_v1 ~w(assignmentSHA256 observation providerHeld reservationId)
+  @bundle_fields_v2 ~w(assignmentSHA256 assignmentSnapshotState observation providerHeld reservationId)
 
   @type result :: {:ok, map(), binary(), binary()} | {:error, :invalid_confirmed_recovery_evidence}
 
@@ -31,7 +33,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
          payload <- build_payload(bundle, pool, issue_id, nonce, bindings.now_ms),
          :ok <- Evidence.validate_payload(payload, bindings),
          payload_bytes <- Evidence.canonical_json(payload),
-         {:ok, signature} <- sign_bytes(sign, Evidence.signature_message(payload_bytes)),
+         message when is_binary(message) <- Evidence.signature_message(payload_bytes, payload["contractVersion"]),
+         {:ok, signature} <- sign_bytes(sign, message),
          true <- byte_size(signature) == 64,
          envelope_bytes <-
            Evidence.canonical_json(%{
@@ -57,7 +60,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
   def bindings(bundle, pool, issue_id, nonce, now_ms) when is_map(bundle) do
     observation = bundle["observation"]
 
-    %{
+    common = %{
       pool: pool,
       issue_id: issue_id,
       generation: 2,
@@ -69,6 +72,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
       responsibility_graph_sha256: observation["responsibilityGraphSHA256"],
       now_ms: now_ms
     }
+
+    if bundle["assignmentSnapshotState"] == "absent",
+      do: Map.put(common, :assignment_snapshot_state, "absent"),
+      else: common
   end
 
   def bindings(_bundle, _pool, _issue_id, _nonce, now_ms), do: %{now_ms: now_ms}
@@ -79,8 +86,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
     issued_at = DateTime.from_unix!(now_ms, :millisecond) |> DateTime.to_iso8601()
     expires_at = DateTime.from_unix!(now_ms + 30_000, :millisecond) |> DateTime.to_iso8601()
 
-    %{
-      "contractVersion" => @contract,
+    payload = %{
+      "contractVersion" => if(bundle["assignmentSnapshotState"] == "absent", do: @contract_v2, else: @contract_v1),
       "pool" => pool,
       "issueId" => issue_id,
       "generation" => 2,
@@ -92,6 +99,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
       "observation" => bundle["observation"],
       "providerHeld" => bundle["providerHeld"]
     }
+
+    if bundle["assignmentSnapshotState"] == "absent",
+      do: Map.put(payload, "assignmentSnapshotState", "absent"),
+      else: payload
   end
 
   def build_payload(_bundle, _pool, _issue_id, _nonce, _now_ms), do: %{}
@@ -99,12 +110,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
   defp decode_bundle(bytes) do
     with {:ok, bundle} when is_map(bundle) <- Jason.decode(bytes),
          true <- Evidence.canonical_json(bundle) == bytes,
-         true <- Enum.sort(Map.keys(bundle)) == Enum.sort(@bundle_fields) do
+         true <- valid_bundle_shape?(bundle) do
       {:ok, bundle}
     else
       _ -> {:error, :invalid_bundle}
     end
   end
+
+  defp valid_bundle_shape?(%{"assignmentSnapshotState" => "absent", "assignmentSHA256" => nil} = bundle),
+    do: Enum.sort(Map.keys(bundle)) == Enum.sort(@bundle_fields_v2)
+
+  defp valid_bundle_shape?(%{"assignmentSnapshotState" => _state}), do: false
+
+  defp valid_bundle_shape?(bundle),
+    do: Enum.sort(Map.keys(bundle)) == Enum.sort(@bundle_fields_v1) and is_binary(bundle["assignmentSHA256"])
 
   defp sign_bytes(sign, message) do
     case sign.(message) do
