@@ -14,6 +14,14 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
   end
 
   @tag skip: :os.type() != {:unix, :linux}
+  test "launcher refuses relative paths and invalid callbacks before entering the critical section" do
+    forbidden = fn -> flunk("untrusted launcher entered") end
+    assert {:error, :pool_launcher_lock_file_untrusted} = ManagedLauncherLock.with_exclusive_lock("relative.lock", forbidden)
+    assert {:error, :pool_launcher_lock_unavailable} = ManagedLauncherLock.with_exclusive_lock(nil, forbidden)
+    assert {:error, :pool_launcher_lock_unavailable} = ManagedLauncherLock.with_exclusive_lock("/tmp/unused", nil)
+  end
+
+  @tag skip: :os.type() != {:unix, :linux}
   test "derives the launcher lock only from the canonical pool journal path" do
     assert {:ok, "/srv/dahlia-runner-state/run/pools/hypergrid-gitops.lock"} =
              ManagedLauncherLock.pool_lock_path(
@@ -98,6 +106,11 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
 
                  :ok
                end)
+
+      assert :ok = ManagedLauncherLock.with_exclusive_lock(retained, fn -> :ok end)
+
+      assert {:error, :pool_launcher_lock_unavailable} =
+               ManagedLauncherLock.with_exclusive_lock(retained, fn -> raise "synthetic callback failure" end)
 
       assert :ok = ManagedLauncherLock.with_exclusive_lock(retained, fn -> :ok end)
     end

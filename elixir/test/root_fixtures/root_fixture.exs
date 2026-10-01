@@ -78,6 +78,7 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
       File.mkdir_p!(epoch)
       for path <- [Path.dirname(directory), directory, Path.dirname(epoch), epoch], do: File.chmod!(path, 0o700)
       Process.put(:epoch_writes, 0)
+      candidate = "{\"reconciliation\":{\"epoch\":\"epoch-1\"}}"
 
       write = fn path, bytes ->
         count = Process.get(:epoch_writes)
@@ -91,16 +92,16 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
       end
 
       sync = fn _directory -> :ok end
-      first = EpochHost.persist(issue_id, "candidate", "envelope", write, sync)
+      first = EpochHost.persist(issue_id, candidate, "envelope", write, sync)
       assert first == if(prefix == 3, do: :ok, else: {:error, :issuer_output_conflict})
-      assert :ok = EpochHost.persist(issue_id, "candidate", "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
-      assert :ok = EpochHost.persist(issue_id, "candidate", "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+      assert :ok = EpochHost.persist(issue_id, candidate, "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+      assert :ok = EpochHost.persist(issue_id, candidate, "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
       assert File.read!(Path.join(epoch, "issued-envelope.json")) == "envelope"
-      assert File.read!(Path.join(directory, "candidate.json")) == "candidate"
+      assert File.read!(Path.join(directory, "candidate.json")) == candidate
       assert File.read!(Path.join(directory, "confirmed-root-envelope.json")) == "envelope"
 
       assert {:error, :issuer_output_conflict} =
-               EpochHost.persist(issue_id, "candidate", "different-envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+               EpochHost.persist(issue_id, candidate, "different-envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
 
       assert File.read!(Path.join(epoch, "issued-envelope.json")) == "envelope"
     end
@@ -120,6 +121,26 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(link, 10)
     File.chmod!(path, 0o600)
     assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(path, 1)
+  end
+
+  test "an exclusive successor reservation prevents epoch downgrade and requires unsigned predecessor custody" do
+    issue_id = "77777777-7777-4777-8777-777777777777"
+    directory = RootHost.marker_directory(issue_id)
+    first = Path.join(directory, "reconciliation/epoch-1")
+    second = Path.join(directory, "reconciliation/epoch-2")
+    File.mkdir_p!(first)
+    for path <- [Path.dirname(directory), directory, Path.dirname(first), first], do: File.chmod!(path, 0o700)
+    names = ~w(started.json reviewed-preflight.json provider-held-readback.json manifest.json issuer-input.json)
+    for name <- names, do: write_root_private(Path.join(first, name), "{}")
+    assert :ok = EpochHost.require_directory(issue_id)
+    File.mkdir!(second)
+    File.chmod!(second, 0o700)
+    assert {:error, :reconciliation_epoch_downgrade} = EpochHost.require_directory(issue_id)
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.require_directory(issue_id, "epoch-2")
+    for name <- names, do: write_root_private(Path.join(second, name), "{}")
+    assert :ok = EpochHost.require_directory(issue_id, "epoch-2")
+    write_root_private(Path.join(first, "issued-envelope.json"), "conflicting signature")
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.require_directory(issue_id, "epoch-2")
   end
 
   test "production WAL replays every on-disk crash prefix and preserves exact bytes" do

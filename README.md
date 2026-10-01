@@ -184,7 +184,7 @@ service after confirmed deletion. The result reference is derived from the signe
 assignment; publication requires the matching retained journal and root
 acknowledgement. See [the runtime contract](elixir/README.md).
 
-Paused HGS-740 recovery supports one append-only reconciliation observation
+Paused HGS-740 recovery supports a fixed append-only reconciliation observation
 epoch for the exact retained generation-2 failed issuance. Historical inputs
 remain pinned and unchanged; fresh evidence uses the existing signed recovery
 and provider release path. See [the runtime contract](elixir/README.md).
@@ -193,3 +193,6 @@ as Dahlia's reconciliation exporter.
 Root recovery acquires the existing UID 1001 launcher lock while retaining
 root signing authority. Preflight checks this lock before observations are
 collected, and recovery verifies the held inode throughout the operation.
+The observed unsigned epoch-1 lock failure permits one explicit epoch-2
+successor bound to its unchanged five files and retained failure seal. Reserving
+that successor prevents fallback to epoch 1.

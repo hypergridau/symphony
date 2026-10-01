@@ -230,9 +230,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @doc false
   @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
   def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
-    if path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id)), "issuer-input.json") do
+    epoch =
+      Enum.find(["epoch-1", "epoch-2"], fn name ->
+        path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id), name), "issuer-input.json")
+      end)
+
+    if epoch do
       with :ok <- require_issuer_input_directory(issue_id),
-           :ok <- EpochHost.require_directory(issue_id),
+           :ok <- EpochHost.require_directory(issue_id, epoch),
            {:ok, bytes} <- EpochHost.read_private(path, 1_048_576),
            {:ok, bundle} when is_map(bundle) <- Jason.decode(bytes),
            true <- ConfirmedRecoveryEvidence.canonical_json(bundle) == bytes,

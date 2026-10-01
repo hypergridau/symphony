@@ -2,6 +2,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
   use ExUnit.Case, async: true
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedEpoch
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance, as: Issuance
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Epoch
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
@@ -9,6 +10,84 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
 
   @directory "/synthetic/generation-2"
   @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
+
+  test "successor custody refuses signed predecessors and any existing or unreadable successor on downgrade" do
+    inputs = ~w(started.json reviewed-preflight.json provider-held-readback.json manifest.json issuer-input.json)
+
+    operations = %{
+      trusted: fn _ -> :ok end,
+      lstat: fn _ -> {:ok, %File.Stat{mode: 0o700}} end,
+      ls: fn _ -> {:ok, inputs} end
+    }
+
+    assert :ok = EpochHost.successor_custody_for_test("epoch-2", operations)
+    signed = %{operations | ls: fn _ -> {:ok, ["issued-envelope.json" | inputs]} end}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-2", signed)
+    inaccessible = %{operations | trusted: fn _ -> {:error, :untrusted} end}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-2", inaccessible)
+    assert {:error, :reconciliation_epoch_downgrade} = EpochHost.successor_custody_for_test("epoch-1", operations)
+    absent = %{operations | lstat: fn _ -> {:error, :enoent} end}
+    assert :ok = EpochHost.successor_custody_for_test("epoch-1", absent)
+    uncertain = %{operations | lstat: fn _ -> {:error, :eacces} end}
+    assert {:error, :reconciliation_epoch_downgrade} = EpochHost.successor_custody_for_test("epoch-1", uncertain)
+    write = fn _, _ -> flunk("invalid candidate published") end
+    sync = fn _ -> flunk("invalid candidate synced") end
+    assert {:error, :issuer_output_conflict} = EpochHost.persist(@issue, "invalid", "unused", write, sync)
+    assert {:error, :issuer_output_conflict} = EpochHost.persist(@issue, "{}", "unused", write, sync)
+  end
+
+  test "successor binding permits only the pinned unsigned predecessor and failure seal" do
+    malformed = %{"reconciliation" => %{"epoch" => "epoch-3"}}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.verify(malformed)
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.verify_envelope(malformed, "unused")
+    {observation, files, hashes} = fixture()
+    metadata = observation["reconciliation"]
+
+    successor =
+      metadata
+      |> Map.put("epoch", "epoch-2")
+      |> Map.put("contractVersion", "hgs740-reconciliation-observation.v2")
+      |> Map.put("predecessorEpoch", FailedEpoch.predecessor_binding())
+
+    observation = Map.put(observation, "reconciliation", successor)
+    assert FailedEpoch.valid?(successor)
+    refute FailedEpoch.valid?(Map.put(successor, "predecessorEpoch", %{}))
+
+    assert {:error, :invalid_reconciliation_epoch} =
+             Epoch.verify_test_epoch(observation, @directory, fn path, _ -> Map.fetch(files, path) end, hashes)
+
+    for change <- [%{"epoch" => "epoch-3"}, %{"contractVersion" => "hgs740-reconciliation-observation.v1"}, %{"predecessorEpoch" => %{}}, %{"replacement" => true}] do
+      changed = Map.put(observation, "reconciliation", Map.merge(successor, change))
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(changed)
+    end
+
+    pinned = FailedEpoch.predecessor_binding()["evidenceSHA256"]
+    synthetic = Map.new(pinned, fn {name, _hash} -> {name, "synthetic " <> name} end)
+    pin_hashes = Map.new(synthetic, fn {name, bytes} -> {name, digest(bytes)} end)
+    seal = "synthetic failure seal"
+    binding = %{"epoch" => "epoch-1", "evidenceSHA256" => pin_hashes, "failureSealSHA256" => digest(seal)}
+    metadata = %{"predecessorEpoch" => binding}
+    read = fn path, _maximum -> {:ok, Map.get(synthetic, Path.basename(path), seal)} end
+    assert :ok = FailedEpoch.verify_for_test(metadata, @directory, read, pin_hashes, digest(seal))
+    assert {:error, _} = FailedEpoch.verify_for_test(%{}, @directory, read, pin_hashes, digest(seal))
+    assert {:error, _} = FailedEpoch.verify(metadata, @directory, read)
+
+    for name <- Map.keys(synthetic) do
+      changed = fn path, maximum ->
+        if Path.basename(path) == name, do: {:ok, "changed"}, else: read.(path, maximum)
+      end
+
+      missing = fn path, maximum ->
+        if Path.basename(path) == name, do: {:error, :enoent}, else: read.(path, maximum)
+      end
+
+      assert {:error, _} = FailedEpoch.verify_for_test(metadata, @directory, changed, pin_hashes, digest(seal))
+      assert {:error, _} = FailedEpoch.verify_for_test(metadata, @directory, missing, pin_hashes, digest(seal))
+    end
+
+    changed_seal = fn _, _ -> {:ok, "changed seal"} end
+    assert {:error, _} = FailedEpoch.verify_for_test(metadata, @directory, changed_seal, pin_hashes, digest(seal))
+  end
 
   test "issuer output barriers preserve collector denial before transaction conflict" do
     trusted = fn _ -> :ok end
@@ -188,6 +267,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
 
   test "publication stops at every failed durable operation and preserves the write order" do
     issue = "00000000-0000-4000-8000-000000000740"
+    candidate = "{\"reconciliation\":{\"epoch\":\"epoch-1\"}}"
 
     for fail_at <- 1..5 do
       counter = :counters.new(1, [])
@@ -198,7 +278,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
       end
 
       write = fn path, _bytes -> operation.(path) end
-      assert {:error, :issuer_output_conflict} = EpochHost.persist(issue, "candidate", "envelope", write, operation)
+      assert {:error, :issuer_output_conflict} = EpochHost.persist(issue, candidate, "envelope", write, operation)
       assert :counters.get(counter, 1) == fail_at
     end
 
@@ -214,10 +294,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
       :ok
     end
 
-    assert :ok = EpochHost.persist(issue, "candidate", "envelope", write, sync)
+    assert :ok = EpochHost.persist(issue, candidate, "envelope", write, sync)
     assert_received {:write, "issued-envelope.json", "envelope"}
     assert_received {:sync, "epoch-1"}
-    assert_received {:write, "candidate.json", "candidate"}
+    assert_received {:write, "candidate.json", ^candidate}
     assert_received {:write, "confirmed-root-envelope.json", "envelope"}
     assert_received {:sync, "generation-2"}
   end
@@ -226,7 +306,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
     issue = "00000000-0000-4000-8000-000000000740"
     directory = Host.marker_directory(issue)
     assert :not_issued = EpochHost.resume(%{issue_id: issue}, "/unrelated/input")
-    assert :not_issued = EpochHost.resume(%{issue_id: issue}, Path.join(Epoch.epoch_directory(directory), "issuer-input.json"))
+
+    assert {:error, :invalid_reconciliation_epoch} =
+             EpochHost.resume(%{issue_id: issue}, Path.join(Epoch.epoch_directory(directory), "issuer-input.json"))
+
     assert {:error, :invalid_reconciliation_epoch} = EpochHost.require_directory(issue)
     assert {:error, _} = EpochHost.read_private("/missing-reconciliation-test/input", 10)
     assert {:error, _} = EpochHost.read_private(System.tmp_dir!(), 10)

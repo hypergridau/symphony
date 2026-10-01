@@ -1548,6 +1548,12 @@ matching Dahlia's exporter after the two reconciliation files were added. A
 
 The exact retained HGS-736 issue `f77e349e-21d9-4bdf-bad3-ce08b302e7e8`,
 generation 2, may use the fixed `generation-2/reconciliation/epoch-1` input.
+Its observed unsigned launcher-lock failure is pinned separately by
+`ConfirmedRecoveryFailedEpoch`; the explicit fixed `epoch-2` successor uses
+`hgs740-reconciliation-observation.v2` metadata binding all five failed epoch
+files and the root-private failure seal. Those bytes and timestamps stay
+unchanged. There is no automatic epoch allocation or third epoch. Once epoch 2
+is reserved, issuer, WAL and provider verification reject epoch-1 fallback.
 `ConfirmedRecoveryReconciliation` verifies the pinned three historical hashes,
 unchanged claim/state/fence/graph/predecessor/witness bindings and immutable
 fresh input manifest. The existing v3 signature covers its explicit nested

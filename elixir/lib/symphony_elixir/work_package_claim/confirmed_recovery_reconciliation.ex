@@ -2,6 +2,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   @moduledoc "Fixed append-only epoch for the retained HGS-740 failed issuance."
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedEpoch
 
   @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @historical %{
@@ -15,16 +16,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   @spec historical_hashes() :: map()
   def historical_hashes, do: @historical
 
-  @spec epoch_directory(String.t()) :: String.t()
-  def epoch_directory(directory), do: Path.join(directory, "reconciliation/epoch-1")
+  @spec epoch_directory(String.t(), String.t()) :: String.t()
+  def epoch_directory(directory, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2"],
+    do: Path.join([directory, "reconciliation", epoch])
 
   @spec validate(map()) :: :ok | {:error, :invalid_reconciliation_epoch}
   def validate(observation), do: validate_with_history(observation, @historical)
 
   defp validate_with_history(%{"reconciliation" => metadata} = observation, historical) when is_map(metadata) do
-    with true <- Enum.sort(Map.keys(metadata)) == Enum.sort(@fields),
-         true <- metadata["contractVersion"] == "hgs740-reconciliation-observation.v1",
-         true <- metadata["epoch"] == "epoch-1" and metadata["historicalSHA256"] == historical,
+    with true <- valid_metadata?(metadata),
+         true <- metadata["historicalSHA256"] == historical,
          true <- metadata["observedAt"] == observation["observedAt"],
          true <- observation["expected"]["issueId"] == @issue,
          true <- observation["expected"]["generation"] == 2,
@@ -41,15 +42,27 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
 
   defp validate_with_history(_observation, _historical), do: {:error, :invalid_reconciliation_epoch}
 
+  defp valid_metadata?(%{"epoch" => "epoch-1"} = metadata),
+    do:
+      Enum.sort(Map.keys(metadata)) == Enum.sort(@fields) and
+        metadata["contractVersion"] == "hgs740-reconciliation-observation.v1"
+
+  defp valid_metadata?(%{"epoch" => "epoch-2"} = metadata),
+    do:
+      Enum.sort(Map.keys(metadata)) == Enum.sort(["predecessorEpoch" | @fields]) and
+        metadata["contractVersion"] == "hgs740-reconciliation-observation.v2" and FailedEpoch.valid?(metadata)
+
+  defp valid_metadata?(_metadata), do: false
+
   @doc "Reads only fixed paths through the root adapter; historical timestamps are never refreshed."
   @spec verify(map(), String.t(), (String.t(), pos_integer() -> {:ok, binary()} | {:error, term()})) ::
           :ok | {:error, :invalid_reconciliation_epoch}
   def verify(observation, directory, read), do: verify_with_history(observation, directory, read, @historical)
 
   defp verify_with_history(observation, directory, read, historical_hashes) when is_map(observation) and is_function(read, 2) do
-    epoch = epoch_directory(directory)
-
     with :ok <- validate_with_history(observation, historical_hashes),
+         epoch <- epoch_directory(directory, observation["reconciliation"]["epoch"]),
+         :ok <- verify_predecessor(observation["reconciliation"], directory, read),
          {:ok, history} <- read_files(directory, historical_hashes, read),
          {:ok, historical} <- decode(history["issuer-input.json"]),
          true <- stable?(historical["observation"], observation),
@@ -75,6 +88,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   end
 
   defp verify_with_history(_observation, _directory, _read, _historical), do: {:error, :invalid_reconciliation_epoch}
+
+  defp verify_predecessor(%{"epoch" => "epoch-2"} = metadata, directory, read),
+    do: FailedEpoch.verify(metadata, directory, read)
+
+  defp verify_predecessor(_metadata, _directory, _read), do: :ok
 
   if Mix.env() == :test do
     @doc false
