@@ -7,6 +7,7 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.ManagedExecutor.AbortResultPublisher
 
   alias SymphonyElixir.RKE2Job.{
     AbortPrepareJournal,
@@ -369,13 +370,12 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
 
   defp publish_root_abort_inputs(claim, record, allocation, assignment, context) do
     publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
-    result_reference = Map.get(context, :root_abort_result_reference)
     uid = get_in(record.observation, ["job", "uid"])
 
     with {:ok, _confirmed_delete} <-
            AbortPrepareJournal.load_confirmed_delete(context.journal_root, claim, record, uid),
          {:ok, claim_sha256} <- AbortPrepareJournal.identity_key(claim),
-         true <- is_binary(result_reference),
+         {:ok, result_reference} <- canonical_result_reference(context, assignment),
          request = %{
            "schemaVersion" => 1,
            "operation" => "publish_pre_execution_abort_inputs",
@@ -398,6 +398,16 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     _ -> {:held, :root_abort_input_publication_unavailable}
   catch
     _kind, _reason -> {:held, :root_abort_input_publication_unavailable}
+  end
+
+  defp canonical_result_reference(context, assignment) do
+    with {:ok, reference} <- AbortResultPublisher.reference_for_assignment(assignment) do
+      case Map.fetch(context, :root_abort_result_reference) do
+        :error -> {:ok, reference}
+        {:ok, ^reference} -> {:ok, reference}
+        _ -> {:held, :root_abort_result_reference_mismatch}
+      end
+    end
   end
 
   defp validate_root_receipt(record, context, true, receipt) do

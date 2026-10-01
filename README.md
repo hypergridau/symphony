@@ -178,3 +178,8 @@ help with the setup:
 ## License
 
 This project is licensed under the [Apache License 2.0](LICENSE).
+
+Pre-execution abort input publication sends exact selectors to the fixed root
+service after confirmed deletion. The result reference is derived from the signed
+assignment; publication requires the matching retained journal and root
+acknowledgement. See [the runtime contract](elixir/README.md).

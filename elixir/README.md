@@ -489,6 +489,10 @@ invoking Dahlia's root-only publisher. No checkpoint bytes, claim object, proof
 context, or filesystem path crosses this socket. The missing service, an
 uncertain response, or an acknowledgement for another claim leaves abort
 cleanup held; this client contract alone does not qualify publication.
+The result publisher derives the canonical reference from the signed assignment
+digest. Selecting that reference does not prove a result was recorded: the root
+service must verify the retained journal and matching bytes. Any supplied
+`root_abort_result_reference` must equal the canonical reference or cleanup holds.
 
 The host Kubernetes context accepts the controller's exact `:allocation` and
 `:abort_unstarted` idempotency keys for allocation and both abort phases. An

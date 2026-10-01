@@ -32,6 +32,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ManagedAssignmentBundle
+  alias SymphonyElixir.ManagedExecutor.AbortResultPublisher
   alias SymphonyElixir.RKE2Job.{AbortPrepareCaller, AbortPrepareJournal, ManagedExecutorAdapter}
   alias SymphonyElixir.RKE2JobFakeClient
   alias SymphonyElixir.WorkPackageClaim.HostWitness
@@ -992,6 +993,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     on_exit(fn -> Process.delete(:abort_root_input_publish_fun) end)
 
     assignment = assignment()
+    {:ok, expected_result_reference} = AbortResultPublisher.reference_for_assignment(assignment)
     adapter = adapter_context(context, assignment)
 
     assert {:ok, allocation} =
@@ -1025,7 +1027,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       assert request["operation"] == "publish_pre_execution_abort_inputs"
       assert request["assignmentDigest"] == assignment.sha256
       assert request["allocationId"] == allocation.id
-      assert request["resultReference"] == "managed-abort-result:v1:one"
+      assert request["resultReference"] == expected_result_reference
       refute Map.has_key?(request, "checkpoints")
       refute Map.has_key?(request, "claim")
       refute Map.has_key?(request, "proofContext")
@@ -1035,6 +1037,13 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     caller = caller_context(context, adapter, witness_input, post_fun)
     assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
     assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+
+    changed = Map.put(caller, :root_abort_result_reference, "managed-abort-result:v1:other")
+
+    assert {:held, :root_abort_result_reference_mismatch} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
+
     assert length(Agent.get(context.client, & &1.deletes)) == 1
   end
 
@@ -1258,8 +1267,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       journal_root: context.root,
       workspace_root: Path.join(System.tmp_dir!(), "symphony-worker-workspaces"),
       post_fun: post_fun,
-      root_abort_input_publisher: SymphonyElixir.AbortPrepareTestRootInputPublisher,
-      root_abort_result_reference: "managed-abort-result:v1:one"
+      root_abort_input_publisher: SymphonyElixir.AbortPrepareTestRootInputPublisher
     }
   end
 
