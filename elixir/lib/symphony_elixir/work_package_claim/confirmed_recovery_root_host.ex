@@ -547,6 +547,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     def parse_systemd_properties_for_test(output), do: parse_systemd_properties(output)
 
     @doc false
+    @spec unit_properties_quiescent_for_test(binary(), String.t()) :: boolean()
+    def unit_properties_quiescent_for_test(output, unit), do: unit_properties_quiescent?(output, unit)
+
+    @doc false
     @spec trusted_state_ancestors_for_test(String.t(), non_neg_integer()) :: boolean()
     def trusted_state_ancestors_for_test(path, owner), do: trusted_state_ancestors?(path, owner)
 
@@ -681,10 +685,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     with {enabled, 1} <- system_cmd(["is-enabled", unit]),
          true <- String.trim(enabled) == "masked",
          {properties, 0} <- system_cmd(["show", "--property=ActiveState,ControlGroup,MainPID", unit]),
-         {:ok, values} <- parse_systemd_properties(properties),
-         true <- values["ActiveState"] in ["inactive", "failed"],
-         true <- values["ControlGroup"] == "",
-         true <- values["MainPID"] in ["0", nil] do
+         true <- unit_properties_quiescent?(properties, unit) do
       true
     else
       _ -> false
@@ -693,7 +694,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     _ -> false
   end
 
-  defp parse_systemd_properties(output) do
+  defp unit_properties_quiescent?(output, unit) do
+    required = if String.ends_with?(unit, ".socket"), do: ~w(ActiveState ControlGroup), else: @systemd_properties
+
+    with {:ok, values} <- parse_systemd_properties(output, required),
+         true <- values["ActiveState"] in ["inactive", "failed"],
+         true <- values["ControlGroup"] == "",
+         true <- values["MainPID"] in ["0", nil] do
+      true
+    else
+      _ -> false
+    end
+  end
+
+  defp parse_systemd_properties(output, required \\ @systemd_properties) do
     Enum.reduce_while(String.split(output, "\n", trim: true), {:ok, %{}}, fn line, {:ok, values} ->
       case String.split(line, "=", parts: 2) do
         [key, value] when key in @systemd_properties and not is_map_key(values, key) -> {:cont, {:ok, Map.put(values, key, value)}}
@@ -701,8 +715,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       end
     end)
     |> case do
-      {:ok, values} when map_size(values) == length(@systemd_properties) -> {:ok, values}
-      _ -> {:error, :invalid_systemd_properties}
+      {:ok, values} ->
+        if Enum.all?(required, &Map.has_key?(values, &1)), do: {:ok, values}, else: {:error, :invalid_systemd_properties}
+
+      _ ->
+        {:error, :invalid_systemd_properties}
     end
   end
 

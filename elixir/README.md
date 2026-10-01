@@ -416,6 +416,11 @@ f77e349e-21d9-4bdf-bad3-ce08b302e7e8 <pool-key>`. Startup uses
 normal runtime startup. These entry points require the fixed six-pool workflow mapping,
 paused global gate, and root execution; they emit sanitized failures.
 
+The HGS-740 stopped/masked quiescence guard reads native systemd unit properties.
+Socket units may omit `MainPID`; they still require an inactive/failed state and an
+empty cgroup. Service units, including the user manager, require an explicit zero
+`MainPID`. Missing required, duplicate, or unknown properties remain a denial.
+
 Artifacts live under
 `/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
 the read-only signed observation (`candidate.json`), root-signed proof

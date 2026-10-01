@@ -136,6 +136,34 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
              ConfirmedRecoveryRootHost.parse_systemd_properties_for_test("ActiveState=inactive\n")
   end
 
+  test "requires MainPID for services and accepts native socket properties only while quiescent" do
+    socket = "dahlia-claim-witness.socket"
+    service = "dahlia-claim-witness.service"
+    properties = "ActiveState=inactive\nControlGroup=\n"
+
+    assert ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(properties, socket)
+    refute ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(properties, service)
+    assert ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(properties <> "MainPID=0\n", service)
+    assert ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(properties <> "MainPID=0\n", socket)
+
+    for invalid <- [
+          "ActiveState=active\nControlGroup=\n",
+          "ActiveState=inactive\nControlGroup=/system.slice/claim.socket\n",
+          "ActiveState=inactive\n",
+          "ControlGroup=\n",
+          properties <> "MainPID=42\n",
+          properties <> "MainPID=\n",
+          properties <> "ActiveState=failed\n",
+          properties <> "Unknown=value\n"
+        ] do
+      refute ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(invalid, socket)
+    end
+
+    assert ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test("ActiveState=failed\nControlGroup=\n", socket)
+    default_parse = ConfirmedRecoveryRootHost.parse_systemd_properties_for_test(properties)
+    assert default_parse == {:error, :invalid_systemd_properties}
+  end
+
   test "wires root host operations and rejects invalid issuer identities before IO" do
     operations = ConfirmedRecoveryRootHost.operations()
 
