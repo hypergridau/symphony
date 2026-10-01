@@ -376,6 +376,18 @@ return sanitized configuration reasons without raising or printing credential va
 Preflight success does not relax the issuer's fresh evidence and state-owner checks.
 Existing expired one-shot inputs remain held; this command does not refresh or replace them.
 
+Issuance, apply, completion and issuer-context verification require the fixed
+root-controlled Linux workflow at
+`/srv/dahlia-runner-state/dahlia/config/symphony/recovery-workflows/<pool-key>.md`.
+Dahlia's canonical recovery exporter supplies a complete six-pool derivation
+receipt. The native verifier checks its source commit against the installed
+`linux-control-receipt.json`, canonical source and renderer entries and Git blob
+identities, fixed workspace inputs, and every output hash through bounded
+root-controlled reads. Partial exports, changed unselected pools and alternate
+paths fail closed. Startup verification retains its original canonical workflow
+path and fixed-runtime-path check. Export and preflight do not authorize replacing
+held evidence or bypassing freshness checks.
+
 `symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
 --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the
 paused gate, stopped and masked pool/witness services, and state-owner quiescence; refreshes complete

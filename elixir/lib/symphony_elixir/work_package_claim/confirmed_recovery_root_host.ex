@@ -12,7 +12,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
-  alias SymphonyElixir.WorkPackageClaim.Journal
+  alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryWorkflow, Journal}
 
   @state_root "/srv/dahlia-runner-state"
   @evidence_root "/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery"
@@ -36,7 +36,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- require_pool(pool),
          :ok <- require_issue_id(issue_id),
          :ok <- require_paused_gate(),
-         :ok <- trusted_workflow_file(workflow_path, pool),
+         :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
          {:ok, runtime} <- runtime_paths(pool) do
       verified_context(issue_id, pool, nonce, workflow_path, runtime)
@@ -49,7 +49,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     with :ok <- require_root(),
          :ok <- require_pool(pool),
          :ok <- require_issue_id(issue_id),
-         :ok <- trusted_workflow_file(workflow_path, pool),
+         :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
          {:ok, runtime} <- runtime_paths(pool) do
       verified_context(issue_id, pool, issue_id, workflow_path, runtime)
@@ -76,7 +76,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     with :ok <- require_root(),
          :ok <- require_pool(pool),
          :ok <- require_paused_gate(),
-         :ok <- trusted_workflow_file(workflow_path, pool),
+         :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
          {:ok, _runtime} <- runtime_paths(pool) do
       require_services_quiescent()
