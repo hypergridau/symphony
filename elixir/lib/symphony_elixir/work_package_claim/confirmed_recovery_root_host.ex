@@ -245,6 +245,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   def persist_issuer_outputs(issue_id, candidate, envelope)
       when is_binary(issue_id) and is_binary(candidate) and is_binary(envelope) do
     with :ok <- require_issue_id(issue_id),
+         :ok <- issuer_output_barriers(issue_id),
          {:ok, observation} <- Jason.decode(candidate),
          :ok <- verify_reconciliation(observation) do
       if Map.has_key?(observation, "reconciliation") do
@@ -266,6 +267,22 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   def persist_issuer_outputs(_issue_id, _candidate, _envelope), do: {:error, :issuer_output_conflict}
 
   defp verify_reconciliation(observation), do: EpochHost.verify(observation)
+
+  defp issuer_output_barriers(issue_id) do
+    directory = marker_directory(issue_id)
+    issuer_output_barriers_with(directory, &trusted_root_directory/1, &File.ls/1)
+  end
+
+  defp issuer_output_barriers_with(directory, trusted, ls) do
+    with :ok <- trusted.(directory),
+         {:ok, entries} <- ls.(directory) do
+      cond do
+        Enum.any?(@issuer_denial_files, &(&1 in entries)) -> {:error, :provider_readback_denied}
+        "transaction.json" in entries -> {:error, :issuer_output_conflict}
+        true -> :ok
+      end
+    end
+  end
 
   defp verified_context(issue_id, pool, nonce, workflow_path, runtime) do
     {:ok,
@@ -527,6 +544,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   if Mix.env() == :test do
+    @doc false
+    @spec issuer_output_barriers_for_test(map()) :: :ok | {:error, term()}
+    def issuer_output_barriers_for_test(operations),
+      do: issuer_output_barriers_with("/fixed/issuer", operations.trusted, operations.ls)
+
     @doc false
     @spec runtime_paths_for_test(String.t(), (-> {:ok, map()} | {:error, term()})) :: {:ok, map()} | {:error, term()}
     def runtime_paths_for_test(pool, settings), do: runtime_paths(pool, settings)

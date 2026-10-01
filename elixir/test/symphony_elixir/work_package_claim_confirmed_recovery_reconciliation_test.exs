@@ -10,6 +10,29 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
   @directory "/synthetic/generation-2"
   @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
 
+  test "issuer output barriers preserve collector denial before transaction conflict" do
+    trusted = fn _ -> :ok end
+    assert :ok = Host.issuer_output_barriers_for_test(%{trusted: trusted, ls: fn _ -> {:ok, []} end})
+
+    assert :ok =
+             Host.issuer_output_barriers_for_test(%{
+               trusted: trusted,
+               ls: fn _ -> {:ok, ~w(candidate.json confirmed-root-envelope.json)} end
+             })
+
+    assert {:error, :issuer_output_conflict} =
+             Host.issuer_output_barriers_for_test(%{
+               trusted: trusted,
+               ls: fn _ -> {:ok, ["transaction.json"]} end
+             })
+
+    assert {:error, :provider_readback_denied} =
+             Host.issuer_output_barriers_for_test(%{
+               trusted: trusted,
+               ls: fn _ -> {:ok, ~w(provider-held-denial.json transaction.json)} end
+             })
+  end
+
   test "issuance resumes only after quiescence and never reads new signing input on replay" do
     context = %{
       runtime: %{journal_path: "/fixed/journal"},
