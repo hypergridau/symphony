@@ -18,9 +18,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     ConfirmedRecoveryClaimTransition,
     ConfirmedRecoveryContext,
     ConfirmedRecoveryEvidence,
+    ConfirmedRecoveryIssuer,
     ConfirmedRecoveryKubernetes,
     ConfirmedRecoveryLineage,
     ConfirmedRecoveryProviderRelease,
+    ConfirmedRecoveryReconciliation,
     ConfirmedRecoveryRootHost,
     ConfirmedRecoveryStateMachine,
     ConfirmedRecoveryWAL,
@@ -491,7 +493,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp read_candidate(issue_id, marker, runtime) do
     directory = marker_directory(issue_id, runtime)
 
-    with {:ok, observation_bytes} <- read_trusted_evidence(Path.join(directory, "candidate.json"), runtime),
+    with {:ok, directory} <- signed_input_directory(directory, runtime),
+         {:ok, observation_bytes} <- read_trusted_evidence(Path.join(directory, "candidate.json"), runtime),
          {:ok, proof_bytes} <- read_trusted_evidence(Path.join(directory, "confirmed-root-envelope.json"), runtime),
          true <- digest(observation_bytes) == marker["observationSHA256"],
          true <- digest(proof_bytes) == marker["proofSHA256"],
@@ -842,7 +845,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp verify_saved_proof(marker, paths) do
     directory = marker_directory(marker["issueId"], paths.runtime)
 
-    with {:ok, observation_bytes} <- read_trusted_evidence(Path.join(directory, "candidate.json"), paths.runtime),
+    with {:ok, directory} <- signed_input_directory(directory, paths.runtime),
+         {:ok, observation_bytes} <- read_trusted_evidence(Path.join(directory, "candidate.json"), paths.runtime),
          {:ok, proof_bytes} <- read_trusted_evidence(Path.join(directory, "confirmed-root-envelope.json"), paths.runtime),
          {:ok, observation} when is_map(observation) <- decode_candidate_bytes(observation_bytes),
          {:ok, payload_hint} <- decode_proof_payload(proof_bytes),
@@ -877,12 +881,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   def verify_signed_proof(issue_id, pool, nonce, paths) do
     runtime = paths.runtime
     directory = marker_directory(issue_id, runtime)
-    observation_path = Path.join(directory, "candidate.json")
-    proof_path = Path.join(directory, "confirmed-root-envelope.json")
 
     with :ok <- trusted_evidence_directory(directory, runtime),
-         {:ok, observation_bytes} <- read_trusted_evidence(observation_path, runtime),
-         {:ok, proof_bytes} <- read_trusted_evidence(proof_path, runtime),
+         {:ok, directory} <- signed_input_directory(directory, runtime),
+         {:ok, observation_bytes} <- read_trusted_evidence(Path.join(directory, "candidate.json"), runtime),
+         {:ok, proof_bytes} <- read_trusted_evidence(Path.join(directory, "confirmed-root-envelope.json"), runtime),
          {:ok, observation} when is_map(observation) <- decode_candidate_bytes(observation_bytes),
          {:ok, payload_hint} <- decode_proof_payload(proof_bytes),
          now_ms <- host0(runtime, :now_ms),
@@ -894,6 +897,35 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}
     end
+  end
+
+  defp signed_input_directory(directory, runtime) do
+    ConfirmedRecoveryReconciliation.input_directory(directory, &host(runtime, :lstat, [&1]))
+  end
+
+  @doc "Checks the actual apply preconditions and computes postimages without signing or writing state."
+  @spec preflight_transition(ConfirmedRecoveryContext.t(), map()) :: :ok | {:error, term()}
+  def preflight_transition(%ConfirmedRecoveryContext{} = context, bundle) do
+    runtime = Map.put(context.runtime, :host_ops, context.host_ops)
+    now_ms = host0(runtime, :now_ms)
+
+    payload =
+      ConfirmedRecoveryIssuer.build_payload(
+        bundle,
+        context.pool,
+        context.issue_id,
+        context.nonce,
+        now_ms
+      )
+
+    with :ok <- trusted_runtime_files(runtime, context.pool),
+         {:ok, paths} <- read_state_preimages(runtime),
+         :ok <- verify_local_claim(paths, payload, runtime),
+         {:ok, _postimages} <- prepare_postimages(paths, payload, runtime, now_ms) do
+      :ok
+    end
+  rescue
+    _ -> {:error, :confirmed_claim_precondition_changed}
   end
 
   @doc false

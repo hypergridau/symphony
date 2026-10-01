@@ -12,6 +12,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedFirst
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: FailedSecond
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: FailedSigned
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
@@ -87,9 +91,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          {:ok, runtime} <- runtime_paths(pool),
          {:ok, context} <- verified_context("f77e349e-21d9-4bdf-bad3-ce08b302e7e8", pool, "", workflow_path, runtime) do
       with_pool_lock(context, fn ->
-        ConfirmedRecoveryIssuerPreflight.verify(marker_directory(context.issue_id))
+        verify_issuer_preflight(context)
       end)
     end
+  end
+
+  defp verify_issuer_preflight(context) do
+    directory = marker_directory(context.issue_id)
+
+    with :ok <- ConfirmedRecoveryIssuerPreflight.verify(directory),
+         {:ok, bytes} <- EpochHost.read_private(Path.join(directory, "issuer-input.json"), 1_048_576),
+         {:ok, bundle} <- Jason.decode(bytes),
+         do: ConfirmedRecoveryCore.preflight_transition(context, bundle)
   end
 
   @doc false
@@ -104,7 +117,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   defp run_quiescent(runtime, fun) do
-    with :ok <- require_paused_gate(), :ok <- require_mutation_quiescent(runtime, 1001), do: fun.()
+    with :ok <- require_paused_gate(),
+         :ok <- require_recovery_service_stopped(runtime.pool_key),
+         :ok <- require_mutation_quiescent(runtime, 1001),
+         do: fun.()
   end
 
   @doc false
@@ -118,7 +134,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       },
       marker_directory: &marker_directory/1,
       fixed_runtime_paths: &fixed_runtime_paths/1,
-      require_service_stopped: &ManagedLauncherLock.require_service_stopped/1,
+      require_service_stopped: &require_recovery_service_stopped/1,
       require_services_quiescent: &require_services_quiescent/0,
       require_mutation_quiescent: &require_mutation_quiescent/2,
       no_processes_for_uid: &no_processes_for_uid/1,
@@ -151,6 +167,28 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       now_ms: fn -> System.system_time(:millisecond) end,
       unique_integer: fn -> System.unique_integer([:positive]) end
     }
+  end
+
+  @doc false
+  @spec require_recovery_service_stopped(String.t()) :: :ok | {:error, term()}
+  def require_recovery_service_stopped(pool) do
+    with :ok <- require_root(),
+         :ok <- require_pool(pool),
+         :ok <- trusted_systemctl() do
+      recovery_service_stopped(pool, &unit_quiescent?/1)
+    end
+  end
+
+  defp recovery_service_stopped(pool, quiescent) do
+    with :ok <- require_pool(pool),
+         true <- quiescent.("dahlia-symphony@#{pool}.service") do
+      :ok
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :pool_service_not_proven_stopped}
+    end
+  rescue
+    _ -> {:error, :pool_service_not_proven_stopped}
   end
 
   @doc false
@@ -234,12 +272,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
   def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
     epoch =
-      Enum.find(["epoch-1", "epoch-2", "epoch-3"], fn name ->
+      Enum.find(["epoch-1", "epoch-2", "epoch-3", "epoch-4"], fn name ->
         path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id), name), "issuer-input.json")
       end)
 
     if epoch do
-      with :ok <- require_issuer_input_directory(issue_id),
+      with :ok <- require_epoch_issuer_directory(issue_id, epoch),
            :ok <- EpochHost.require_directory(issue_id, epoch),
            {:ok, bytes} <- EpochHost.read_private(path, 1_048_576),
            {:ok, bundle} when is_map(bundle) <- Jason.decode(bytes),
@@ -255,6 +293,29 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   def read_issuer_bundle(_issue_id, _path), do: {:error, :untrusted_issuer_bundle}
+
+  defp require_epoch_issuer_directory(issue_id, "epoch-4") do
+    require_signed_predecessor_directory(issue_id, &trusted_root_directory/1, &File.ls/1, &EpochHost.require_unapplied_predecessor/2)
+  end
+
+  defp require_epoch_issuer_directory(issue_id, _epoch), do: require_issuer_input_directory(issue_id)
+
+  defp require_signed_predecessor_directory(issue_id, trusted, ls, verify) do
+    directory = marker_directory(issue_id)
+
+    with :ok <- trusted.(directory),
+         {:ok, entries} <- ls.(directory),
+         true <- Enum.sort(entries) == Enum.sort(@issuer_input_files ++ ~w(reconciliation candidate.json confirmed-root-envelope.json)),
+         do:
+           verify.(
+             %{
+               "signedPredecessorEpoch3" => FailedSigned.predecessor_binding(),
+               "predecessorEpoch2" => FailedSecond.predecessor_binding(),
+               "ancestorEpoch1" => FailedFirst.predecessor_binding()
+             },
+             directory
+           )
+  end
 
   @doc false
   @spec persist_issuer_outputs(String.t(), binary(), binary()) :: :ok | {:error, term()}
@@ -560,6 +621,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   if Mix.env() == :test do
+    @doc false
+    @spec signed_predecessor_directory_for_test(String.t(), map()) :: :ok | {:error, term()} | false
+    def signed_predecessor_directory_for_test(issue_id, operations),
+      do: require_signed_predecessor_directory(issue_id, operations.trusted, operations.ls, operations.verify)
+
+    @doc false
+    @spec recovery_service_stopped_for_test(String.t(), function()) :: :ok | {:error, term()}
+    def recovery_service_stopped_for_test(pool, quiescent), do: recovery_service_stopped(pool, quiescent)
+
     @doc false
     @spec issuer_output_barriers_for_test(map()) :: :ok | {:error, term()}
     def issuer_output_barriers_for_test(operations),

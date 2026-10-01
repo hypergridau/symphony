@@ -11,6 +11,227 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
   @directory "/synthetic/generation-2"
   @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
 
+  test "new issuance checks unapplied history only before a saved envelope exists" do
+    metadata = %{"epoch" => "epoch-4"}
+    observation = %{"reconciliation" => metadata}
+    absent = %{lstat: fn _ -> {:error, :enoent} end, verify: fn ^metadata, "/fixed/generation-2" -> :ok end}
+    assert :ok = EpochHost.new_issuance_predecessor_for_test(observation, absent)
+    changed = %{absent | verify: fn _, _ -> {:error, :changed_history} end}
+    assert {:error, :changed_history} = EpochHost.new_issuance_predecessor_for_test(observation, changed)
+    saved = %{changed | lstat: fn _ -> {:ok, %File.Stat{type: :regular}} end}
+    assert :ok = EpochHost.new_issuance_predecessor_for_test(observation, saved)
+    unreadable = %{absent | lstat: fn _ -> {:error, :eacces} end}
+    assert {:error, :epoch_issuance_conflict} = EpochHost.new_issuance_predecessor_for_test(observation, unreadable)
+    assert :ok = EpochHost.new_issuance_predecessor_for_test(%{}, unreadable)
+    assert {:error, :epoch_issuance_conflict} = EpochHost.require_unapplied_predecessor(%{}, "/fixed/generation-2")
+  end
+
+  test "reserved or unreadable fourth epoch prevents all earlier signing paths" do
+    fourth = "/fixed/generation-2/reconciliation/epoch-4"
+    assert :ok = EpochHost.fourth_downgrade_for_test("epoch-4", fn _ -> flunk("current epoch must not downgrade") end)
+
+    for prior <- ~w(epoch-1 epoch-2 epoch-3) do
+      assert :ok = EpochHost.fourth_downgrade_for_test(prior, fn ^fourth -> {:error, :enoent} end)
+
+      for result <- [{:ok, %File.Stat{type: :directory}}, {:ok, %File.Stat{type: :symlink}}, {:error, :eacces}] do
+        assert {:error, :reconciliation_epoch_downgrade} =
+                 EpochHost.fourth_downgrade_for_test(prior, fn ^fourth -> result end)
+      end
+    end
+  end
+
+  test "fourth issuer accepts only exact signed base history and denies transition residue" do
+    directory = Host.marker_directory(@issue)
+    entries = ~w(reviewed-preflight.json provider-held-readback.json issuer-input.json reconciliation candidate.json confirmed-root-envelope.json)
+
+    operations = %{
+      trusted: fn ^directory -> :ok end,
+      ls: fn ^directory -> {:ok, entries} end,
+      verify: fn metadata, ^directory ->
+        assert metadata["ancestorEpoch1"] == FailedEpoch.predecessor_binding()
+        assert metadata["signedPredecessorEpoch3"]["epoch"] == "epoch-3"
+        assert metadata["predecessorEpoch2"]["epoch"] == "epoch-2"
+        :ok
+      end
+    }
+
+    assert :ok = Host.signed_predecessor_directory_for_test(@issue, operations)
+
+    for entry <- ~w(transaction.json local-transition-receipt.json provider-held-denial.json unexpected) do
+      changed = %{operations | ls: fn _ -> {:ok, [entry | entries]} end}
+      refute :ok == Host.signed_predecessor_directory_for_test(@issue, changed)
+    end
+
+    changed = %{operations | ls: fn _ -> {:ok, List.delete(entries, "candidate.json")} end}
+    refute :ok == Host.signed_predecessor_directory_for_test(@issue, changed)
+    denied = %{operations | verify: fn _, _ -> {:error, :changed_signed_history} end}
+    assert {:error, :changed_signed_history} = Host.signed_predecessor_directory_for_test(@issue, denied)
+  end
+
+  test "fourth epoch directory admits its transaction inputs and refuses unknown output entries" do
+    inputs = ~w(started.json reviewed-preflight.json provider-held-readback.json manifest.json issuer-input.json)
+    entries = ~w(candidate.json confirmed-root-envelope.json issued-envelope.json) ++ inputs
+
+    operations = %{
+      trusted: fn _ -> :ok end,
+      lstat: fn _ -> {:ok, %File.Stat{mode: 0o700}} end,
+      ls: fn _ -> {:ok, entries} end
+    }
+
+    assert :ok = EpochHost.require_directory_for_test(operations, "/fixed/epoch-4")
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.require_directory_for_test(operations)
+    changed = %{operations | ls: fn _ -> {:ok, ["unrecognized" | entries]} end}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.require_directory_for_test(changed, "/fixed/epoch-4")
+  end
+
+  test "fourth epoch metadata binds all signed and unsigned history without widening old schemas" do
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: Second
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: Signed
+    {observation, _files, _hashes} = fixture()
+
+    metadata =
+      Map.merge(observation["reconciliation"], %{
+        "contractVersion" => "hgs740-reconciliation-observation.v4",
+        "epoch" => "epoch-4",
+        "historicalSHA256" => Epoch.historical_hashes(),
+        "ancestorEpoch1" => FailedEpoch.predecessor_binding(),
+        "predecessorEpoch2" => Second.predecessor_binding(),
+        "signedPredecessorEpoch3" => Signed.predecessor_binding()
+      })
+
+    bound = Map.put(observation, "reconciliation", metadata)
+    assert :ok = Epoch.validate(bound)
+
+    for field <- ~w(ancestorEpoch1 predecessorEpoch2 signedPredecessorEpoch3 historicalSHA256) do
+      changed = put_in(bound, ["reconciliation", field], %{})
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(changed)
+    end
+
+    for epoch <- ~w(epoch-1 epoch-2 epoch-3 epoch-5) do
+      changed = put_in(bound, ["reconciliation", "epoch"], epoch)
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(changed)
+    end
+  end
+
+  test "fourth epoch requires unsigned first and second predecessors and a signed third" do
+    inputs = ~w(started.json reviewed-preflight.json provider-held-readback.json manifest.json issuer-input.json)
+
+    operations = %{
+      trusted: fn _ -> :ok end,
+      lstat: fn _ -> {:ok, %File.Stat{mode: 0o700}} end,
+      ls: fn path ->
+        if Path.basename(path) == "epoch-3", do: {:ok, ["issued-envelope.json" | inputs]}, else: {:ok, inputs}
+      end
+    }
+
+    assert :ok = EpochHost.successor_custody_for_test("epoch-4", operations)
+    unsigned = %{operations | ls: fn _ -> {:ok, inputs} end}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-4", unsigned)
+    signed = %{operations | ls: fn _ -> {:ok, ["issued-envelope.json" | inputs]} end}
+    assert {:error, :invalid_reconciliation_epoch} = EpochHost.successor_custody_for_test("epoch-4", signed)
+  end
+
+  test "signed successor refuses any local transition or uncertain absence before issuing" do
+    metadata = %{"signedPredecessorEpoch3" => "pinned"}
+    verify = fn ^metadata, "/fixed/generation-2" -> :ok end
+    operations = %{verify: verify, lstat: fn _ -> {:error, :enoent} end}
+    assert :ok = EpochHost.unapplied_predecessor_for_test(metadata, operations)
+
+    for name <- ~w(transaction.json local-transition-candidate.json local-transition-receipt.json),
+        result <- [{:ok, %File.Stat{type: :regular}}, {:ok, %File.Stat{type: :symlink}}, {:error, :eacces}] do
+      check = fn path -> if Path.basename(path) == name, do: result, else: {:error, :enoent} end
+
+      assert {:error, :epoch_issuance_conflict} =
+               EpochHost.unapplied_predecessor_for_test(metadata, %{operations | lstat: check})
+    end
+
+    denied = %{operations | verify: fn _, _ -> {:error, :changed_history} end}
+    assert {:error, :epoch_issuance_conflict} = EpochHost.unapplied_predecessor_for_test(metadata, denied)
+  end
+
+  test "fourth epoch publishes fresh inputs privately without touching base signed history" do
+    directory = Path.join(System.tmp_dir!(), "hgs740-fourth-#{System.unique_integer([:positive])}")
+    epoch = Path.join(directory, "reconciliation/epoch-4")
+    File.mkdir_p!(epoch)
+    on_exit(fn -> File.rm_rf!(directory) end)
+    File.write!(Path.join(directory, "candidate.json"), "old candidate")
+    File.write!(Path.join(directory, "confirmed-root-envelope.json"), "old envelope")
+    write = fn path, bytes -> File.write(path, bytes, [:exclusive]) end
+
+    sync = fn path ->
+      assert path == epoch
+      :ok
+    end
+
+    assert :ok = EpochHost.persist_epoch_for_test(directory, "fresh candidate", "fresh envelope", write, sync)
+    assert File.read!(Path.join(directory, "candidate.json")) == "old candidate"
+    assert File.read!(Path.join(directory, "confirmed-root-envelope.json")) == "old envelope"
+    assert File.read!(Path.join(epoch, "candidate.json")) == "fresh candidate"
+    assert File.read!(Path.join(epoch, "confirmed-root-envelope.json")) == "fresh envelope"
+    assert File.read!(Path.join(epoch, "issued-envelope.json")) == "fresh envelope"
+    File.write!(Path.join(directory, "transaction.json"), "retained WAL")
+    assert {:error, :issuer_output_conflict} = EpochHost.persist_epoch_for_test(directory, "other", "other", write, sync)
+  end
+
+  test "signed input selection cannot fall back from a reserved fourth epoch" do
+    successor = Epoch.epoch_directory(@directory, "epoch-4")
+    assert {:ok, @directory} = Epoch.input_directory(@directory, fn ^successor -> {:error, :enoent} end)
+    reserved = fn ^successor -> {:ok, %File.Stat{type: :directory}} end
+    assert {:ok, ^successor} = Epoch.input_directory(@directory, reserved)
+
+    for result <- [{:ok, %File.Stat{type: :symlink}}, {:ok, %File.Stat{type: :regular}}, {:error, :eacces}] do
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.input_directory(@directory, fn ^successor -> result end)
+    end
+  end
+
+  test "signed predecessor pins its base outputs, full epoch and unsigned ancestry" do
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: First
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: Second
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: Signed
+
+    manifest = %{"predecessorEpoch2" => Second.predecessor_binding(), "ancestorEpoch1" => First.predecessor_binding()}
+    epoch = Map.new(Signed.predecessor_binding()["evidenceSHA256"], fn {name, _} -> {name, "synthetic " <> name} end)
+    epoch = Map.put(epoch, "manifest.json", Evidence.canonical_json(manifest))
+    base = %{"candidate.json" => "candidate", "confirmed-root-envelope.json" => "envelope"}
+
+    binding = %{
+      "epoch" => "epoch-3",
+      "evidenceSHA256" => Map.new(epoch, fn {n, b} -> {n, digest(b)} end),
+      "baseSignedOutputSHA256" => Map.new(base, fn {n, b} -> {n, digest(b)} end),
+      "failureSealSHA256" => digest("seal")
+    }
+
+    metadata = Map.put(manifest, "signedPredecessorEpoch3", binding)
+    epoch_directory = Epoch.epoch_directory(@directory, "epoch-3")
+    files = Map.new(epoch, fn {n, b} -> {Path.join(epoch_directory, n), b} end)
+    files = Map.merge(files, Map.new(base, fn {n, b} -> {Path.join(@directory, n), b} end))
+    seal_path = "/srv/dahlia-runner-state/evidence/hgs740-reconciliation-20261001/failed-signed-epoch-3-seal-v1.json"
+    files = Map.put(files, seal_path, "seal")
+    read = fn path, _ -> Map.fetch(files, path) end
+    ancestor = fn ^metadata, @directory, _ -> :ok end
+
+    assert :ok = Signed.verify_for_test(metadata, @directory, read, binding, ancestor)
+    refute Signed.valid?(metadata)
+    assert Signed.valid?(Map.put(metadata, "signedPredecessorEpoch3", Signed.predecessor_binding()))
+    assert {:error, _} = Signed.verify(metadata, @directory, read)
+
+    for path <- Map.keys(files) do
+      changed = fn requested, maximum ->
+        if requested == path, do: {:ok, "changed"}, else: read.(requested, maximum)
+      end
+
+      missing = fn requested, maximum ->
+        if requested == path, do: {:error, :enoent}, else: read.(requested, maximum)
+      end
+
+      assert {:error, _} = Signed.verify_for_test(metadata, @directory, changed, binding, ancestor)
+      assert {:error, _} = Signed.verify_for_test(metadata, @directory, missing, binding, ancestor)
+    end
+
+    denied_ancestor = fn _, _, _ -> {:error, :changed_ancestor} end
+    assert {:error, _} = Signed.verify_for_test(metadata, @directory, read, binding, denied_ancestor)
+  end
+
   test "successor custody refuses signed predecessors and any existing or unreadable successor on downgrade" do
     inputs = ~w(started.json reviewed-preflight.json provider-held-readback.json manifest.json issuer-input.json)
 

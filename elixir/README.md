@@ -1563,11 +1563,22 @@ unchanged. The sealed unsigned epoch-2 HTTP startup failure permits only the
 explicit fixed `epoch-3` successor. Its V3 manifest binds `predecessorEpoch2`
 and `ancestorEpoch1`, including both five-file histories and failure seals;
 the second predecessor's manifest must retain the first ancestor binding.
-There is no automatic epoch allocation or fourth epoch. Once a successor is
+The sealed signed-but-unapplied epoch-3 service-guard failure permits only
+the fixed `epoch-4` successor. Its V4 metadata adds `signedPredecessorEpoch3`,
+binding all six epoch files, both original signed transaction inputs and the
+failure seal, while retaining both unsigned ancestor bindings. Before new
+issuance, no WAL or local transition may exist. Epoch 4 publishes its fresh
+candidate and envelope in its own directory; base epoch-3 inputs stay unchanged.
+All transaction input readers select epoch 4 whenever it exists and fail closed
+on missing or malformed inputs. Existing freshness and signature rules still apply.
+There is no automatic epoch allocation or fifth epoch. Once a successor is
 reserved, issuer, WAL and provider verification reject older epoch fallback.
 Native issuer-context preflight checks all pinned original history files and
 fresh Jobs/Pods/Jobs absence under the same root lock before collection reserves
 an epoch. HTTP unavailability therefore fails before the observation store exists.
+The same root-only masked/quiescent service guard runs before signing and apply.
+Preflight also validates the current local claim and computes transition postimages
+without signing, producing a WAL, modifying historical timestamps or writing state.
 `ConfirmedRecoveryReconciliation` verifies the pinned three historical hashes,
 unchanged claim/state/fence/graph/predecessor/witness bindings and immutable
 fresh input manifest. The existing v3 signature covers its explicit nested

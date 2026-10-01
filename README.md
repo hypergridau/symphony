@@ -203,3 +203,10 @@ Jobs/Pods/Jobs absence under the existing root recovery lock before collection.
 The cold recovery executable starts Req's HTTP dependencies only after validating
 the fixed Kubernetes identity, credential context and CA. It does not start
 Symphony or its workers; failed HTTP startup or readback keeps recovery held.
+The signed epoch-3 service-guard failure permits one fixed epoch-4 successor.
+It pins the complete signed history and retains the original transaction inputs
+in place. Fresh inputs are published only inside epoch 4, and every reader
+selects that directory or fails closed once it exists. Root recovery requires
+the same masked, stopped unit before collection, signing and apply; generic
+successor-retirement service rules remain unchanged. Preflight computes the
+local transition without signing or writing state before reserving an epoch.

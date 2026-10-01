@@ -3,6 +3,27 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHostTest do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
 
+  test "recovery apply uses the same masked quiescence contract as issuer preflight" do
+    for state <- ["inactive", "failed"] do
+      properties = "ActiveState=#{state}\nControlGroup=\nMainPID=0\n"
+
+      assert :ok =
+               ConfirmedRecoveryRootHost.recovery_service_stopped_for_test("hypergrid-gitops", fn unit ->
+                 assert unit == "dahlia-symphony@hypergrid-gitops.service"
+                 ConfirmedRecoveryRootHost.unit_properties_quiescent_for_test(properties, unit)
+               end)
+    end
+
+    assert {:error, :pool_service_not_proven_stopped} =
+             ConfirmedRecoveryRootHost.recovery_service_stopped_for_test("hypergrid-gitops", fn _ -> false end)
+
+    assert {:error, :pool_service_not_proven_stopped} =
+             ConfirmedRecoveryRootHost.recovery_service_stopped_for_test("hypergrid-gitops", fn _ -> raise "unavailable" end)
+
+    assert {:error, :invalid_pool} =
+             ConfirmedRecoveryRootHost.recovery_service_stopped_for_test("unknown", fn _ -> flunk("invalid pool must not query systemd") end)
+  end
+
   test "issuer context returns configuration failure without raising and keeps the fixed state path" do
     assert {:error, :missing_linear_api_token} =
              ConfirmedRecoveryRootHost.runtime_paths_for_test("midgard", fn -> {:error, :missing_linear_api_token} end)

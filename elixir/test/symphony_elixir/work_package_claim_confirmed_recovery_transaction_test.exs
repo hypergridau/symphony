@@ -20,6 +20,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
   alias SymphonyElixir.WorkPackageClaim.Journal
 
+  test "issuance transition preflight computes the real apply proposal without publishing or writing" do
+    for snapshot <- [:present, :absent] do
+      fixture = positive_apply_fixture(snapshot)
+      before = Agent.get(fixture.vfs, &Map.delete(&1, :events))
+      envelope = Jason.decode!(fixture.proof_bytes)
+      payload = envelope["payload"] |> Base.url_decode64!(padding: false) |> Jason.decode!()
+      bundle = Map.take(payload, ~w(assignmentSHA256 assignmentSnapshotState observation providerHeld reservationId))
+
+      assert :ok = Transaction.preflight_transition(fixture.context, bundle)
+      assert Agent.get(fixture.vfs, &Map.delete(&1, :events)) == before
+      changed = put_in(bundle, ["observation", "expected", "reservationId"], "changed")
+
+      assert {:error, :confirmed_claim_precondition_changed} =
+               Transaction.preflight_transition(fixture.context, changed)
+
+      assert Agent.get(fixture.vfs, &Map.delete(&1, :events)) == before
+    end
+  end
+
   test "WAL replay completes a crash after any partial prefix of state writes" do
     preimages = ["journal-before", "fence-before", "graph-before"]
     postimages = ["journal-after", "fence-after", "graph-after"]
@@ -2805,26 +2824,31 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     observation_path = Path.join(directory, "candidate.json")
     proof_path = Path.join(directory, "confirmed-root-envelope.json")
     files = %{observation_path => observation_bytes, proof_path => proof_bytes}
+    fourth = Path.join(directory, "reconciliation/epoch-4")
     parent = self()
 
     host_ops =
       ConfirmedRecoveryRootHost.operations()
       |> Map.merge(%{
-        lstat: fn path ->
-          cond do
-            Map.has_key?(files, path) ->
-              {:ok, %File.Stat{type: :regular, uid: 0, gid: 0, mode: 0o600, links: 1, size: byte_size(files[path])}}
+        lstat: fn
+          ^fourth ->
+            {:error, :enoent}
 
-            path == evidence_root or String.starts_with?(path, evidence_root <> "/") ->
-              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}}
+          path ->
+            cond do
+              Map.has_key?(files, path) ->
+                {:ok, %File.Stat{type: :regular, uid: 0, gid: 0, mode: 0o600, links: 1, size: byte_size(files[path])}}
 
-            String.starts_with?(evidence_root, path <> "/") or path == "/" ->
-              {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o755}}
+              path == evidence_root or String.starts_with?(path, evidence_root <> "/") ->
+                {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}}
 
-            true ->
-              send(parent, {:unexpected_lstat, path})
-              {:error, :enoent}
-          end
+              String.starts_with?(evidence_root, path <> "/") or path == "/" ->
+                {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o755}}
+
+              true ->
+                send(parent, {:unexpected_lstat, path})
+                {:error, :enoent}
+            end
         end,
         read: fn path ->
           Map.fetch(files, path)

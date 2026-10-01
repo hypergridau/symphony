@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
 
   import Bitwise, only: [band: 2]
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: SignedPredecessor
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer, as: Issuer
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Epoch
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost, as: Host
@@ -41,11 +42,41 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
     with :ok <- verify(observation),
          directory <- Host.marker_directory(observation["expected"]["issueId"]),
          saved <- Path.join(Epoch.epoch_directory(directory, observation["reconciliation"]["epoch"]), "issued-envelope.json") do
-      verify_saved_envelope(saved, directory, envelope, &File.lstat/1, &read_private/2, &File.exists?/1)
+      with :ok <- verify_new_issuance_predecessor(observation, directory, saved),
+           {:ok, inputs} <- Epoch.input_directory(directory, &File.lstat/1),
+           do: verify_saved_envelope(saved, inputs, envelope, &File.lstat/1, &read_private/2, &File.exists?/1)
     end
   end
 
   def verify_envelope(observation, _envelope), do: verify(observation)
+
+  defp verify_new_issuance_predecessor(observation, directory, saved),
+    do: verify_new_issuance_predecessor_with(observation, directory, saved, &File.lstat/1, &require_unapplied_predecessor/2)
+
+  defp verify_new_issuance_predecessor_with(%{"reconciliation" => %{"epoch" => "epoch-4"}} = observation, directory, saved, lstat, verify) do
+    case lstat.(saved) do
+      {:error, :enoent} -> verify.(observation["reconciliation"], directory)
+      {:ok, _} -> :ok
+      _ -> {:error, :epoch_issuance_conflict}
+    end
+  end
+
+  defp verify_new_issuance_predecessor_with(_observation, _directory, _saved, _lstat, _verify), do: :ok
+
+  @spec require_unapplied_predecessor(map(), String.t()) :: :ok | {:error, term()}
+  def require_unapplied_predecessor(metadata, directory) do
+    verify = fn binding, base -> SignedPredecessor.verify(binding, base, &read_private/2) end
+    require_unapplied_predecessor_with(metadata, directory, verify, &File.lstat/1)
+  end
+
+  defp require_unapplied_predecessor_with(metadata, directory, verify, lstat) do
+    with :ok <- verify.(metadata, directory),
+         true <- Enum.all?(~w(transaction.json local-transition-candidate.json local-transition-receipt.json), &(lstat.(Path.join(directory, &1)) == {:error, :enoent})) do
+      :ok
+    else
+      _ -> {:error, :epoch_issuance_conflict}
+    end
+  end
 
   defp verify_saved_envelope(saved, directory, envelope, lstat, read, exists) do
     case lstat.(saved) do
@@ -61,12 +92,23 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
   end
 
   @spec require_directory(String.t(), String.t()) :: :ok | {:error, term()}
-  def require_directory(issue_id, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3"] do
+  def require_directory(issue_id, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3", "epoch-4"] do
     base = Host.marker_directory(issue_id)
     directory = Epoch.epoch_directory(base, epoch)
 
-    with :ok <- successor_custody(base, epoch),
+    with :ok <- require_no_fourth_downgrade(base, epoch, &File.lstat/1),
+         :ok <- successor_custody(base, epoch),
          do: require_directory_with(directory, &trusted_directory/1, &File.lstat/1, &File.ls/1)
+  end
+
+  defp require_no_fourth_downgrade(_base, "epoch-4", _lstat), do: :ok
+
+  defp require_no_fourth_downgrade(base, _epoch, lstat) do
+    if lstat.(Epoch.epoch_directory(base, "epoch-4")) == {:error, :enoent} do
+      :ok
+    else
+      {:error, :reconciliation_epoch_downgrade}
+    end
   end
 
   defp successor_custody(base, epoch),
@@ -90,6 +132,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
          do: unsigned_predecessor(base, "epoch-2", trusted, lstat, ls)
   end
 
+  defp successor_custody_with(base, "epoch-4", trusted, lstat, ls) do
+    predecessor = Epoch.epoch_directory(base, "epoch-3")
+
+    with :ok <- successor_custody_with(base, "epoch-3", trusted, lstat, ls),
+         :ok <- require_directory_with(predecessor, trusted, lstat, ls),
+         {:ok, entries} <- ls.(predecessor),
+         true <- Enum.sort(entries) == Enum.sort(["issued-envelope.json" | @inputs]) do
+      :ok
+    else
+      _ -> {:error, :invalid_reconciliation_epoch}
+    end
+  end
+
   defp unsigned_predecessor(base, epoch, trusted, lstat, ls) do
     predecessor = Epoch.epoch_directory(base, epoch)
 
@@ -108,11 +163,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
          true <- band(mode, 0o777) == 0o700,
          {:ok, entries} <- ls.(directory),
          true <- Enum.all?(@inputs, &(&1 in entries)),
-         true <- Enum.all?(entries, &(&1 in ["issued-envelope.json" | @inputs])) do
+         true <- Enum.all?(entries, &(&1 in allowed_epoch_entries(directory))) do
       :ok
     else
       _ -> {:error, :invalid_reconciliation_epoch}
     end
+  end
+
+  defp allowed_epoch_entries(directory) do
+    if Path.basename(directory) == "epoch-4",
+      do: ~w(candidate.json confirmed-root-envelope.json issued-envelope.json) ++ @inputs,
+      else: ["issued-envelope.json" | @inputs]
   end
 
   @spec read_private(String.t(), pos_integer()) :: {:ok, binary()} | {:error, term()}
@@ -148,14 +209,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
   end
 
   defp persist_epoch(directory, epoch, candidate, envelope, write, sync) do
+    inputs = if Path.basename(epoch) == "epoch-4", do: epoch, else: directory
     # Retain the signed result before publishing either transaction input. A
     # crash can only republish these exact bytes, never sign another result.
     with {:error, :enoent} <- File.lstat(Path.join(directory, "transaction.json")),
          :ok <- retain_exact(Path.join(epoch, "issued-envelope.json"), envelope, write),
          :ok <- sync.(epoch),
-         :ok <- retain_exact(Path.join(directory, "candidate.json"), candidate, write),
-         :ok <- retain_exact(Path.join(directory, "confirmed-root-envelope.json"), envelope, write),
-         :ok <- sync.(directory) do
+         :ok <- retain_exact(Path.join(inputs, "candidate.json"), candidate, write),
+         :ok <- retain_exact(Path.join(inputs, "confirmed-root-envelope.json"), envelope, write),
+         :ok <- sync.(inputs) do
       :ok
     else
       _ -> {:error, :issuer_output_conflict}
@@ -167,7 +229,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
     directory = Host.marker_directory(context.issue_id)
 
     epoch =
-      Enum.find(["epoch-1", "epoch-2", "epoch-3"], fn name ->
+      Enum.find(["epoch-1", "epoch-2", "epoch-3", "epoch-4"], fn name ->
         bundle_path == Path.join(Epoch.epoch_directory(directory, name), "issuer-input.json")
       end)
 
@@ -233,14 +295,33 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
 
   if Mix.env() == :test do
     @doc false
+    @spec new_issuance_predecessor_for_test(map(), map()) :: :ok | {:error, term()}
+    def new_issuance_predecessor_for_test(observation, operations),
+      do: verify_new_issuance_predecessor_with(observation, "/fixed/generation-2", "/fixed/epoch-4/issued-envelope.json", operations.lstat, operations.verify)
+
+    @doc false
+    @spec fourth_downgrade_for_test(String.t(), function()) :: :ok | {:error, term()}
+    def fourth_downgrade_for_test(epoch, lstat), do: require_no_fourth_downgrade("/fixed/generation-2", epoch, lstat)
+
+    @doc false
+    @spec unapplied_predecessor_for_test(map(), map()) :: :ok | {:error, term()}
+    def unapplied_predecessor_for_test(metadata, operations),
+      do: require_unapplied_predecessor_with(metadata, "/fixed/generation-2", operations.verify, operations.lstat)
+
+    @doc false
+    @spec persist_epoch_for_test(String.t(), binary(), binary(), function(), function()) :: :ok | {:error, term()}
+    def persist_epoch_for_test(directory, candidate, envelope, write, sync),
+      do: persist_epoch(directory, Path.join([directory, "reconciliation", "epoch-4"]), candidate, envelope, write, sync)
+
+    @doc false
     @spec successor_custody_for_test(String.t(), map()) :: :ok | {:error, term()}
     def successor_custody_for_test(epoch, operations),
       do: successor_custody_with("/fixed/generation-2", epoch, operations.trusted, operations.lstat, operations.ls)
 
     @doc false
-    @spec require_directory_for_test(map()) :: :ok | {:error, term()}
-    def require_directory_for_test(operations),
-      do: require_directory_with("/fixed/epoch", operations.trusted, operations.lstat, operations.ls)
+    @spec require_directory_for_test(map(), String.t()) :: :ok | {:error, term()}
+    def require_directory_for_test(operations, directory \\ "/fixed/epoch"),
+      do: require_directory_with(directory, operations.trusted, operations.lstat, operations.ls)
 
     @doc false
     @spec verify_saved_envelope_for_test(binary(), map()) :: :ok | {:error, term()}
