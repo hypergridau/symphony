@@ -11,6 +11,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   import Bitwise, only: [band: 2]
 
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
+  alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
 
   alias SymphonyElixir.WorkPackageClaim.{
@@ -29,10 +30,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @issue_id "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @state_root "/srv/dahlia-runner-state"
   @local_receipt_fields ~w(assignmentDigest assignmentSHA256 completedAt contractVersion evidenceRef expected generation issueId nonce observationSHA256 pool postconditions postimages preimages proofSHA256 reservationId transactionId)
+  @local_receipt_fields_v2 ~w(assignmentDigest assignmentSHA256 assignmentSnapshotState completedAt contractVersion evidenceRef expected generation issueId nonce observationSHA256 pool postconditions postimages preimages proofSHA256 reservationId transactionId)
   @state_file_metadata [:major_device, :minor_device, :inode, :uid, :gid, :mode, :links, :size, :mtime, :ctime]
   @marker_version "work-package-hgs740-local-transition.v1"
+  @marker_version_v2 "work-package-hgs740-local-transition.v2"
   @receipt_version "work-package-hgs740-local-transition-receipt.v1"
+  @receipt_version_v2 "work-package-hgs740-local-transition-receipt.v2"
   @receipt_domain "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v1\0"
+  @receipt_domain_v2 "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v2\0"
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
   @state_names ~w(claimJournal fence responsibilityGraph)
   @type result :: {:ok, :applied | :already_applied} | {:error, term()}
@@ -272,7 +277,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @doc false
   @spec local_receipt_payload(map()) :: map()
   def local_receipt_payload(fields) when is_map(fields) do
-    Map.merge(fields, %{"contractVersion" => @receipt_version})
+    version = if fields["assignmentSnapshotState"] == "absent", do: @receipt_version_v2, else: @receipt_version
+    Map.put(fields, "contractVersion", version)
   end
 
   @doc false
@@ -294,10 +300,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @spec local_receipt_bytes_valid?(binary(), binary(), map()) :: boolean()
   def local_receipt_bytes_valid?(payload_bytes, candidate_bytes, marker)
       when is_binary(payload_bytes) and is_binary(candidate_bytes) and is_map(marker) do
+    {receipt_version, receipt_fields, _receipt_domain} = receipt_contract(marker)
+
     with {:ok, payload} when is_map(payload) <- Jason.decode(payload_bytes),
          true <- ConfirmedRecoveryEvidence.canonical_json(payload) == payload_bytes,
-         true <- Enum.sort(Map.keys(payload)) == Enum.sort(@local_receipt_fields),
+         true <- Enum.sort(Map.keys(payload)) == Enum.sort(receipt_fields),
          true <- payload_bytes == candidate_bytes,
+         true <- payload["contractVersion"] == receipt_version,
+         true <- payload["assignmentSnapshotState"] == marker["assignmentSnapshotState"],
          true <- timestamp?(payload["completedAt"]),
          true <- payload["completedAt"] == marker["completedAt"] do
       true
@@ -309,6 +319,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   def local_receipt_bytes_valid?(_payload_bytes, _candidate_bytes, _marker), do: false
+
+  defp receipt_contract(%{"contractVersion" => @marker_version_v2}),
+    do: {@receipt_version_v2, @local_receipt_fields_v2, @receipt_domain_v2}
+
+  defp receipt_contract(%{"contractVersion" => @marker_version}),
+    do: {@receipt_version, @local_receipt_fields, @receipt_domain}
+
+  defp receipt_contract(_marker), do: {@receipt_version, @local_receipt_fields, @receipt_domain}
 
   @doc false
   @spec decode_provider_response(binary()) :: {:ok, map()} | {:error, :invalid_provider_response_json}
@@ -425,21 +443,41 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
 
   if Mix.env() == :test do
     defp observe_kubernetes(marker, candidate, runtime) do
-      claim = Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
-      cluster = candidate["kubernetes"]["cluster"]
-
-      case Map.get(runtime.host_ops, :observe_kubernetes_for_test) do
-        callback when is_function(callback, 2) -> callback.(claim, cluster)
-        _ -> ConfirmedRecoveryKubernetes.observe(claim, cluster)
-      end
+      observe_fresh_kubernetes(marker, candidate, runtime)
     end
   else
     defp observe_kubernetes(marker, candidate, _runtime) do
-      ConfirmedRecoveryKubernetes.observe(
-        Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"]),
-        candidate["kubernetes"]["cluster"]
-      )
+      observe_with_marker_contract(marker, candidate["kubernetes"]["cluster"])
     end
+  end
+
+  defp observe_fresh_kubernetes(marker, observation, runtime) do
+    claim = marker_claim(marker)
+    cluster = observation["kubernetes"]["cluster"]
+
+    case Map.get(runtime.host_ops, :observe_kubernetes_for_test) do
+      callback when is_function(callback, 2) -> callback.(claim, cluster)
+      _ -> observe_with_marker_contract(marker, cluster)
+    end
+  end
+
+  defp observe_with_marker_contract(%{"contractVersion" => @marker_version_v2} = marker, cluster) do
+    ConfirmedRecoveryKubernetes.observe_without_assignment_snapshot(marker_claim(marker), cluster)
+  end
+
+  defp observe_with_marker_contract(%{"contractVersion" => @marker_version} = marker, cluster) do
+    ConfirmedRecoveryKubernetes.observe(marker_claim(marker), cluster)
+  end
+
+  defp observe_with_marker_contract(_marker, _cluster),
+    do: {:error, :kubernetes_observation_unavailable}
+
+  defp marker_claim(marker) do
+    claim = Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
+
+    if marker["contractVersion"] == @marker_version_v2,
+      do: Map.put(claim, "assignmentSnapshotState", "absent"),
+      else: claim
   end
 
   defp read_candidate(issue_id, marker, runtime) do
@@ -624,6 +662,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          reservation when is_map(reservation) <- paths.journal.state.reservations[key],
          %{dispatch: %{phase: "recovery_pending", allocation_id: nil}} <- reservation,
          true <- current_claim(paths.journal.state, expected) == expected,
+         :ok <- marker_snapshot_contract_in_bytes(marker, paths.journal.bytes),
          :ok <- ConfirmedRecoveryLineage.released_fence_lease(paths.fence.state, issue_id, expected),
          :ok <-
            ConfirmedRecoveryLineage.released_graph_lease(
@@ -743,11 +782,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          :ok <- verify_local_claim(paths, proof_payload, runtime),
          {:ok, postimages} <- prepare_postimages(paths, proof_payload, runtime, marker["verificationNowMs"]),
          true <- postimages_match_marker?(postimages, marker),
-         {:ok, _snapshot} <-
-           ConfirmedRecoveryKubernetes.observe(
-             Map.put(observation["expected"], "assignmentSHA256", proof_payload["assignmentSHA256"]),
-             observation["kubernetes"]["cluster"]
-           ),
+         {:ok, _snapshot} <- observe_fresh_kubernetes(marker, observation, runtime),
          true <- digest(observation_bytes) == marker["observationSHA256"],
          true <- digest(proof_bytes) == marker["proofSHA256"] do
       :ok
@@ -806,6 +841,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          bindings <- proof_bindings(payload_hint, marker["pool"], marker["issueId"], marker["nonce"], paths, marker["verificationNowMs"]),
          {:ok, payload} <- host(paths.runtime, :verify_signed_evidence, [proof_bytes, bindings]),
          true <- payload["observation"] == observation,
+         true <- marker_version(payload) == marker["contractVersion"],
+         true <- payload["assignmentSnapshotState"] == marker["assignmentSnapshotState"],
          true <- payload["assignmentSHA256"] == marker["assignmentSHA256"],
          true <- "sha256:" <> digest(observation_bytes) == marker["evidenceRef"] do
       {:ok, observation, observation_bytes, proof_bytes, payload}
@@ -854,7 +891,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @doc false
   @spec proof_bindings(map(), String.t(), String.t(), String.t(), map(), integer()) :: map()
   def proof_bindings(payload, pool, issue_id, nonce, paths, now_ms) do
-    %{
+    bindings = %{
       pool: pool,
       issue_id: issue_id,
       generation: 2,
@@ -866,6 +903,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       responsibility_graph_sha256: digest(paths.graph.bytes),
       now_ms: now_ms
     }
+
+    if payload["contractVersion"] == "work-package-paused-confirmed-recovery.v2",
+      do: Map.put(bindings, :assignment_snapshot_state, "absent"),
+      else: bindings
   end
 
   defp decode_proof_payload(proof_bytes) do
@@ -1171,6 +1212,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          %{dispatch: %{phase: "confirmed", allocation_id: nil}} <- reservation,
          true <- map_size(Map.get(reservation, :failed_worker_turns, %{})) == 0,
          true <- map_size(Map.get(reservation, :cleanup_receipts, %{})) == 0,
+         :ok <- local_snapshot_contract(paths, reservation, payload, expected),
          :ok <- exact_local_predecessor(paths, payload["observation"]["predecessorRetirement"], expected),
          :ok <- exact_active_fence(paths.fence.state, issue_id, expected),
          :ok <- exact_active_runtime_lease(paths.graph.state, expected),
@@ -1179,6 +1221,71 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     else
       _ -> {:error, :confirmed_claim_precondition_changed}
     end
+  end
+
+  defp local_snapshot_contract(
+         paths,
+         reservation,
+         %{
+           "contractVersion" => "work-package-paused-confirmed-recovery.v1",
+           "assignmentSHA256" => assignment_sha,
+           "issueId" => issue_id
+         },
+         expected
+       )
+       when is_binary(assignment_sha) do
+    key = Journal.reservation_key(issue_id, expected["managedProjectProfileId"], expected["repositoryRef"], 2)
+
+    with :present <- Journal.assignment_snapshot_state(paths.journal.bytes, key),
+         :ok <- assignment_snapshot_matches?(reservation, assignment_sha) do
+      :ok
+    else
+      _ -> {:error, :confirmed_claim_precondition_changed}
+    end
+  rescue
+    _ -> {:error, :confirmed_claim_precondition_changed}
+  end
+
+  defp local_snapshot_contract(
+         paths,
+         reservation,
+         %{
+           "contractVersion" => "work-package-paused-confirmed-recovery.v2",
+           "assignmentSnapshotState" => "absent",
+           "assignmentSHA256" => nil,
+           "issueId" => issue_id
+         },
+         expected
+       ) do
+    key = Journal.reservation_key(issue_id, expected["managedProjectProfileId"], expected["repositoryRef"], 2)
+
+    with true <- is_nil(Map.get(reservation, :assignment_snapshot)),
+         :absent <- Journal.assignment_snapshot_state(paths.journal.bytes, key) do
+      :ok
+    else
+      _ -> {:error, :confirmed_claim_precondition_changed}
+    end
+  end
+
+  defp local_snapshot_contract(_paths, _reservation, _payload, _expected),
+    do: {:error, :confirmed_claim_precondition_changed}
+
+  defp assignment_snapshot_matches?(reservation, assignment_sha) do
+    with snapshot when is_binary(snapshot) <- Map.get(reservation, :assignment_snapshot),
+         {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(snapshot),
+         lease = assignment.lease,
+         true <- assignment.sha256 == assignment_sha,
+         true <- lease.issue_id == reservation.issue_id,
+         true <- lease.repository == reservation.repository_ref,
+         true <- lease.generation == reservation.generation,
+         true <- lease.session_id == reservation.session_id,
+         true <- lease.process_id == reservation.process_id do
+      :ok
+    else
+      _ -> {:error, :confirmed_claim_precondition_changed}
+    end
+  rescue
+    _ -> {:error, :confirmed_claim_precondition_changed}
   end
 
   defp current_claim(journal, expected) do
@@ -1346,8 +1453,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       proof_now_ms: now_ms
     } = context
 
-    %{
-      "contractVersion" => @marker_version,
+    marker = %{
+      "contractVersion" => marker_version(proof_payload),
       "issueId" => issue_id,
       "pool" => pool,
       "generation" => 2,
@@ -1378,6 +1485,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
           {name, %{bytes: bytes}} -> {name, %{"sha256" => digest(bytes), "bytes" => Base.url_encode64(bytes, padding: false)}}
         end)
     }
+
+    if proof_payload["contractVersion"] == "work-package-paused-confirmed-recovery.v2",
+      do: Map.put(marker, "assignmentSnapshotState", "absent"),
+      else: marker
   end
 
   defp apply_marker(marker, marker_path, runtime) do
@@ -1406,7 +1517,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       {"responsibilityGraph", runtime.responsibility_graph_path, "responsibilityGraphSHA256"}
     ]
 
-    if Enum.all?(current, &current_image_valid?(&1, marker, runtime)) and validate_state_directories(marker, runtime) == :ok do
+    if Enum.all?(current, &current_image_valid?(&1, marker, runtime)) and
+         marker_snapshot_contract_for_live_journal?(marker, runtime) and
+         validate_state_directories(marker, runtime) == :ok do
       :ok
     else
       {:error, :transaction_preimage_changed}
@@ -1504,7 +1617,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       "responsibilityGraph" => runtime.responsibility_graph_path
     }
 
-    if validate_state_directories(marker, runtime) == :ok and Enum.all?(paths, &postimage_matches?(&1, marker, runtime)) do
+    if validate_state_directories(marker, runtime) == :ok and
+         Enum.all?(paths, &postimage_matches?(&1, marker, runtime)) and
+         marker_snapshot_contract_for_live_journal?(marker, runtime) do
       :ok
     else
       {:error, :hgs740_postimage_mismatch}
@@ -1518,6 +1633,49 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
+  defp marker_snapshot_contract_for_live_journal?(marker, runtime) do
+    case read_state_file(runtime.journal_path, marker["stateOwnership"]["claimJournal"]["uid"], runtime) do
+      {:ok, bytes} -> marker_snapshot_contract_in_bytes(marker, bytes) == :ok
+      _ -> false
+    end
+  end
+
+  defp marker_snapshot_contract_in_bytes(%{"contractVersion" => @marker_version_v2} = marker, bytes) do
+    expected = marker["expected"]
+    key = Journal.reservation_key(marker["issueId"], expected["managedProjectProfileId"], expected["repositoryRef"], 2)
+
+    case Journal.assignment_snapshot_state(bytes, key) do
+      :absent -> :ok
+      _ -> {:error, :assignment_snapshot_present}
+    end
+  end
+
+  defp marker_snapshot_contract_in_bytes(
+         %{
+           "contractVersion" => @marker_version,
+           "assignmentSHA256" => assignment_sha
+         } = marker,
+         bytes
+       )
+       when is_binary(assignment_sha) do
+    expected = marker["expected"]
+    key = Journal.reservation_key(marker["issueId"], expected["managedProjectProfileId"], expected["repositoryRef"], 2)
+
+    with :present <- Journal.assignment_snapshot_state(bytes, key),
+         {:ok, journal} <- Journal.decode_bytes(bytes),
+         reservation when is_map(reservation) <- journal.reservations[key],
+         true <- current_claim(journal, expected) == expected,
+         :ok <- assignment_snapshot_matches?(reservation, assignment_sha) do
+      :ok
+    else
+      _ -> {:error, :assignment_snapshot_changed}
+    end
+  rescue
+    _ -> {:error, :assignment_snapshot_changed}
+  end
+
+  defp marker_snapshot_contract_in_bytes(_marker, _bytes), do: {:error, :invalid_recovery_contract}
+
   defp set_marker_applied(%{"status" => "local_applied"} = marker, _path, _runtime), do: {:ok, marker}
 
   defp set_marker_applied(marker, path, runtime) do
@@ -1530,38 +1688,44 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp publish_local_candidate(marker, _marker_path, runtime) do
-    expected =
-      local_receipt_payload(%{
-        "pool" => marker["pool"],
-        "issueId" => marker["issueId"],
-        "generation" => 2,
-        "reservationId" => marker["reservationId"],
-        "assignmentSHA256" => marker["assignmentSHA256"],
-        "assignmentDigest" => ConfirmedRecoveryEvidence.tuple_digest(marker["expected"]),
-        "expected" => marker["expected"],
-        "nonce" => marker["nonce"],
-        "transactionId" => marker["nonce"],
-        "evidenceRef" => marker["evidenceRef"],
-        "observationSHA256" => marker["observationSHA256"],
-        "proofSHA256" => marker["proofSHA256"],
-        "preimages" => %{
-          "claimJournalSHA256" => marker["preimages"]["claimJournalSHA256"],
-          "fenceSHA256" => marker["preimages"]["fenceSHA256"],
-          "responsibilityGraphSHA256" => marker["preimages"]["responsibilityGraphSHA256"]
-        },
-        "postimages" => %{
-          "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
-          "fenceSHA256" => marker["postimages"]["fence"]["sha256"],
-          "responsibilityGraphSHA256" => marker["postimages"]["responsibilityGraph"]["sha256"]
-        },
-        "postconditions" => %{
-          "dispatchPhase" => "recovery_pending",
-          "executionLeaseStatus" => "released",
-          "executionReleaseReason" => "spawn_failed",
-          "responsibilityRuntimeLeaseStatus" => "released"
-        },
-        "completedAt" => marker["completedAt"]
-      })
+    receipt_fields = %{
+      "pool" => marker["pool"],
+      "issueId" => marker["issueId"],
+      "generation" => 2,
+      "reservationId" => marker["reservationId"],
+      "assignmentSHA256" => marker["assignmentSHA256"],
+      "assignmentDigest" => ConfirmedRecoveryEvidence.tuple_digest(marker["expected"]),
+      "expected" => marker["expected"],
+      "nonce" => marker["nonce"],
+      "transactionId" => marker["nonce"],
+      "evidenceRef" => marker["evidenceRef"],
+      "observationSHA256" => marker["observationSHA256"],
+      "proofSHA256" => marker["proofSHA256"],
+      "preimages" => %{
+        "claimJournalSHA256" => marker["preimages"]["claimJournalSHA256"],
+        "fenceSHA256" => marker["preimages"]["fenceSHA256"],
+        "responsibilityGraphSHA256" => marker["preimages"]["responsibilityGraphSHA256"]
+      },
+      "postimages" => %{
+        "claimJournalSHA256" => marker["postimages"]["claimJournal"]["sha256"],
+        "fenceSHA256" => marker["postimages"]["fence"]["sha256"],
+        "responsibilityGraphSHA256" => marker["postimages"]["responsibilityGraph"]["sha256"]
+      },
+      "postconditions" => %{
+        "dispatchPhase" => "recovery_pending",
+        "executionLeaseStatus" => "released",
+        "executionReleaseReason" => "spawn_failed",
+        "responsibilityRuntimeLeaseStatus" => "released"
+      },
+      "completedAt" => marker["completedAt"]
+    }
+
+    receipt_fields =
+      if marker["contractVersion"] == @marker_version_v2,
+        do: Map.put(receipt_fields, "assignmentSnapshotState", "absent"),
+        else: receipt_fields
+
+    expected = local_receipt_payload(receipt_fields)
 
     path = Path.join(marker_directory(marker["issueId"], runtime), "local-transition-candidate.json")
     bytes = ConfirmedRecoveryEvidence.canonical_json(expected)
@@ -1574,15 +1738,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp marker_postimages_valid(marker) when is_map(marker) do
+    marker_version = marker["contractVersion"]
+
     valid? =
-      ConfirmedRecoveryStateMachine.valid_marker_images?(
-        marker,
-        @marker_version,
-        @state_names,
-        &valid_state_ownership?/1,
-        &marker_preimage_for(marker, &1),
-        &digest/1
-      )
+      valid_marker_snapshot_contract?(marker) and
+        ConfirmedRecoveryStateMachine.valid_marker_images?(
+          marker,
+          marker_version,
+          @state_names,
+          &valid_state_ownership?/1,
+          &marker_preimage_for(marker, &1),
+          &digest/1
+        )
 
     if valid?, do: :ok, else: {:error, :invalid_hgs740_marker}
   end
@@ -1638,7 +1805,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp valid_state_directory_records?(_directories, _owner), do: false
 
   defp validate_marker_identity(marker, issue_id, pool, nonce) do
-    with true <- marker["contractVersion"] == @marker_version,
+    with true <- valid_marker_snapshot_contract?(marker),
          true <- marker["issueId"] == issue_id,
          true <- marker["pool"] == pool,
          true <- marker["nonce"] == nonce,
@@ -1649,6 +1816,34 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       _ -> {:error, :hgs740_marker_identity_mismatch}
     end
   end
+
+  defp marker_version(%{"contractVersion" => "work-package-paused-confirmed-recovery.v2"}),
+    do: @marker_version_v2
+
+  defp marker_version(%{"contractVersion" => "work-package-paused-confirmed-recovery.v1"}),
+    do: @marker_version
+
+  defp marker_version(_payload), do: nil
+
+  defp valid_marker_snapshot_contract?(
+         %{
+           "contractVersion" => @marker_version,
+           "assignmentSHA256" => assignment_sha
+         } = marker
+       )
+       when is_binary(assignment_sha) do
+    Regex.match?(~r/\A[0-9a-f]{64}\z/, assignment_sha) and
+      not Map.has_key?(marker, "assignmentSnapshotState")
+  end
+
+  defp valid_marker_snapshot_contract?(%{
+         "contractVersion" => @marker_version_v2,
+         "assignmentSnapshotState" => "absent",
+         "assignmentSHA256" => nil
+       }),
+       do: true
+
+  defp valid_marker_snapshot_contract?(_marker), do: false
 
   defp verify_all_markers(runtime) do
     root = runtime.host_ops.paths.evidence_root
@@ -1755,6 +1950,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     directory = marker_directory(issue_id, runtime)
     path = Path.join(directory, "local-transition-receipt.json")
     candidate_path = Path.join(directory, "local-transition-candidate.json")
+    {receipt_version, receipt_fields, receipt_domain} = receipt_contract(marker)
 
     with {:ok, bytes} <- read_trusted_evidence(path, runtime),
          {:ok, candidate_bytes} <- read_trusted_evidence(candidate_path, runtime),
@@ -1764,12 +1960,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          {:ok, signature} <- Base.url_decode64(envelope["signature"], padding: false),
          {:ok, public_key} <- host0(runtime, :read_public_key),
          true <- ConfirmedRecoveryEvidence.canonical_json(envelope) == bytes,
-         true <- :crypto.verify(:eddsa, :none, @receipt_domain <> payload_bytes, signature, [public_key, :ed25519]),
+         true <- is_binary(receipt_domain),
+         true <- :crypto.verify(:eddsa, :none, receipt_domain <> payload_bytes, signature, [public_key, :ed25519]),
          {:ok, payload} when is_map(payload) <- Jason.decode(payload_bytes),
          true <- ConfirmedRecoveryEvidence.canonical_json(payload) == payload_bytes,
          true <- payload_bytes == candidate_bytes,
-         true <- Enum.sort(Map.keys(payload)) == Enum.sort(@local_receipt_fields),
-         true <- payload["contractVersion"] == @receipt_version,
+         true <- Enum.sort(Map.keys(payload)) == Enum.sort(receipt_fields),
+         true <- payload["contractVersion"] == receipt_version,
+         true <- payload["assignmentSnapshotState"] == marker["assignmentSnapshotState"],
          true <- payload["issueId"] == issue_id and payload["pool"] == marker["pool"],
          true <- payload["generation"] == 2 and payload["reservationId"] == marker["reservationId"],
          true <- payload["nonce"] == marker["nonce"] and payload["transactionId"] == marker["nonce"],

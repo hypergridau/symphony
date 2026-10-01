@@ -177,6 +177,51 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetesTest do
     Agent.stop(calls)
   end
 
+  test "absent-snapshot readback requires the explicit state, null hash, and complete inventories" do
+    cluster = %{"apiServer" => "https://10.0.14.10:6443", "caSha256" => String.duplicate("c", 64)}
+    claim = Map.put(@claim, "assignmentSnapshotState", "absent") |> Map.put("assignmentSHA256", nil)
+    parent = self()
+
+    context = fn received ->
+      send(parent, {:context, received})
+      {:ok, :synthetic_context, cluster["caSha256"]}
+    end
+
+    jobs = fn "frigga", :synthetic_context -> {:ok, %{items: [], resource_version: "21"}} end
+    pods = fn "frigga", :synthetic_context -> {:ok, %{items: [], resource_version: "22"}} end
+
+    assert {:ok, observation} =
+             ConfirmedRecoveryKubernetes.observe_without_assignment_snapshot_with_test_adapter(
+               claim,
+               cluster,
+               context,
+               jobs,
+               pods
+             )
+
+    assert observation["jobs"]["claimAbsent"]
+    assert observation["pods"]["claimAbsent"]
+    assert_received {:context, ^claim}
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe_without_assignment_snapshot_with_test_adapter(
+               Map.delete(claim, "assignmentSnapshotState"),
+               cluster,
+               fn _ -> flunk("missing explicit state must deny before credentials") end,
+               jobs,
+               pods
+             )
+
+    assert {:error, :kubernetes_observation_unavailable} =
+             ConfirmedRecoveryKubernetes.observe_with_test_adapter(
+               claim,
+               cluster,
+               fn _ -> flunk("v1 observer must reject v2 null shape") end,
+               jobs,
+               pods
+             )
+  end
+
   test "readback stops at a retained Job, retained Pod, or wrong CA before terminal evidence" do
     cluster = %{"apiServer" => "https://10.0.14.10:6443", "caSha256" => String.duplicate("c", 64)}
     parent = self()
