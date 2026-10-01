@@ -3,8 +3,9 @@ defmodule SymphonyElixir.CLI do
   Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
   """
 
-  alias SymphonyElixir.{LogFile, ResponsibilityBootstrap}
+  alias SymphonyElixir.{LogFile, ResponsibilityBootstrap, UnsubmittedSuccessorRetirement}
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
   @activation_switch :activate_responsibility_graph
@@ -27,12 +28,193 @@ defmodule SymphonyElixir.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(args) do
-    case args do
-      ["--assignment-json" | _worker_args] -> WorkerCLI.main(args)
-      ["--verify-auth-cache"] -> WorkerCLI.main(args)
-      _ -> main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    if Enum.any?(args, &(&1 in ["--verify-hgs740-startup", "--verify-hgs740-issuer-context", "--apply-hgs740-confirmed-recovery", "--complete-hgs740-recovery", "--issue-hgs740-confirmed-recovery"])) do
+      dispatch_hgs740(args)
+    else
+      if "--retire-unsubmitted-successor" in args do
+        dispatch_or_start(args)
+      else
+        dispatch_regular(args)
+      end
     end
   end
+
+  @spec dispatch_hgs740([String.t()]) :: no_return()
+  defp dispatch_hgs740(args) do
+    result =
+      cond do
+        "--issue-hgs740-confirmed-recovery" in args ->
+          evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
+
+        "--verify-hgs740-issuer-context" in args ->
+          evaluate_hgs740_issuer_context(args, &ConfirmedRecoveryTransaction.verify_issuer_context/2)
+
+        true ->
+          evaluate_hgs740(
+            args,
+            &ConfirmedRecoveryTransaction.verify_startup/2,
+            &ConfirmedRecoveryTransaction.apply/4,
+            &ConfirmedRecoveryTransaction.complete/3
+          )
+      end
+
+    case result do
+      :ok ->
+        System.halt(0)
+
+      {:error, reason} ->
+        IO.puts(:stderr, "HGS-740 recovery guard held closed: #{reason}")
+        System.halt(1)
+    end
+  end
+
+  @doc false
+  @spec evaluate_hgs740_issuer_context([String.t()], (String.t(), String.t() -> term())) :: :ok | {:error, String.t()}
+  def evaluate_hgs740_issuer_context(args, verify_context) when is_function(verify_context, 2) do
+    case args do
+      ["--verify-hgs740-issuer-context", "--workflow", workflow_path, pool] ->
+        normalize_hgs740_result(verify_context.(workflow_path, pool))
+
+      _ ->
+        {:error, "Usage: symphony --verify-hgs740-issuer-context --workflow <trusted-WORKFLOW.md> <pool-key>"}
+    end
+  end
+
+  @doc false
+  @spec evaluate_hgs740(
+          [String.t()],
+          (String.t(), String.t() -> :ok | {:error, term()}),
+          (String.t(), String.t(), String.t(), String.t() -> term()),
+          (String.t(), String.t(), String.t() -> term())
+        ) ::
+          :ok | {:ok, term()} | {:error, String.t()}
+  def evaluate_hgs740(args, verify_startup, apply_recovery, complete_recovery)
+      when is_list(args) and is_function(verify_startup, 2) and is_function(apply_recovery, 4) and
+             is_function(complete_recovery, 3) do
+    case args do
+      ["--verify-hgs740-startup", "--workflow", workflow_path, pool] ->
+        normalize_hgs740_result(verify_startup.(workflow_path, pool))
+
+      ["--apply-hgs740-confirmed-recovery", "--workflow", workflow_path, "--nonce", nonce, issue_id, pool] ->
+        normalize_hgs740_result(apply_recovery.(issue_id, pool, workflow_path, nonce))
+
+      ["--complete-hgs740-recovery", "--workflow", workflow_path, issue_id, pool] ->
+        normalize_hgs740_result(complete_recovery.(issue_id, pool, workflow_path))
+
+      _ ->
+        {:error,
+         "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+    end
+  end
+
+  def evaluate_hgs740(_args, _verify_startup, _apply_recovery, _complete_recovery),
+    do:
+      {:error,
+       "Usage: symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key> | symphony --apply-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> <issue-uuid> <pool-key> | symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md> <issue-uuid> <pool-key>"}
+
+  @doc false
+  @spec evaluate_hgs740_issue([String.t()], (String.t(), String.t(), String.t(), String.t(), String.t() -> term())) ::
+          :ok | {:error, String.t()}
+  def evaluate_hgs740_issue(args, issue_recovery) when is_list(args) and is_function(issue_recovery, 5) do
+    case args do
+      ["--issue-hgs740-confirmed-recovery", "--workflow", workflow_path, "--nonce", nonce, "--bundle", bundle_path, issue_id, pool] ->
+        normalize_hgs740_result(issue_recovery.(issue_id, pool, workflow_path, nonce, bundle_path))
+
+      _ ->
+        {:error, "Usage: symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>"}
+    end
+  end
+
+  def evaluate_hgs740_issue(_args, _issue_recovery),
+    do: {:error, "Usage: symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>"}
+
+  defp normalize_hgs740_result(:ok), do: :ok
+  defp normalize_hgs740_result({:ok, _value}), do: :ok
+  defp normalize_hgs740_result({:error, reason}), do: {:error, safe_hgs740_reason(reason)}
+  defp normalize_hgs740_result(_other), do: {:error, "invalid_result"}
+
+  defp safe_hgs740_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_hgs740_reason({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_hgs740_reason(_reason), do: "invalid_authority_or_evidence"
+
+  @spec dispatch_regular([String.t()]) :: no_return()
+  defp dispatch_regular(args) do
+    case args do
+      ["--assignment-json" | _worker_args] ->
+        WorkerCLI.main(args)
+
+      ["--verify-auth-cache"] ->
+        WorkerCLI.main(args)
+
+      _ ->
+        main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
+    end
+  end
+
+  @doc false
+  @spec dispatch_unsubmitted_successor_retirement(
+          [String.t()],
+          (-> ensure_started_result()),
+          (String.t(), String.t() -> {:ok, :retired | :already_retired} | {:error, term()})
+        ) ::
+          {:retirement, {:ok, :retired | :already_retired} | {:error, String.t()}}
+          | {:normal, (-> ensure_started_result())}
+  def dispatch_unsubmitted_successor_retirement(args, ensure_all_started, execute)
+      when is_list(args) and is_function(ensure_all_started, 0) and is_function(execute, 2) do
+    if "--retire-unsubmitted-successor" in args do
+      {:retirement, evaluate_unsubmitted_successor_retirement(args, execute)}
+    else
+      {:normal, ensure_all_started}
+    end
+  end
+
+  @spec dispatch_or_start([String.t()]) :: no_return()
+  defp dispatch_or_start(args) do
+    case dispatch_unsubmitted_successor_retirement(
+           args,
+           fn -> Application.ensure_all_started(:symphony_elixir) end,
+           &UnsubmittedSuccessorRetirement.execute/2
+         ) do
+      {:retirement, {:ok, result}} ->
+        IO.puts("unsubmitted successor retirement #{result}")
+        System.halt(0)
+
+      {:retirement, {:error, reason}} ->
+        IO.puts(:stderr, "unsubmitted successor retirement held closed: #{reason}")
+        System.halt(1)
+
+      {:normal, ensure_all_started} ->
+        main(args, ensure_all_started)
+    end
+  end
+
+  @doc false
+  @spec evaluate_unsubmitted_successor_retirement(
+          [String.t()],
+          (String.t(), String.t() -> {:ok, :retired | :already_retired} | {:error, term()})
+        ) :: {:ok, :retired | :already_retired} | {:error, String.t()}
+  def evaluate_unsubmitted_successor_retirement(
+        ["--retire-unsubmitted-successor", "--workflow", workflow_path, identifier],
+        execute
+      )
+      when is_function(execute, 2) do
+    case execute.(identifier, workflow_path) do
+      {:ok, result} when result in [:retired, :already_retired] -> {:ok, result}
+      {:error, reason} -> {:error, safe_retirement_reason(reason)}
+      _ -> {:error, retirement_usage_message()}
+    end
+  end
+
+  def evaluate_unsubmitted_successor_retirement(_args, _execute),
+    do: {:error, retirement_usage_message()}
+
+  defp retirement_usage_message do
+    "Usage: symphony --retire-unsubmitted-successor --workflow <trusted-absolute-path> <issue-identifier>"
+  end
+
+  defp safe_retirement_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_retirement_reason({reason, _detail}) when is_atom(reason), do: Atom.to_string(reason)
+  defp safe_retirement_reason(_reason), do: "invalid_authority_or_evidence"
 
   @doc false
   @spec main([String.t()], (-> ensure_started_result())) :: no_return()
@@ -109,25 +291,24 @@ defmodule SymphonyElixir.CLI do
   end
 
   defp maybe_activate_responsibility_graph(opts, deps) do
-    if Keyword.get(opts, @activation_switch, false) do
-      case Map.get(deps, :activate_responsibility_graph) do
-        callback when is_function(callback, 1) ->
-          case callback.(System.system_time(:millisecond)) do
-            :ok ->
-              :ok
+    case {Keyword.get(opts, @activation_switch, false), Map.get(deps, :activate_responsibility_graph)} do
+      {false, _callback} ->
+        :ok
 
-            {:error, reason} ->
-              {:error, "Failed to activate responsibility graph: #{inspect(reason)}"}
+      {true, callback} when is_function(callback, 1) ->
+        case callback.(System.system_time(:millisecond)) do
+          :ok ->
+            :ok
 
-            result ->
-              {:error, "Failed to activate responsibility graph: #{inspect(result)}"}
-          end
+          {:error, reason} ->
+            {:error, "Failed to activate responsibility graph: #{inspect(reason)}"}
 
-        _ ->
-          {:error, "Responsibility graph activation is unavailable"}
-      end
-    else
-      :ok
+          result ->
+            {:error, "Failed to activate responsibility graph: #{inspect(result)}"}
+        end
+
+      {true, _callback} ->
+        {:error, "Responsibility graph activation is unavailable"}
     end
   end
 

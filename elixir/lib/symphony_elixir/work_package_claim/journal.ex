@@ -67,6 +67,24 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   @spec decode_bytes(binary()) :: {:ok, state()} | {:error, term()}
   def decode_bytes(contents) when is_binary(contents), do: decode(contents)
 
+  @doc false
+  @spec assignment_snapshot_state(binary(), String.t()) :: :absent | :present | {:error, :invalid_journal}
+  def assignment_snapshot_state(contents, reservation_key) when is_binary(contents) and is_binary(reservation_key) do
+    with {:ok, ordered} <- Jason.decode(contents, objects: :ordered_objects),
+         :ok <- validate_ordered_json(ordered),
+         document when is_map(document) <- ordered_json_to_term(ordered),
+         reservations when is_map(reservations) <- document["reservations"],
+         reservation when is_map(reservation) <- reservations[reservation_key] do
+      if Map.has_key?(reservation, "assignment_snapshot"), do: :present, else: :absent
+    else
+      _ -> {:error, :invalid_journal}
+    end
+  rescue
+    _ -> {:error, :invalid_journal}
+  end
+
+  def assignment_snapshot_state(_contents, _reservation_key), do: {:error, :invalid_journal}
+
   @spec put(state(), String.t(), reservation()) :: {:ok, state()} | {:error, term()}
   def put(%{schema_version: @schema_version, reservations: reservations} = state, key, reservation)
       when is_binary(key) and is_map(reservation) do
@@ -225,13 +243,40 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
   def save(path, %{schema_version: @schema_version, reservations: reservations} = state)
       when is_binary(path) and is_map(reservations) do
     with :ok <- validate(state),
-         {:ok, encoded} <- Jason.encode(encode_state(state)),
+         {:ok, encoded} <- encode_bytes(state),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- atomic_write(path, encoded) do
       _ = File.chmod(path, 0o600)
       :ok
     end
   end
+
+  @doc "Encodes a validated journal without writing it to disk."
+  @spec encode_bytes(state()) :: {:ok, binary()} | {:error, term()}
+  def encode_bytes(%{schema_version: @schema_version, reservations: reservations} = state)
+      when is_map(reservations) do
+    with :ok <- validate(state), do: Jason.encode(encode_state(state))
+  end
+
+  def encode_bytes(_state), do: {:error, :invalid_journal}
+
+  @doc "Runs one claim-journal transition under a process-wide lock for its exact path."
+  @spec with_lock(Path.t(), (-> result)) :: result | {:error, :claim_journal_lock_unavailable}
+        when result: term()
+  def with_lock(path, callback) when is_binary(path) and is_function(callback, 0) do
+    lock_id = {{__MODULE__, Path.expand(path)}, self()}
+
+    case :global.trans(lock_id, callback) do
+      {:aborted, _reason} -> {:error, :claim_journal_lock_unavailable}
+      result -> result
+    end
+  rescue
+    _error -> {:error, :claim_journal_lock_unavailable}
+  catch
+    _kind, _reason -> {:error, :claim_journal_lock_unavailable}
+  end
+
+  def with_lock(_path, _callback), do: {:error, :claim_journal_lock_unavailable}
 
   @spec validate(state()) :: :ok | {:error, term()}
   def validate(%{schema_version: @schema_version, reservations: reservations}) when is_map(reservations) do
@@ -254,6 +299,43 @@ defmodule SymphonyElixir.WorkPackageClaim.Journal do
       _ -> {:error, :invalid_journal}
     end
   end
+
+  defp validate_ordered_json(%Jason.OrderedObject{values: pairs}) do
+    keys = Enum.map(pairs, &elem(&1, 0))
+
+    if Enum.all?(keys, &is_binary/1) and length(keys) == length(Enum.uniq(keys)) do
+      validate_ordered_json_pairs(pairs)
+    else
+      {:error, :invalid_journal}
+    end
+  end
+
+  defp validate_ordered_json(values) when is_list(values) do
+    Enum.reduce_while(values, :ok, fn value, :ok ->
+      case validate_ordered_json(value) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp validate_ordered_json(_value), do: :ok
+
+  defp validate_ordered_json_pairs(pairs) do
+    Enum.reduce_while(pairs, :ok, fn {_key, value}, :ok ->
+      case validate_ordered_json(value) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp ordered_json_to_term(%Jason.OrderedObject{values: pairs}) do
+    Map.new(pairs, fn {key, value} -> {key, ordered_json_to_term(value)} end)
+  end
+
+  defp ordered_json_to_term(values) when is_list(values), do: Enum.map(values, &ordered_json_to_term/1)
+  defp ordered_json_to_term(value), do: value
 
   defp decode_state(%{"schema_version" => @schema_version, "reservations" => reservations}) when is_map(reservations) do
     decoded =

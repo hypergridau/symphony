@@ -12,7 +12,7 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
 
   import Bitwise, only: [&&&: 2]
 
-  @operations ~w(allocate activate delete abort_prepare abort_confirm finalize)a
+  @operations ~w(allocate activate delete abort_prepare abort_confirm finalize observe)a
   @max_token_bytes 16_384
   @digest ~r/\A[a-f0-9]{64}\z/
   @test_build Mix.env() == :test
@@ -60,6 +60,7 @@ defmodule SymphonyElixir.RKE2Job.HostClientContext do
 
   defp key_operation(:allocate), do: "allocation"
   defp key_operation(operation) when operation in [:abort_prepare, :abort_confirm], do: "abort_unstarted"
+  defp key_operation(:observe), do: "observe"
   defp key_operation(operation), do: Atom.to_string(operation)
 
   defp credential_root(%{credential_root: root}, owner_uid) when is_binary(root) do

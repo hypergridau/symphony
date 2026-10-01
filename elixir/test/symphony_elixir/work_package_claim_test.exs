@@ -6,6 +6,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
       {:ok, journal} = Journal.load(context.claim_journal_path)
       [reservation] = Map.values(journal.reservations)
       send(context.test_pid, {:allocation_snapshot_observed, reservation.assignment_snapshot})
+      send(context.test_pid, {:allocation_intent_observed, reservation.dispatch.phase, reservation.assignment_snapshot})
     end
 
     send(context.test_pid, {:allocation_requested, key})
@@ -70,6 +71,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
   @repository "hypergridau/symphony"
   @issue_id "issue-349"
   @profile "profile-349"
+  @assignment_binding_digest String.duplicate("b", 64)
 
   @canonical_json_fixture ~s({"contractVersion":"work-package-runtime-attestation.v1","runnerId":"runner-349","managedProjectProfileId":"profile-349","reservationId":"reservation-349","reservationNonce":"nonce-349","issueId":"issue-349","generation":1,"sessionId":"worker-349","processId":"process-349","responsibleDelegationId":"delegation-349","executionFenceToken":"issue-349:1","runtimeLeaseId":"worker-349","repositoryRef":"hypergridau/symphony","scopeKeys":["repo:hypergridau/symphony","work:349"],"attestedAt":"2026-09-06T10:00:00.000Z"})
 
@@ -240,6 +242,9 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
              )
 
     refute_receive {:allocation_requested, _key}
+    assert {:ok, unchanged_journal} = Journal.load(path)
+    [unchanged_reservation] = Map.values(unchanged_journal.reservations)
+    assert unchanged_reservation.dispatch.phase == "confirmed"
 
     assert {:ok, %{id: allocation_id, status: :ready}} =
              SuspendedController.allocate(assignment, input, context)
@@ -247,6 +252,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert allocation_id == "rke2job:v1:fixture-allocation"
     assert_receive {:allocation_snapshot_observed, snapshot}
     assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(snapshot)
+    assert_receive {:allocation_intent_observed, "allocation_pending", ^snapshot}
     assert_receive {:allocation_requested, allocation_key}
     assert allocation_key == assignment.sha256 <> ":allocation"
 
@@ -1615,14 +1621,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     {:ok, base} =
@@ -1633,12 +1640,15 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         "host-token"
       )
 
+    base = synthetic_assignment_binding(base)
+
     slot = %{
       slot_id: base.slot_id,
       claim_name: base.claim_name,
       claim_uid: "pvc-uid-one",
       lease_id: "12345678-1234-4123-8123-123456789abc",
       assignment_sha256: assignment.sha256,
+      binding_sha256: base.assignment_subject_digest,
       seat: assignment.seat
     }
 
@@ -1648,7 +1658,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         image: base.image,
         repository_id: base.repository_id,
         auth_slot: slot,
-        auth_slot_catalog: %{base.slot_id => base.claim_name}
+        auth_slot_catalog: %{base.slot_id => base.claim_name},
+        assignment_binding_digest: base.assignment_subject_digest
       })
 
     name = expected["metadata"]["name"]
@@ -1733,7 +1744,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :active
     assert {:ok, journal} = Journal.load(path)
     [reservation] = Map.values(journal.reservations)
-    assert reservation.dispatch.phase == "confirmed"
+    assert reservation.dispatch.phase == "allocation_pending"
     assert reservation.reservation_id == "reservation-349"
   end
 
@@ -1775,6 +1786,129 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
     assert reservation.dispatch.allocation_id == allocation_id
   end
 
+  test "host allocation context failure durably enters recovery before Job allocation" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+
+    issue = %Issue{
+      id: @issue_id,
+      identifier: "HGS-349",
+      title: "Host allocation context unavailable",
+      state: "Todo",
+      assignee_id: "owner",
+      dispatchable: true
+    }
+
+    host_config = %{
+      repository_ref: @repository,
+      client_context_fun: fn _assignment, :allocate, _key, _config ->
+        {:error, :synthetic_host_allocation_context_unavailable}
+      end
+    }
+
+    {blocked, _runtime} =
+      post_claim_revalidation_failure(path, issue, issue, disposable_rke2_host_config: host_config)
+
+    refute_receive {:allocation_requested, _key}
+    refute_receive {:activation_requested, _, _, _}
+    assert blocked.running == %{}
+    assert blocked.blocked[@issue_id].error =~ "rke2_host_allocation_context_unavailable"
+    assert blocked.execution_fence.executions[@issue_id].leases["worker-349"].status == :released
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "recovery_pending"
+    assert reservation.dispatch.allocation_id == nil
+    assert reservation.reservation_id == "reservation-349"
+  end
+
+  test "pre-allocation recovery cannot release the lease after a concurrent Job allocation wins" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
+    parent = self()
+
+    allocation =
+      Task.async(fn ->
+        WorkPackageClaim.allocate_suspended(input, assignment, fn ->
+          send(parent, :allocation_entered_locked_section)
+          receive do: (:continue_allocation -> :ok)
+          {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}}
+        end)
+      end)
+
+    assert_receive :allocation_entered_locked_section
+    assert {:ok, pending_journal} = Journal.load(path)
+    [pending_reservation] = Map.values(pending_journal.reservations)
+    assert pending_reservation.dispatch.phase == "allocation_pending"
+    assert {:ok, ^assignment} = ManagedAssignmentBundle.from_snapshot(pending_reservation.assignment_snapshot)
+
+    recovery = Task.async(fn -> WorkPackageClaim.begin_pre_allocation_recovery(input) end)
+    send(allocation.pid, :continue_allocation)
+
+    assert {:ok, %{id: "rke2job:v1:race-allocation", status: :ready}} = Task.await(allocation)
+    assert {:error, :preallocation_claim_state_changed} = Task.await(recovery)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_suspended"
+    assert reservation.dispatch.allocation_id == "rke2job:v1:race-allocation"
+  end
+
+  test "uncertain first allocation remains held and cannot enter pre-allocation recovery" do
+    path = temp_path()
+    on_exit(fn -> File.rm_rf(path) end)
+    %{input: input} = authority_fixture(path)
+
+    request_fun = fn url, _options ->
+      payload = if String.ends_with?(url, "/reservations/by-issue"), do: reservation_payload(), else: claim_result_payload()
+      {:ok, response(%{"data" => payload})}
+    end
+
+    assert {:ok, _claim} =
+             WorkPackageClaim.claim(input,
+               request_fun: request_fun,
+               now_fun: fn -> ~U[2026-09-06 10:00:00.000Z] end
+             )
+
+    assignment =
+      suspended_assignment(%{
+        issue_id: @issue_id,
+        repository: @repository,
+        generation: 1,
+        session_id: "worker-349",
+        process_id: "process-349"
+      })
+
+    assert {:held, :allocation_response_uncertain} =
+             WorkPackageClaim.allocate_suspended(input, assignment, fn -> {:held, :allocation_response_uncertain} end)
+
+    assert {:error, :preallocation_claim_state_changed} = WorkPackageClaim.begin_pre_allocation_recovery(input)
+    assert {:ok, journal} = Journal.load(path)
+    [reservation] = Map.values(journal.reservations)
+    assert reservation.dispatch.phase == "allocation_pending"
+    assert is_nil(reservation.dispatch.allocation_id)
+  end
+
   test "signed dispatch composes trusted host context before suspended allocation" do
     path = temp_path()
     on_exit(fn -> File.rm_rf(path) end)
@@ -1790,18 +1924,21 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     assert {:ok, config} =
              HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    config = synthetic_assignment_binding(config)
 
     caller = self()
 
@@ -2007,18 +2144,21 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
 
     env = %{
       "SYMPHONY_RKE2_API_SERVER" => "https://10.0.14.10:6443",
-      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => "/etc/symphony/frigga-kubernetes",
+      "SYMPHONY_RKE2_CREDENTIAL_ROOT" => Path.expand("/etc/symphony/frigga-kubernetes"),
       "SYMPHONY_RKE2_WORKER_IMAGE" => "ghcr.io/hypergridau/symphony-worker@sha256:" <> String.duplicate("a", 64),
       "SYMPHONY_RKE2_REPOSITORY_ID" => "123456789",
       "SYMPHONY_RKE2_AUTH_SLOT_ID" => "slot-one",
       "SYMPHONY_RKE2_AUTH_CLAIM_NAME" => "codex-oauth-slot-1",
-      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => "/private/symphony/job-results",
-      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => "/private/symphony/abort-prepares",
-      "SYMPHONY_RKE2_WORKSPACE_ROOT" => "/private/symphony/workspaces"
+      "SYMPHONY_RKE2_RESULT_JOURNAL_ROOT" => Path.expand("/private/symphony/job-results"),
+      "SYMPHONY_RKE2_ABORT_JOURNAL_ROOT" => Path.expand("/private/symphony/abort-prepares"),
+      "SYMPHONY_RKE2_WORKSPACE_ROOT" => Path.expand("/private/symphony/workspaces"),
+      "SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN" => "https://assignment-broker.example"
     }
 
     {:ok, base} =
       HostAllocationContext.configuration(env, %{repository_ref: @repository}, "https://provider.example", "host-token")
+
+    base = synthetic_assignment_binding(base)
 
     caller = self()
 
@@ -2615,6 +2755,7 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
       claim_uid: "pvc-uid-one",
       lease_id: "12345678-1234-4123-8123-123456789abc",
       assignment_sha256: assignment.sha256,
+      binding_sha256: base.assignment_subject_digest,
       seat: assignment.seat
     }
 
@@ -2624,7 +2765,8 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         image: base.image,
         repository_id: base.repository_id,
         auth_slot: slot,
-        auth_slot_catalog: %{base.slot_id => base.claim_name}
+        auth_slot_catalog: %{base.slot_id => base.claim_name},
+        assignment_binding_digest: base.assignment_subject_digest
       })
 
     name = expected["metadata"]["name"]
@@ -2648,6 +2790,57 @@ defmodule SymphonyElixir.WorkPackageClaimTest do
         Base.url_encode64(Jason.encode!([1, "frigga", name, uid, assignment.sha256]), padding: false)
 
     {allocation_id, job}
+  end
+
+  defp synthetic_assignment_binding(config) do
+    identifier = "HGS-349"
+    branch_ref = "refs/heads/hgs-349"
+
+    payload = %{
+      "schema_version" => 1,
+      "repository_ref" => @repository,
+      "entries" => [%{"issue_id" => @issue_id, "identifier" => identifier}]
+    }
+
+    bytes = Jason.encode!(payload)
+    {public_key, private_key} = :crypto.generate_key(:eddsa, :ed25519)
+
+    signature =
+      :crypto.sign(
+        :eddsa,
+        :none,
+        "hypergrid.symphony.managed-delegation.v1\0" <> bytes,
+        [private_key, :ed25519]
+      )
+
+    manifest = %{
+      repository_ref: @repository,
+      schema_version: 1,
+      entries: [%{issue_id: @issue_id, identifier: identifier}],
+      source_bytes: bytes,
+      source_signature_hex: Base.encode16(signature, case: :lower),
+      source_public_key_hex: Base.encode16(public_key, case: :lower),
+      source_sha256: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower),
+      signer_key_sha256: Base.encode16(:crypto.hash(:sha256, public_key), case: :lower)
+    }
+
+    post_fun = fn _url, _options ->
+      {:ok,
+       %Req.Response{
+         status: 200,
+         body: %{
+           "status" => "bound",
+           "assignmentDigest" => @assignment_binding_digest,
+           "branchRef" => branch_ref
+         }
+       }}
+    end
+
+    Map.merge(config, %{
+      managed_delegations: manifest,
+      assignment_subject_digest: @assignment_binding_digest,
+      assignment_bind_post_fun: post_fun
+    })
   end
 
   defp owned_spawn_pod(job) do

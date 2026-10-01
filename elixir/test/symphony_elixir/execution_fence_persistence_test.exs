@@ -68,6 +68,13 @@ defmodule SymphonyElixir.ExecutionFencePersistenceTest do
     assert Map.has_key?(restored.executions, "next")
   end
 
+  @tag skip: match?({:win32, _}, :os.type())
+  test "atomic save makes the fence snapshot private before replacing the target", %{path: path} do
+    assert :ok = Persistence.save(path, ExecutionFence.new())
+    assert {:ok, %File.Stat{mode: mode}} = File.stat(path)
+    assert Bitwise.band(mode, 0o777) == 0o600
+  end
+
   test "recovers a valid snapshot left beside a missing primary file", %{path: path} do
     {:ok, state, _token} = ExecutionFence.admit(ExecutionFence.new(), admission(), 100)
     assert :ok = Persistence.save(path, state)

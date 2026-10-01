@@ -347,7 +347,7 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     catalog = %{"slot-one" => "codex-home-one"}
 
     assert {:ok, slot} = DahliaAuthSlotLeaseGuard.prepare_slot(@assignment, "slot-one", catalog, context)
-    assert slot == @slot
+    assert slot == Map.put(@slot, :binding_sha256, @digest)
     assert_receive {:post, url, opts}
     assert String.ends_with?(url, "/reservation-one/codex-auth-slots/reserve")
     assert opts[:json] == %{assignmentDigest: @digest, slotId: "slot-one", claimUid: @pvc_uid}

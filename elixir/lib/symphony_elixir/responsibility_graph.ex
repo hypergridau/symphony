@@ -19,6 +19,7 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   @authority_classes [:routine_engineering, :coordination, :read_only, :exception]
   @efforts [:none, :minimal, :low, :medium, :high, :xhigh, :max, :ultra]
   @progress_models ["gpt-5.6-luna", "gpt-6-luna"]
+  @grant_digest_fields ~w(id parent_delegation_id role actor_id scope authority budget expires_at_ms expected_deliverable expected_evidence return_to_parent)a
   @scope_identifiers [:company_id, :objective_id, :initiative_id, :project_id, :work_package_id, :issue_id, :repository]
   @scope_collections [:paths, :modules, :environments, :actions]
 
@@ -237,6 +238,24 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   def release_runtime_lease(_state, _delegation_id, _runtime_lease, _now_ms),
     do: {:error, :invalid_runtime_lease_release}
 
+  @doc "Releases an exact restart-blocked lease after caller-verified confirmed recovery; authority remains blocked."
+  @spec release_restart_blocked_runtime_lease(state(), String.t(), map(), non_neg_integer()) ::
+          {:ok, state(), :released} | {:error, term()}
+  def release_restart_blocked_runtime_lease(state, id, lease, now_ms) do
+    with :ok <- validate_state(state),
+         {:ok, responsible} <- fetch_delegation(state, id),
+         :ok <- blocked_for_restart(responsible),
+         true <- responsible.role == :responsible and responsible.runtime_lease == lease,
+         {:ok, accountable} <- fetch_delegation(state, responsible.parent_delegation_id),
+         :ok <- blocked_for_restart(accountable),
+         true <- accountable.role == :accountable and is_nil(accountable.runtime_lease),
+         true <- no_active_successor_children?(state, id) do
+      release_bound_runtime_lease(state, id, responsible, now_ms)
+    else
+      _ -> {:error, :restart_blocked_runtime_lease_changed}
+    end
+  end
+
   @doc "Retires an expired delegation's exact lease with caller-verified never-submitted evidence."
   @spec retire_expired_unsubmitted(state(), String.t(), map() | nil, map(), non_neg_integer()) ::
           {:ok, state()} | {:error, term()}
@@ -259,6 +278,300 @@ defmodule SymphonyElixir.ResponsibilityGraph do
     else
       _ -> {:error, :expired_unsubmitted_authority_changed}
     end
+  end
+
+  @doc "Revokes one exact unsubmitted predecessor pair under a signed successor receipt."
+  @spec retire_unsubmitted_successor_pair(state(), String.t(), String.t(), map(), non_neg_integer()) ::
+          {:ok, state(), :retired | :already_retired} | {:error, term()}
+  def retire_unsubmitted_successor_pair(state, accountable_id, responsible_id, receipt, now_ms)
+      when is_binary(accountable_id) and is_binary(responsible_id) and is_map(receipt) and
+             is_integer(now_ms) and now_ms >= 0 do
+    with :ok <- validate_state(state),
+         true <- valid_unsubmitted_successor_receipt?(receipt, accountable_id, responsible_id),
+         {:ok, accountable} <- fetch_delegation(state, accountable_id),
+         {:ok, responsible} <- fetch_delegation(state, responsible_id),
+         true <- grant_digest(accountable) == receipt["prior_accountable_digest"],
+         true <- grant_digest(responsible) == receipt["prior_responsible_digest"],
+         true <- accountable.role == :accountable and is_nil(accountable.parent_delegation_id),
+         true <- responsible.role == :responsible and responsible.parent_delegation_id == accountable_id,
+         true <- is_nil(accountable.runtime_lease) and is_nil(responsible.runtime_lease),
+         true <- no_active_successor_children?(state, responsible_id),
+         {:ok, next_state, result} <- retire_successor_pair(state, accountable, responsible, receipt, now_ms),
+         :ok <- validate_state(next_state) do
+      {:ok, next_state, result}
+    else
+      _ -> {:error, :unsubmitted_successor_pair_not_retirable}
+    end
+  end
+
+  def retire_unsubmitted_successor_pair(_state, _accountable_id, _responsible_id, _receipt, _now_ms),
+    do: {:error, :unsubmitted_successor_pair_not_retirable}
+
+  @doc "Retires an exact expired restart-blocked pair without reactivating its authority."
+  @spec retire_expired_restart_blocked_successor_pair(
+          state(),
+          String.t(),
+          String.t(),
+          map(),
+          map(),
+          non_neg_integer()
+        ) ::
+          {:ok, state(), :retired} | {:error, term()}
+  def retire_expired_restart_blocked_successor_pair(state, accountable_id, responsible_id, lease, receipt, now_ms)
+      when is_binary(accountable_id) and is_binary(responsible_id) and is_map(lease) and is_map(receipt) and
+             is_integer(now_ms) and now_ms >= 0 do
+    with :ok <- validate_state(state),
+         {:ok, accountable, responsible} <-
+           exact_expired_restart_blocked_pair(state, accountable_id, responsible_id, lease, receipt, now_ms),
+         {:ok, next_state} <- retire_restart_blocked_pair(state, accountable, responsible, receipt, now_ms),
+         :ok <- validate_state(next_state) do
+      {:ok, next_state, :retired}
+    else
+      _ -> {:error, :expired_restart_blocked_successor_pair_not_retirable}
+    end
+  end
+
+  def retire_expired_restart_blocked_successor_pair(_state, _accountable_id, _responsible_id, _lease, _receipt, _now_ms),
+    do: {:error, :expired_restart_blocked_successor_pair_not_retirable}
+
+  defp exact_expired_restart_blocked_pair(state, accountable_id, responsible_id, lease, receipt, now_ms) do
+    with true <- valid_unsubmitted_successor_receipt?(receipt, accountable_id, responsible_id),
+         {:ok, accountable} <- fetch_delegation(state, accountable_id),
+         {:ok, responsible} <- fetch_delegation(state, responsible_id),
+         :ok <- expired_restart_blocked_pair(accountable, responsible, lease, receipt, now_ms),
+         true <- grant_digest(accountable) == receipt["prior_accountable_digest"],
+         true <- grant_digest(responsible) == receipt["prior_responsible_digest"],
+         true <- no_active_successor_children?(state, responsible_id) do
+      {:ok, accountable, responsible}
+    else
+      _ -> {:error, :expired_restart_blocked_pair_changed}
+    end
+  end
+
+  defp expired_restart_blocked_pair(accountable, responsible, lease, receipt, now_ms) do
+    predicates = [
+      exact_blocked_pair?(accountable, responsible, lease),
+      pair_expired?(accountable, responsible, now_ms),
+      receipt_matches_blocked_pair?(receipt, responsible, lease),
+      pair_clock_is_monotonic?(accountable, responsible, now_ms)
+    ]
+
+    if Enum.all?(predicates, & &1), do: :ok, else: {:error, :expired_restart_blocked_pair_changed}
+  end
+
+  defp exact_blocked_pair?(accountable, responsible, lease) do
+    accountable_blocked? =
+      match?(
+        %{role: :accountable, status: :blocked, blocked_on: :restart_reconciliation, runtime_lease: nil},
+        accountable
+      )
+
+    responsible_blocked? =
+      match?(
+        %{
+          role: :responsible,
+          status: :blocked,
+          blocked_on: :restart_reconciliation,
+          parent_delegation_id: _,
+          runtime_lease: ^lease
+        },
+        responsible
+      )
+
+    accountable_blocked? and responsible_blocked? and responsible.parent_delegation_id == accountable.id
+  end
+
+  defp pair_expired?(accountable, responsible, now_ms) do
+    accountable.expires_at_ms <= now_ms and responsible.expires_at_ms <= now_ms
+  end
+
+  defp receipt_matches_blocked_pair?(receipt, responsible, lease) do
+    receipt["issue_id"] == responsible.scope.issue_id and
+      receipt["repository_ref"] == responsible.scope.repository and
+      receipt["generation"] == lease[:generation] and
+      validate_runtime_lease(lease) == :ok and runtime_lease_matches_scope?(responsible, lease) == :ok
+  end
+
+  defp pair_clock_is_monotonic?(accountable, responsible, now_ms) do
+    reconcile_clock_is_monotonic(accountable, now_ms) == :ok and
+      reconcile_clock_is_monotonic(responsible, now_ms) == :ok
+  end
+
+  defp retire_restart_blocked_pair(state, accountable, responsible, receipt, now_ms) do
+    pair = [accountable, responsible]
+
+    next_state =
+      Enum.reduce(pair, state, fn delegation, acc ->
+        retired = %{
+          delegation
+          | status: :revoked,
+            runtime_lease: nil,
+            blocked_on: nil,
+            terminal_reason: :unsubmitted_successor,
+            terminal_evidence: receipt
+        }
+
+        acc
+        |> put_in([:delegations, delegation.id], retired)
+        |> append_event(:unsubmitted_successor_retired, delegation.id, now_ms, receipt)
+      end)
+
+    with :ok <- validate_state(next_state), do: {:ok, next_state}
+  end
+
+  defp retire_successor_pair(state, accountable, responsible, receipt, now_ms) do
+    pair = [accountable, responsible]
+
+    cond do
+      Enum.all?(pair, fn delegation ->
+        delegation.status == :revoked and delegation.terminal_reason in [:unsubmitted_successor, "unsubmitted_successor"] and
+            delegation.terminal_evidence == receipt
+      end) ->
+        {:ok, state, :already_retired}
+
+      Enum.all?(pair, &(&1.status == :active and is_nil(&1.terminal_evidence))) and
+          Enum.all?(pair, &(Map.get(&1, :last_heartbeat_at, 0) <= now_ms)) ->
+        next_state =
+          Enum.reduce(pair, state, fn delegation, acc ->
+            updated = %{
+              delegation
+              | status: :revoked,
+                runtime_lease: nil,
+                blocked_on: nil,
+                terminal_reason: :unsubmitted_successor,
+                terminal_evidence: receipt
+            }
+
+            acc
+            |> put_in([:delegations, delegation.id], updated)
+            |> append_event(:unsubmitted_successor_retired, delegation.id, now_ms, receipt)
+          end)
+
+        {:ok, next_state, :retired}
+
+      true ->
+        {:error, :unsubmitted_successor_pair_conflict}
+    end
+  end
+
+  defp valid_unsubmitted_successor_receipt?(receipt, accountable_id, responsible_id) do
+    valid_receipt_issue?(receipt) and valid_prior_ids?(receipt, accountable_id, responsible_id) and
+      valid_successor_ids?(receipt, accountable_id, responsible_id) and valid_receipt_metadata?(receipt) and
+      valid_receipt_observation?(receipt)
+  end
+
+  defp valid_receipt_issue?(receipt) do
+    is_binary(Map.get(receipt, "issue_id")) and Map.get(receipt, "type") == "unsubmitted_successor" and
+      is_integer(Map.get(receipt, "generation")) and Map.get(receipt, "generation") > 0
+  end
+
+  defp valid_prior_ids?(receipt, accountable_id, responsible_id) do
+    Map.get(receipt, "prior_accountable_id") == accountable_id and
+      Map.get(receipt, "prior_responsible_id") == responsible_id
+  end
+
+  defp valid_successor_ids?(receipt, accountable_id, responsible_id) do
+    successor_accountable = Map.get(receipt, "successor_accountable_id")
+    successor_responsible = Map.get(receipt, "successor_responsible_id")
+
+    present_string?(successor_accountable) and present_string?(successor_responsible) and
+      successor_accountable != accountable_id and successor_responsible != responsible_id
+  end
+
+  defp valid_receipt_metadata?(receipt) do
+    text_fields = ["repository_ref", "managed_project_profile_id"]
+
+    digest_fields = [
+      "prior_accountable_digest",
+      "prior_responsible_digest",
+      "successor_accountable_digest",
+      "successor_responsible_digest",
+      "manifest_sha256",
+      "signer_key_sha256",
+      "observation_sha256",
+      "evidence_ref"
+    ]
+
+    Enum.all?(text_fields, &present_string?(Map.get(receipt, &1))) and
+      Enum.all?(digest_fields, &valid_sha256?(Map.get(receipt, &1)))
+  end
+
+  defp valid_receipt_observation?(receipt) do
+    observation = Map.get(receipt, "observation")
+
+    is_integer(Map.get(receipt, "prepared_at_ms")) and Map.get(receipt, "prepared_at_ms") >= 0 and
+      valid_observation_receipt?(observation, receipt)
+  end
+
+  defp valid_observation_receipt?(observation, receipt) when is_map(observation) do
+    predicates = [
+      observation_identity_matches_receipt?(observation, receipt),
+      observation_has_no_provider_claim?(observation),
+      observation_has_no_kubernetes_work?(observation),
+      observation_has_no_process?(observation),
+      observation_has_valid_evidence?(observation)
+    ]
+
+    Enum.all?(predicates, & &1)
+  end
+
+  defp valid_observation_receipt?(_observation, _receipt), do: false
+
+  defp observation_identity_matches_receipt?(observation, receipt) do
+    observation["issue_id"] == receipt["issue_id"] and observation["generation"] == receipt["generation"] and
+      observation["repository_ref"] == receipt["repository_ref"] and
+      observation["managed_project_profile_id"] == receipt["managed_project_profile_id"]
+  end
+
+  defp observation_has_no_provider_claim?(observation) do
+    observation["provider_reservation_state"] == "reserved" and is_nil(observation["provider_claimed_at"]) and
+      is_nil(observation["provider_claim_generation"]) and is_nil(observation["provider_execution_fence_token"])
+  end
+
+  defp observation_has_no_kubernetes_work?(observation) do
+    observation["kubernetes_namespace"] == "frigga" and observation["kubernetes_job_issue_matches"] == 0 and
+      observation["kubernetes_pod_issue_matches"] == 0 and
+      present_string?(observation["kubernetes_jobs_resource_version"]) and
+      present_string?(observation["kubernetes_pods_resource_version"])
+  end
+
+  defp observation_has_no_process?(observation) do
+    observation["process_load_state"] == "not-found" and
+      observation["process_active_state"] in ["inactive", "unknown"] and
+      is_nil(observation["process_control_group"]) and observation["process_main_pid"] in [nil, 0] and
+      observation["process_count"] == 0 and present_string?(observation["process_unit"])
+  end
+
+  defp observation_has_valid_evidence?(observation) do
+    observation["workspace_absent"] == true and valid_observation_references?(observation) and
+      valid_observation_timestamps?(observation)
+  end
+
+  defp valid_observation_references?(observation) do
+    fields = ~w(provider_evidence_ref kubernetes_jobs_evidence_ref kubernetes_pods_evidence_ref process_evidence_ref workspace_evidence_ref)
+    Enum.all?(fields, &valid_sha256?(observation[&1]))
+  end
+
+  defp valid_observation_timestamps?(observation) do
+    fields = ~w(provider_observed_at_ms kubernetes_observed_at_ms process_observed_at_ms workspace_observed_at_ms)
+    Enum.all?(fields, &(is_integer(observation[&1]) and observation[&1] >= 0))
+  end
+
+  defp valid_sha256?(value) when is_binary(value), do: Regex.match?(~r/\A[0-9a-f]{64}\z/, value)
+  defp valid_sha256?(_value), do: false
+
+  defp no_active_successor_children?(state, responsible_id) do
+    not Enum.any?(state.delegations, fn {_id, delegation} ->
+      delegation.parent_delegation_id == responsible_id and delegation.status in [:active, :blocked]
+    end)
+  end
+
+  defp grant_digest(delegation) do
+    delegation
+    |> Map.take(@grant_digest_fields)
+    |> :erlang.term_to_binary([:deterministic])
+    |> then(&:crypto.hash(:sha256, &1))
+    |> Base.encode16(case: :lower)
   end
 
   defp expired_unsubmitted_releasable?(%{status: :blocked, blocked_on: :restart_reconciliation}), do: true
@@ -721,7 +1034,7 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   defp mutable_scope_available(_state, _attrs), do: :ok
 
   defp ancestor_pair_with_new?(state, %{parent_delegation_id: parent_id}, existing_id) do
-    is_binary(parent_id) and (parent_id == existing_id or is_descendant?(state, parent_id, existing_id))
+    is_binary(parent_id) and (parent_id == existing_id or descendant?(state, parent_id, existing_id))
   end
 
   defp ancestor_pair_with_new?(_state, _attrs, _existing_id), do: false
@@ -738,18 +1051,18 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   defp active_descendant_ids(state, ancestor_id) do
     state.delegations
     |> Enum.filter(fn {id, delegation} ->
-      id != ancestor_id and delegation.status == :active and is_descendant?(state, id, ancestor_id)
+      id != ancestor_id and delegation.status == :active and descendant?(state, id, ancestor_id)
     end)
     |> Enum.map(&elem(&1, 0))
     |> Enum.sort()
   end
 
-  defp is_descendant?(state, candidate_id, ancestor_id) do
+  defp descendant?(state, candidate_id, ancestor_id) do
     case Map.get(state.delegations, candidate_id) do
       nil -> false
       %{parent_delegation_id: ^ancestor_id} -> true
       %{parent_delegation_id: nil} -> false
-      %{parent_delegation_id: parent_id} -> is_descendant?(state, parent_id, ancestor_id)
+      %{parent_delegation_id: parent_id} -> descendant?(state, parent_id, ancestor_id)
     end
   end
 
@@ -770,7 +1083,7 @@ defmodule SymphonyElixir.ResponsibilityGraph do
     if action in @mutable_actions and delegation.role == :responsible do
       case Enum.find(state.delegations, fn {id, child} ->
              id != delegation.id and child.status == :active and child.role == :responsible and
-               is_descendant?(state, id, delegation.id) and scopes_overlap?(delegation.scope, child.scope)
+               descendant?(state, id, delegation.id) and scopes_overlap?(delegation.scope, child.scope)
            end) do
         nil -> :ok
         {child_id, _child} -> {:error, {:child_scope_owned, child_id}}
@@ -936,8 +1249,18 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   defp validate_runtime_lease_for_role?(_role, nil), do: :ok
   defp validate_runtime_lease_for_role?(_role, lease), do: validate_runtime_lease(lease)
 
-  defp validate_runtime_lease(%{issue_id: issue_id, repository: repository, generation: generation, session_id: session_id, process_id: process_id}) do
-    if present_string?(issue_id) and present_string?(repository) and is_integer(generation) and generation > 0 and present_string?(session_id) and present_string?(process_id),
+  defp validate_runtime_lease(%{
+         issue_id: issue_id,
+         repository: repository,
+         generation: generation,
+         session_id: session_id,
+         process_id: process_id
+       }) do
+    valid_identity? =
+      present_string?(issue_id) and present_string?(repository) and is_integer(generation) and generation > 0 and
+        present_string?(session_id) and present_string?(process_id)
+
+    if valid_identity?,
       do: :ok,
       else: {:error, :invalid_runtime_lease}
   end

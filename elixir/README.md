@@ -313,8 +313,9 @@ The managed spawn path retains the exact claim returned after provider and root-
 acknowledgement. It rebuilds the current assignment bundle and rejects a missing or mismatched
 claim before dispatch. A signed RKE2 assignment cannot fall through to the persistent local
 `AgentRunner`. When the trusted host supplies a disposable RKE2 context and the pause gate is
-open, the serialized dispatcher calls `SuspendedController.allocate/3` to create or reconcile
-one suspended Job and durably bind its exact allocation to the claim. Replay of a journaled
+open, `SuspendedController.allocate/3` atomically persists the exact assignment snapshot and
+`allocation_pending` under the claim journal lock before creating or reconciling one suspended
+Job and durably bind its exact allocation to the claim. Replay of a journaled
 allocation skips another adapter call. An uncertain allocation keeps the provider claim and
 local lease held. With the complete host context and a configured running pause gate,
 the same serialized callback now resumes the exact suspended allocation. It journals
@@ -322,6 +323,119 @@ the root spawn intent before the UID-fenced activation request. The final host g
 replays current claim and root authority, checks the assignment and allocation binding,
 and reads the pause gate again. A held guard or uncertain activation retains the claim,
 Job, and lease for reconciliation. No disposable runner has been qualified.
+
+If host allocation context preparation fails before Job allocation, the dispatcher uses the
+strict paused-recovery transition to durably mark only a confirmed claim with no allocation
+identity as `recovery_pending` and release its local execution lease. If create has begun or
+its result is uncertain, `allocation_pending` keeps the provider claim and local lease held.
+The provider claim remains held until signed host preflight proves the exact retained history
+and complete, current Job/Pod absence.
+
+The HGS-740 confirmed-claim evidence verifier is a pure source boundary. It accepts only a
+domain-separated `work-package-paused-confirmed-recovery.v1`, `.v2`, or `.v3` root signature, pinned to the
+existing HGS-485 recovery signer fingerprint. The signed observation must bind the confirmed
+generation-2 claim, the retired generation-1 successor receipt, the six-pool no-spawn history,
+all stopped and masked services, no process/workspace/turn, complete claim-scoped RKE2 Job and
+Pod absence snapshots, and a fresh provider readback showing the exact claimed/held reservation.
+Unknown fields, incomplete snapshots, a changed tuple, stale evidence, or another signing key
+fail closed. The verifier does not write state; the root-only issuer and separate write-ahead
+transition/startup guard own those side effects.
+Its caller must supply the expected one-shot nonce and the exact pre-mutation SHA-256 values for
+the claim journal, execution fence, and responsibility graph; all four values must match the
+signed payload. The later WAL driver must durably consume that nonce before the first state write,
+re-read and match those three exact preimages under the claim lock, and refuse replay after use.
+The verifier alone does not consume a nonce or attest that the local preimages still match.
+The outer signed payload and envelope use compact UTF-8 JSON with lexically sorted object keys;
+the nested HGS-485 observation keeps its existing insertion-ordered evidence hash.
+Before transition, Symphony also recomputes the predecessor retirement `evidence_ref` from the
+persisted receipt fields using the original deterministic Erlang term encoding; the candidate
+does not need to reproduce that encoding in Python.
+
+The v2 contract explicitly binds an absent assignment snapshot and null digest.
+The v3 contract additionally represents a genuinely unsubmitted generation-1 predecessor:
+its claim is null, its journal row and cross-pool root witness events are absent, and the
+sole witness belongs to generation 2. The canonical issuer bundle adds
+`predecessorClaimState: "unsubmitted"`. The native verifier checks the exact retained
+retirement source, recomputes its observation and four grant digests, and binds the
+derived fence receipt. The current pair must remain restart-blocked with its exact
+unobserved generation-2 lease. The existing unstarted-fence reconciliation and a narrow
+blocked-lease release compute WAL postimages without reactivating authority. V1/v2
+keep their full predecessor-claim and two-witness requirements. V3 proof, marker and
+local receipt versions use separate signature domains; WAL replay consumes the same
+precomputed postimages and never emits another lease-release event.
+
+Before creating any immutable collector input, run
+`symphony --verify-hgs740-issuer-context --workflow <trusted-WORKFLOW.md> <pool-key>`
+as root under the exact configured pool environment that will be used for issuance.
+This read-only preflight checks the paused gate, trusted workflow, complete runtime
+configuration, fixed execution-fence path, and stopped pool/witness services. It does
+not collect evidence, sign, write state, or authorize recovery. Startup verification
+uses fixed paths and may run with an empty environment; issuance and this preflight
+require the configured pool credentials, including `LINEAR_API_KEY`. Missing settings
+return sanitized configuration reasons without raising or printing credential values.
+Preflight success does not relax the issuer's fresh evidence and state-owner checks.
+Existing expired one-shot inputs remain held; this command does not refresh or replace them.
+
+Issuance, apply, completion and issuer-context verification require the fixed
+root-controlled Linux workflow at
+`/srv/dahlia-runner-state/dahlia/config/symphony/recovery-workflows/<pool-key>.md`.
+Dahlia's canonical recovery exporter supplies a complete six-pool derivation
+receipt. The native verifier checks its source commit against the installed
+`linux-control-receipt.json`, canonical source and renderer entries and Git blob
+identities, fixed workspace inputs, and every output hash through bounded
+root-controlled reads. Partial exports, changed unselected pools and alternate
+paths fail closed. Startup verification retains its original canonical workflow
+path and fixed-runtime-path check. Export and preflight do not authorize replacing
+held evidence or bypassing freshness checks.
+Recovery authorization also requires a successful workflow-store reload; it never
+uses the normal runner's last known good fallback to validate a different workflow.
+
+`symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
+--bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the
+paused gate, stopped and masked pool/witness services, and state-owner quiescence; refreshes complete
+Frigga Job and Pod absence; then validates and signs the canonical proof with the pinned HGS-485
+Ed25519 identity. The trusted collector must first create the generation-2 directory with root
+ownership and mode `0700`, and write `reviewed-preflight.json`, `provider-held-readback.json`, and
+`issuer-input.json` as root-owned `0600` single-link files. The canonical bundle has
+`assignmentSHA256`, `reservationId`, `observation`, and `providerHeld` fields. Other retained
+top-level evidence is accepted only when root-owned and not group- or other-writable. Provider
+denial/transport-error files, prior candidate/envelope files, and transaction or local-transition
+markers block issuance. Output files use exclusive creation, mode `0600`, file sync, and a tested
+Linux directory-fsync helper; partial output is retained and blocks replay.
+The provider readback inside the bundle must be supplied by a trusted root-owned collector using
+provider-core's dual-auth held-claim readback; the bundle must contain no auth material. The issuer
+validates that snapshot but does not call provider-core, so the collector is a prerequisite for
+end-to-end live issuance.
+
+The root-only transaction CLI is `symphony --apply-hgs740-confirmed-recovery --workflow
+<trusted-WORKFLOW.md> --nonce <proof-nonce-uuid> f77e349e-21d9-4bdf-bad3-ce08b302e7e8
+<pool-key>`, followed after HGS-485 provider confirmation by
+`symphony --complete-hgs740-recovery --workflow <trusted-WORKFLOW.md>
+f77e349e-21d9-4bdf-bad3-ce08b302e7e8 <pool-key>`. Startup uses
+`symphony --verify-hgs740-startup --workflow <trusted-WORKFLOW.md> <pool-key>` before
+normal runtime startup. These entry points require the fixed six-pool workflow mapping,
+paused global gate, and root execution; they emit sanitized failures.
+
+The HGS-740 stopped/masked quiescence guard reads native systemd unit properties.
+Socket units may omit `MainPID`; they still require an inactive/failed state and an
+empty cgroup. Service units, including the user manager, require an explicit zero
+`MainPID`. Missing required, duplicate, or unknown properties remain a denial.
+
+Artifacts live under
+`/srv/dahlia-runner-state/evidence/hgs740-confirmed-recovery/<issue-uuid>/generation-2/`:
+the read-only signed observation (`candidate.json`), root-signed proof
+(`confirmed-root-envelope.json`), immutable transition candidate and receipt, and durable
+transaction marker. The marker is written before directory custody changes. While the
+marker is `applying`, startup stays closed and root replay resumes only exact preimage or
+postimage states. `local_applied` also remains closed until HGS-485 confirms the exact held
+claim release and next-generation floor. Completion writes a terminal `complete` marker
+while the runner-writable state anchors are still root-custodied, then restores their
+recorded owner, group, mode, and inode-checked identity as its final mutation. If interrupted
+between those steps, startup denies access and the root completion command revalidates the
+signed proof, provider receipt, Kubernetes absence, and local lineage before restoring the
+anchors. The completed marker must have original anchor metadata at startup. Do not restart
+the pool until root apply/complete succeeds and the drop-in `ExecStartPre` verifier is
+installed from the same attested source build.
 
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
@@ -337,16 +451,21 @@ The optional host allocation context requires the complete `SYMPHONY_RKE2_API_SE
 `SYMPHONY_RKE2_CREDENTIAL_ROOT`, `SYMPHONY_RKE2_WORKER_IMAGE` (immutable digest),
 `SYMPHONY_RKE2_REPOSITORY_ID`, `SYMPHONY_RKE2_AUTH_SLOT_ID`,
 `SYMPHONY_RKE2_AUTH_CLAIM_NAME`, `SYMPHONY_RKE2_RESULT_JOURNAL_ROOT`,
-`SYMPHONY_RKE2_ABORT_JOURNAL_ROOT`, and `SYMPHONY_RKE2_WORKSPACE_ROOT` tuple.
+`SYMPHONY_RKE2_ABORT_JOURNAL_ROOT`, `SYMPHONY_RKE2_WORKSPACE_ROOT`, and
+`SYMPHONY_DAHLIA_ASSIGNMENT_BIND_ORIGIN` tuple. The assignment bind origin is a
+separate HTTPS origin; it has no fallback to the work-package provider URL.
 The journal root must be a host-private absolute directory outside worker workspaces;
 the result journal checks its ownership and mode before writing. Partial settings
 fail startup. The abort journal root must also be absolute and outside the declared
 workspace root; supervisor startup pins both paths for the root-only abort prepare
 caller. This configures its trust check but does not authorize an abort without an
-exact claim-bound abort intent and witness. For each new allocation, the host reads its rotating Kubernetes
-token, verifies the exact Bound PVC UID,
-reserves Dahlia's OAuth slot for the signed assignment, then passes the slot-bound Job
-configuration to the existing suspended controller. At terminal cleanup, the host
+exact claim-bound abort intent and witness. After fresh issue, responsibility-graph,
+and provider-claim checks, the host posts the exact root-owned manifest bytes and its
+detached signature to Dahlia's assignment bind route. It requires the returned digest
+and branch ref to match the assignment before it reads Kubernetes credentials, verifies
+the exact Bound PVC UID, reserves the OAuth slot against the returned digest, or creates
+the suspended Job. The verified bytes and signature remain in host memory and are not
+written to journals or logs. At terminal cleanup, the host
 reads a fresh Kubernetes token for the verifier Job and retains the result and
 OAuth slot cleanup receipts under that private root. The terminal result record also retains
 the exact non-secret OAuth slot binding before the Job is deleted. After a host
@@ -508,6 +627,39 @@ the graph and fence candidates together under the existing exclusive writer/CAS
 recovery contract; a partial write is not admission authority. If an expired
 grant pair was already retired under a prior evidence reference, retain that
 original graph receipt and append the distinct terminal-local fence evidence.
+
+For an active or exact restart-reconciliation-blocked pair whose old signed scope needs correction,
+only a distinct signed v2 successor with exact old IDs/digests and a fresh, root-attested
+provider/Kubernetes/systemd/workspace observation can authorize retirement. Expired grants are retired
+directly and never reactivated. The signed observation includes the exact journal, execution fence,
+responsibility graph paths under `/srv/dahlia-runner-state`, and a digest of the root-owned workflow
+bytes. Runtime config and workflow pool identity must match those signed values, and all state and
+lock files must be runner-owned mode `0600`, single-link regular files with no symlink ancestors;
+their directories must be root- or runner-owned and not group/world writable.
+It rejects any claim-journal row for the issue, any observed or
+supervised lease, a present workspace, changed authority, or conflicting graph or fence state. The
+graph does not retain the predecessor's `assignment_context`; normal admission checks the successor's
+signed current raw Linear Markdown and base/environment fields against the current issue. The
+one-shot command requires a configured paused gate and a root-owned trusted workflow file. Stop the
+service, then run the reviewed candidate escript as the service identity with the normal trusted
+runtime environment. This command does not start the Symphony application. It derives and acquires
+the pool launcher lock itself and checks that the system service is inactive:
+
+```text
+bin/symphony --retire-unsubmitted-successor --workflow /etc/dahlia-managed-delegations/hgs736-v7/hypergrid-gitops.workflow.md HGS-736
+```
+
+Keep the launcher lock available to the task and the gate paused through manifest installation and
+restart. The task writes the graph receipt first, then the execution fence; after an interruption,
+rerun the same command. Replay completes only from that exact persisted graph receipt and its original
+observation. The signed `work_package_id` must be the provider's canonical projection ID. Never
+hand-edit the graph or fence snapshots.
+
+`UnsubmittedSuccessorRetirement` is excluded from the generic statement-coverage threshold because
+its successful path requires root-owned host configuration, runner-owned production state files, a
+real systemd unit, and the production launcher lock. CI tests its early fail-closed paths and covers
+the pure manifest, custody predicates, graph/fence transitions, and replay separately. This exclusion
+is not live evidence; the paused host run still requires its own review and readback.
 
 To enable this managed runtime on a Linux runner, the host must provide the complete tuple below;
 the service rejects a partial tuple during supervisor startup and leaves the adapter disabled when
@@ -887,6 +1039,11 @@ executor also defines an assignment-bound JIT credential lease port with acquire
 callbacks; it does not implement a broker or issue credentials. Admission stays paused until the
 issuer and runtime integrations are separately reviewed and qualified.
 This source change does not qualify production host admission or workload execution.
+
+The signed `scope.work_package_id` must be the provider's canonical projection ID returned for the
+exact issue reservation; a Linear identifier is not a substitute. The objective content must be
+the raw runtime Linear Markdown snapshot, because connector-rendered rich links can differ from the
+runtime content used by the exact assignment check.
 
 The source-only executor journal v8 acquires and renews the assignment credential before
 checkout and passes its opaque lease handle to the checkout adapter. A denied or invalid lease

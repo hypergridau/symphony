@@ -3,7 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  @phases ~w(submitted confirmed allocation_suspended recovery_pending spawn_started blocked)
+  @phases ~w(submitted confirmed allocation_pending allocation_suspended recovery_pending spawn_started blocked)
   @legacy_keys ~w(phase attempts retry_at_ms authority_digest)
   @keys @legacy_keys ++ ["allocation_id"]
   @max_attempts 6
@@ -65,6 +65,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     do: {:error, :claim_authority_changed}
 
   defp retry_allowed(%{phase: "spawn_started"}, _digest), do: {:error, :claim_spawn_already_attempted}
+  defp retry_allowed(%{phase: "allocation_pending"}, _digest), do: {:error, :suspended_allocation_controller_required}
   defp retry_allowed(%{phase: "allocation_suspended"}, _digest), do: {:error, :suspended_allocation_controller_required}
   defp retry_allowed(%{phase: "recovery_pending"}, _digest), do: {:error, :claim_reconciliation_required}
   defp retry_allowed(%{phase: "blocked"}, _digest), do: {:error, :claim_reconciliation_required}
@@ -113,12 +114,48 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   def begin_recovery(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
 
+  @doc "Moves only an exact confirmed, never-allocated claim into paused recovery."
+  @spec begin_confirmed_recovery(map(), String.t()) :: {:ok, map()} | {:error, term()}
+  def begin_confirmed_recovery(journal, key) when is_binary(key) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "confirmed", allocation_id: nil} = dispatch} = reservation ->
+        Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "recovery_pending"}})
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def begin_confirmed_recovery(_journal, _key), do: {:error, :invalid_claim_dispatch_transition}
+
+  @doc "Persists the first Job allocation intent before the external create call."
+  @spec begin_suspended_allocation(map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def begin_suspended_allocation(journal, key, input) when is_map(input) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "confirmed", authority_digest: digest} = dispatch} = reservation
+      when is_binary(digest) ->
+        if digest == authority_digest(input) do
+          Journal.put(journal, key, %{reservation | dispatch: %{dispatch | phase: "allocation_pending"}})
+        else
+          {:error, :claim_authority_changed}
+        end
+
+      _ ->
+        {:error, :invalid_claim_dispatch_transition}
+    end
+  end
+
+  def begin_suspended_allocation(_journal, _key, _input), do: {:error, :invalid_claim_dispatch_transition}
+
   @doc "Durably records the exact ready allocation while its Job remains suspended."
   @spec record_suspended_allocation(map(), String.t(), map(), String.t()) :: {:ok, map()} | {:error, term()}
   def record_suspended_allocation(journal, key, input, allocation_id)
       when is_map(input) and is_binary(allocation_id) do
     case journal.reservations[key] do
       %{dispatch: %{phase: "confirmed"} = dispatch} = reservation ->
+        record_new_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id)
+
+      %{dispatch: %{phase: "allocation_pending"} = dispatch} = reservation ->
         record_new_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id)
 
       %{dispatch: %{phase: "allocation_suspended"} = dispatch} = reservation ->
@@ -272,21 +309,36 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     key = Journal.reservation_key(issue_id, profile, repository, generation)
 
     case journal.reservations[key] do
-      %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed", "allocation_suspended"] -> {:ok, reservation}
-      %{dispatch: %{phase: "spawn_started", allocation_id: id}} = reservation when is_binary(id) -> {:ok, reservation}
-      %{dispatch: %{phase: "spawn_started"}} -> {:error, :claim_spawn_already_attempted}
-      %{dispatch: %{phase: "recovery_pending"}} -> {:error, :claim_reconciliation_required}
-      %{dispatch: %{phase: "blocked"}} -> {:error, :claim_reconciliation_required}
-      _ -> {:error, :claim_recovery_journal_missing}
+      %{dispatch: %{phase: phase}} = reservation when phase in ["submitted", "confirmed", "allocation_pending", "allocation_suspended"] ->
+        {:ok, reservation}
+
+      %{dispatch: %{phase: "spawn_started", allocation_id: id}} = reservation when is_binary(id) ->
+        {:ok, reservation}
+
+      %{dispatch: %{phase: "spawn_started"}} ->
+        {:error, :claim_spawn_already_attempted}
+
+      %{dispatch: %{phase: "recovery_pending"}} ->
+        {:error, :claim_reconciliation_required}
+
+      %{dispatch: %{phase: "blocked"}} ->
+        {:error, :claim_reconciliation_required}
+
+      _ ->
+        {:error, :claim_recovery_journal_missing}
     end
   end
 
   @spec ready?(map(), non_neg_integer()) :: boolean()
+  def ready?(%{dispatch: %{phase: "allocation_pending"}}, _now_ms), do: false
   def ready?(%{dispatch: %{phase: "allocation_suspended"}}, _now_ms), do: false
 
   def ready?(%{dispatch: dispatch}, now_ms), do: dispatch.attempts < @max_attempts and dispatch.retry_at_ms <= now_ms
 
   @spec retry_status(map(), non_neg_integer()) :: :ok | {:error, term()}
+  def retry_status(%{dispatch: %{phase: "allocation_pending"}}, _now_ms),
+    do: {:error, :suspended_allocation_controller_required}
+
   def retry_status(%{dispatch: %{phase: "confirmed", attempts: attempts}}, _now_ms) when attempts >= @max_attempts,
     do: {:error, :claim_confirmed_revalidation_required}
 

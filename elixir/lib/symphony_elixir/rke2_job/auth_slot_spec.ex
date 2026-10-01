@@ -17,18 +17,32 @@ defmodule SymphonyElixir.RKE2Job.AuthSlotSpec do
           volumes: [map()]
         }
 
-  @spec compile(map(), nil | map(), nil | map()) :: {:ok, fragments()} | {:error, :rke2_job_auth_slot_invalid}
-  def compile(_assignment, nil, nil), do: {:ok, %{annotations: %{}, env: [], volume_mounts: [], volumes: []}}
+  @spec compile(map(), nil | map(), nil | map()) ::
+          {:ok, fragments()} | {:error, :rke2_job_auth_slot_invalid}
+  def compile(assignment, slot, catalog), do: compile(assignment, slot, catalog, nil)
 
-  def compile(%{sha256: digest, seat: seat}, slot, catalog) when is_map(slot) and is_map(catalog) do
-    if valid_binding?(slot, catalog, digest, seat) do
+  @spec compile(map(), nil | map(), nil | map(), nil | String.t()) ::
+          {:ok, fragments()} | {:error, :rke2_job_auth_slot_invalid}
+  def compile(_assignment, nil, nil, _binding_digest),
+    do: {:ok, %{annotations: %{}, env: [], volume_mounts: [], volumes: []}}
+
+  def compile(%{sha256: digest, seat: seat}, slot, catalog, binding_digest)
+      when is_map(slot) and is_map(catalog) do
+    if valid_binding?(slot, catalog, digest, seat, binding_digest) do
+      annotations = %{
+        "symphony.hypergrid.au/codex-auth-slot" => slot.slot_id,
+        "symphony.hypergrid.au/codex-auth-lease" => slot.lease_id,
+        "symphony.hypergrid.au/codex-auth-claim-uid" => slot.claim_uid
+      }
+
+      annotations =
+        if is_binary(binding_digest),
+          do: Map.put(annotations, "symphony.hypergrid.au/assignment-binding-sha256", slot.binding_sha256),
+          else: annotations
+
       {:ok,
        %{
-         annotations: %{
-           "symphony.hypergrid.au/codex-auth-slot" => slot.slot_id,
-           "symphony.hypergrid.au/codex-auth-lease" => slot.lease_id,
-           "symphony.hypergrid.au/codex-auth-claim-uid" => slot.claim_uid
-         },
+         annotations: annotations,
          env: [%{"name" => "CODEX_HOME", "value" => @codex_home}],
          volume_mounts: [%{"name" => @volume_name, "mountPath" => @codex_home, "readOnly" => false}],
          volumes: [%{"name" => @volume_name, "persistentVolumeClaim" => %{"claimName" => slot.claim_name, "readOnly" => false}}]
@@ -38,18 +52,22 @@ defmodule SymphonyElixir.RKE2Job.AuthSlotSpec do
     end
   end
 
-  def compile(_assignment, _slot, _catalog), do: {:error, :rke2_job_auth_slot_invalid}
+  def compile(_assignment, _slot, _catalog, _binding_digest), do: {:error, :rke2_job_auth_slot_invalid}
 
-  defp valid_binding?(slot, catalog, digest, seat) do
-    Enum.sort(Map.keys(slot)) == Enum.sort([:slot_id, :claim_name, :claim_uid, :lease_id, :assignment_sha256, :seat]) and
-      valid_slot_values?(slot, digest, seat) and valid_catalog?(catalog) and
+  defp valid_binding?(slot, catalog, digest, seat, binding_digest) do
+    required = [:slot_id, :claim_name, :claim_uid, :lease_id, :assignment_sha256, :seat]
+    allowed = if is_binary(binding_digest), do: required ++ [:binding_sha256], else: required
+
+    Enum.sort(Map.keys(slot)) == Enum.sort(allowed) and
+      valid_slot_values?(slot, digest, seat, binding_digest) and valid_catalog?(catalog) and
       Map.get(catalog, slot.slot_id) == slot.claim_name
   end
 
-  defp valid_slot_values?(slot, digest, seat) do
+  defp valid_slot_values?(slot, digest, seat, binding_digest) do
     dns_label?(slot.slot_id) and dns_label?(slot.claim_name) and valid_uid?(slot.claim_uid) and
       valid_lease_id?(slot.lease_id) and
-      slot.assignment_sha256 == digest and slot.seat == seat
+      slot.assignment_sha256 == digest and slot.seat == seat and
+      (is_nil(binding_digest) or (valid_digest?(binding_digest) and slot.binding_sha256 == binding_digest))
   end
 
   defp valid_catalog?(catalog) when map_size(catalog) in 1..16 do
@@ -75,4 +93,7 @@ defmodule SymphonyElixir.RKE2Job.AuthSlotSpec do
     do: byte_size(value) in 1..256 and Regex.match?(~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/, value)
 
   defp valid_uid?(_value), do: false
+
+  defp valid_digest?(value) when is_binary(value), do: Regex.match?(~r/\A[a-f0-9]{64}\z/, value)
+  defp valid_digest?(_value), do: false
 end

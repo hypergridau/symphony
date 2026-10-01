@@ -31,7 +31,7 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierJobSpec do
     with true <- valid_config?(config),
          true <- valid_assignment?(assignment),
          true <- valid_slot?(slot),
-         {:ok, fragments} <- AuthSlotSpec.compile(assignment, slot, config.catalog),
+         {:ok, fragments} <- AuthSlotSpec.compile(assignment, slot, config.catalog, Map.get(slot, :binding_sha256)),
          true <- fragments.env != [] do
       name = "auth-verify-" <> config.attempt_id
 

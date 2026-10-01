@@ -60,6 +60,32 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
              Manifest.verify_signature(bytes, signature, "not-a-key")
   end
 
+  @tag skip:
+         :os.type() != {:unix, :linux} or
+           match?({:ok, %File.Stat{uid: 0}}, File.stat("/proc/self"))
+  test "rejects an otherwise pinned manifest from a non-root-owned file" do
+    root = Path.join(System.tmp_dir!(), "managed-manifest-untrusted-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(root)
+    path = Path.join(root, "manifest.json")
+    bytes = ~s({"schema_version":1,"entries":[]})
+    File.write!(path, bytes)
+    File.chmod!(path, 0o600)
+    on_exit(fn -> File.rm_rf!(root) end)
+
+    env = %{
+      "DAHLIA_MANAGED_DELEGATION_PATH" => path,
+      "DAHLIA_MANAGED_DELEGATION_SHA256" => digest(bytes),
+      "DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519" => String.duplicate("0", 128),
+      "DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519" => String.duplicate("0", 64),
+      "SYMPHONY_POOL_KEY" => "test-pool",
+      "DAHLIA_RUNNER_ID" => "runner-test",
+      "SYMPHONY_REPOSITORY_REF" => "openai/symphony",
+      "DAHLIA_MANAGED_PROJECT_PROFILE_ID" => "profile-test"
+    }
+
+    assert {:error, :untrusted_managed_delegation_file} = Manifest.load(env, 1)
+  end
+
   describe "root-owned Linux file qualification" do
     @describetag skip: System.get_env("SYMPHONY_TEST_ROOT_MANIFEST_FILES") != "1"
 
@@ -91,10 +117,13 @@ defmodule SymphonyElixir.ManagedResponsibilityManifestTest do
       %{root: root, path: path, env: env, now: now, private_key: private_key}
     end
 
-    test "loads a pinned regular file without activating queued grants", %{env: env, now: now} do
+    test "loads a pinned regular file without activating queued grants", %{path: path, env: env, now: now} do
       assert {:ok, manifest} = Manifest.load(env, now)
       assert manifest.source_sha256 == env["DAHLIA_MANAGED_DELEGATION_SHA256"]
       assert manifest.signer_key_sha256 == digest(Base.decode16!(env["DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"], case: :lower))
+      assert manifest.source_bytes == File.read!(path)
+      assert manifest.source_signature_hex == env["DAHLIA_MANAGED_DELEGATION_SIGNATURE_ED25519"]
+      assert manifest.source_public_key_hex == env["DAHLIA_MANAGED_DELEGATION_PUBLIC_KEY_ED25519"]
       assert length(manifest.entries) == 2
       refute Map.has_key?(manifest, :delegations)
     end

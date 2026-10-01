@@ -11,6 +11,22 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
   alias SymphonyElixir.ExecutionFence
 
   @schema_version 1
+  @successor_retirement_fields [
+    {"type", :type},
+    {"repository_ref", :repository_ref},
+    {"managed_project_profile_id", :managed_project_profile_id},
+    {"prior_accountable_id", :prior_accountable_id},
+    {"prior_responsible_id", :prior_responsible_id},
+    {"prior_accountable_digest", :prior_accountable_digest},
+    {"prior_responsible_digest", :prior_responsible_digest},
+    {"successor_accountable_id", :successor_accountable_id},
+    {"successor_responsible_id", :successor_responsible_id},
+    {"successor_accountable_digest", :successor_accountable_digest},
+    {"successor_responsible_digest", :successor_responsible_digest},
+    {"manifest_sha256", :manifest_sha256},
+    {"signer_key_sha256", :signer_key_sha256},
+    {"observation_sha256", :observation_sha256}
+  ]
 
   @type load_result :: {:ok, ExecutionFence.state()} | :missing | {:error, term()}
 
@@ -36,7 +52,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
   @spec save(Path.t(), ExecutionFence.state()) :: :ok | {:error, term()}
   def save(path, state) when is_binary(path) do
     with :ok <- ExecutionFence.validate(state),
-         {:ok, encoded} <- encode_state(state),
+         {:ok, encoded} <- encode_bytes(state),
          :ok <- File.mkdir_p(Path.dirname(path)),
          :ok <- atomic_write(path, encoded) do
       :ok
@@ -44,6 +60,12 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
       {:error, reason} -> {:error, reason}
       other -> {:error, other}
     end
+  end
+
+  @doc "Encodes a validated execution-fence snapshot without writing it to disk."
+  @spec encode_bytes(ExecutionFence.state()) :: {:ok, binary()} | {:error, term()}
+  def encode_bytes(state) do
+    with :ok <- ExecutionFence.validate(state), do: encode_state(state)
   end
 
   defp encode_state(state) do
@@ -496,27 +518,41 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
 
   defp decode_retirement(payload) when is_map(payload) do
     keys = ~w(active_process evidence_ref generation issue_id linear_state local_claim provider_claim provider_projection_id retired_at_ms workspace)
+    successor_keys = Enum.sort(keys ++ Enum.map(@successor_retirement_fields, &elem(&1, 0)))
 
-    if Enum.sort(Map.keys(payload)) == keys do
-      {:ok,
-       %{
-         active_process: decode_absence(payload["active_process"]),
-         evidence_ref: payload["evidence_ref"],
-         generation: payload["generation"],
-         issue_id: payload["issue_id"],
-         linear_state: payload["linear_state"],
-         local_claim: decode_absence(payload["local_claim"]),
-         provider_claim: decode_absence(payload["provider_claim"]),
-         provider_projection_id: payload["provider_projection_id"],
-         retired_at_ms: payload["retired_at_ms"],
-         workspace: decode_absence(payload["workspace"])
-       }}
-    else
-      {:error, :invalid_retirement}
+    cond do
+      Enum.sort(Map.keys(payload)) == keys ->
+        {:ok, decode_retirement_base(payload)}
+
+      Enum.sort(Map.keys(payload)) == successor_keys ->
+        {:ok,
+         Map.merge(
+           decode_retirement_base(payload),
+           Map.new(@successor_retirement_fields, fn {key, atom} -> {atom, payload[key]} end)
+         )}
+
+      true ->
+        {:error, :invalid_retirement}
     end
   end
 
   defp decode_retirement(_payload), do: {:error, :invalid_retirement}
+
+  defp decode_retirement_base(payload) do
+    %{
+      active_process: decode_absence(payload["active_process"]),
+      evidence_ref: payload["evidence_ref"],
+      generation: payload["generation"],
+      issue_id: payload["issue_id"],
+      linear_state: payload["linear_state"],
+      local_claim: decode_absence(payload["local_claim"]),
+      provider_claim: decode_absence(payload["provider_claim"]),
+      provider_projection_id: payload["provider_projection_id"],
+      retired_at_ms: payload["retired_at_ms"],
+      workspace: decode_absence(payload["workspace"])
+    }
+  end
+
   defp decode_absence("absent"), do: :absent
   defp decode_absence(value), do: value
 
@@ -695,7 +731,7 @@ defmodule SymphonyElixir.ExecutionFence.Persistence do
     case :file.open(String.to_charlist(path), [:write, :binary, :raw, :sync]) do
       {:ok, handle} ->
         try do
-          :file.write(handle, contents)
+          with :ok <- File.chmod(path, 0o600), do: :file.write(handle, contents)
         after
           :file.close(handle)
         end

@@ -39,3 +39,19 @@ jobs:
 
       - name: Build the disposable worker image
         run: docker build --file worker-image/Dockerfile --tag symphony-worker:ci ..
+
+  hgs740-root-fixture:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Build isolated HGS-740 root fixture image
+        run: docker build --file elixir/test/root_fixtures/Dockerfile --tag symphony-hgs740-root-fixture:ci .
+
+      - name: Exercise root-only on-disk recovery and denial paths
+        run: >-
+          docker run --rm --network none --user 0:0
+          --tmpfs /srv:rw,nosuid,nodev,mode=0700
+          --tmpfs /tmp:rw,nosuid,nodev,mode=1777
+          symphony-hgs740-root-fixture:ci

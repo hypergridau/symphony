@@ -26,6 +26,7 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.RunnerObservationReporter,
           SymphonyElixir.Application,
           SymphonyElixir.CLI,
+          SymphonyElixir.UnsubmittedSuccessorRetirement,
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.Shell,

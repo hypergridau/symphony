@@ -47,7 +47,14 @@ defmodule SymphonyElixir.ManagedResponsibility.Manifest do
          version when version in [1, 2] <- payload["schema_version"],
          {:ok, signer_key_sha256} <- verify_signature(bytes, signature, public_key, version),
          {:ok, manifest} <- ManagedResponsibility.decode(payload, config, now_ms) do
-      {:ok, Map.merge(manifest, %{source_sha256: digest, signer_key_sha256: signer_key_sha256})}
+      {:ok,
+       Map.merge(manifest, %{
+         source_sha256: digest,
+         signer_key_sha256: signer_key_sha256,
+         source_bytes: bytes,
+         source_signature_hex: signature,
+         source_public_key_hex: public_key
+       })}
     else
       false -> {:error, :untrusted_managed_delegation_file}
       {:error, reason} -> {:error, {:managed_delegation_file, reason}}

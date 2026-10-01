@@ -183,7 +183,99 @@ defmodule SymphonyElixir.WorkPackageClaim do
     end
   end
 
-  @doc "Durably binds a ready, still-suspended allocation to the confirmed claim for recovery."
+  @doc "Moves only an exact confirmed claim with no recorded allocation into pre-allocation recovery."
+  @spec begin_pre_allocation_recovery(input()) :: :ok | {:error, term()}
+  def begin_pre_allocation_recovery(input) when is_map(input) do
+    with_confirmed_unstarted_claim(input, fn _authority, journal, key, _reservation ->
+      case Dispatch.begin_recovery(journal, key, input) do
+        {:ok, next_journal} -> Journal.save(input.journal_path, next_journal)
+        {:error, _reason} = error -> error
+      end
+    end)
+  end
+
+  def begin_pre_allocation_recovery(_input), do: {:error, :preallocation_claim_state_changed}
+
+  @doc "Serializes the first suspended Job create with pre-allocation recovery for this journal."
+  @spec allocate_suspended(input(), map(), (-> term())) :: {:ok, map()} | {:held, term()} | {:error, term()}
+  def allocate_suspended(input, assignment, allocation_fun)
+      when is_map(input) and is_map(assignment) and is_function(allocation_fun, 0) do
+    with_confirmed_unstarted_claim(input, fn _authority, journal, key, reservation ->
+      allocate_suspended_locked(input, assignment, journal, key, reservation, allocation_fun)
+    end)
+  end
+
+  def allocate_suspended(_input, _assignment, _allocation_fun), do: {:error, :preallocation_claim_state_changed}
+
+  defp allocate_suspended_locked(input, assignment, journal, key, reservation, allocation_fun) do
+    case Dispatch.begin_suspended_allocation(journal, key, input) do
+      {:ok, allocation_intent} ->
+        prepare_and_allocate_suspended(input, assignment, allocation_intent, key, reservation, allocation_fun)
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp prepare_and_allocate_suspended(input, assignment, intent, key, reservation, allocation_fun) do
+    case allocation_intent_with_snapshot(input, assignment, intent, key, reservation) do
+      {:ok, pending_journal} -> persist_intent_and_allocate(input, pending_journal, key, allocation_fun)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp persist_intent_and_allocate(input, pending_journal, key, allocation_fun) do
+    case Journal.save(input.journal_path, pending_journal) do
+      :ok -> allocate_and_record_suspended(input, key, allocation_fun)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp allocate_and_record_suspended(input, key, allocation_fun) do
+    case safely_allocate(allocation_fun) do
+      {:ok, %{id: allocation_id, status: :ready} = allocation} when is_binary(allocation_id) ->
+        case Journal.load(input.journal_path) do
+          {:ok, journal} -> persist_suspended_allocation(input, journal, key, allocation_id, allocation)
+          {:error, reason} -> {:held, {:allocation_journal_uncertain, reason}}
+          :missing -> {:held, {:allocation_journal_uncertain, :claim_journal_missing}}
+        end
+
+      result ->
+        allocation_uncertain_result(result)
+    end
+  end
+
+  defp allocation_intent_with_snapshot(input, assignment, journal, key, reservation) do
+    pending_reservation = Map.get(journal.reservations, key)
+
+    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         %{environment: %{target_environment: :rke2}} <- assignment,
+         {:ok, _binding} <- ClaimBinding.from_journal(reservation, assignment, input.runner_id),
+         {:ok, snapshot} <- ManagedAssignmentBundle.snapshot(assignment),
+         :ok <- unchanged_assignment_snapshot(reservation, snapshot),
+         true <- is_map(pending_reservation),
+         {:ok, next_journal} <- Journal.put(journal, key, Map.put(pending_reservation, :assignment_snapshot, snapshot)) do
+      {:ok, next_journal}
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :assignment_snapshot_not_admissible}
+    end
+  end
+
+  defp persist_suspended_allocation(input, journal, key, allocation_id, allocation) do
+    case Dispatch.record_suspended_allocation(journal, key, input, allocation_id) do
+      {:ok, next_journal} ->
+        case Journal.save(input.journal_path, next_journal) do
+          :ok -> {:ok, allocation}
+          {:error, reason} -> {:held, {:allocation_journal_uncertain, reason}}
+        end
+
+      {:error, reason} ->
+        {:held, {:allocation_journal_uncertain, reason}}
+    end
+  end
+
+  @doc "Durably binds a ready, still-suspended allocation to its journaled claim."
   @spec record_suspended_allocation(input(), %{id: String.t(), status: :ready}) :: :ok | {:error, term()}
   def record_suspended_allocation(input, %{id: allocation_id, status: :ready} = allocation)
       when is_map(input) and map_size(allocation) == 2 and is_binary(allocation_id) do
@@ -226,14 +318,42 @@ defmodule SymphonyElixir.WorkPackageClaim do
   @doc "Retains the exact validated RKE2 assignment before its suspended Job is created."
   @spec record_assignment_snapshot(input(), map()) :: :ok | {:error, term()}
   def record_assignment_snapshot(input, bundle) when is_map(input) and is_map(bundle) do
-    with :ok <- prepare_suspended_allocation(input),
-         :ok <- ManagedAssignmentBundle.validate_bundle(bundle),
+    record_assignment_snapshot_for_phase(input, bundle, "confirmed")
+  end
+
+  def record_assignment_snapshot(_input, _bundle), do: {:error, :assignment_snapshot_not_admissible}
+
+  @doc "Verifies the exact assignment snapshot inside a journaled first-allocation intent."
+  @spec verify_pending_assignment_snapshot(input(), map()) :: :ok | {:error, term()}
+  def verify_pending_assignment_snapshot(input, bundle) when is_map(input) and is_map(bundle) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(bundle),
+         {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+         {:ok, journal} <- Journal.load(input.journal_path),
+         key = journal_key(authority),
+         reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+         :ok <- reservation_matches_authority(reservation, authority),
+         %{phase: "allocation_pending"} <- reservation.dispatch,
+         {:ok, snapshot} <- ManagedAssignmentBundle.snapshot(bundle),
+         true <- reservation.assignment_snapshot == snapshot do
+      :ok
+    else
+      :missing -> {:error, :claim_journal_missing}
+      {:error, _reason} = error -> error
+      _ -> {:error, :assignment_snapshot_not_admissible}
+    end
+  end
+
+  def verify_pending_assignment_snapshot(_input, _bundle), do: {:error, :assignment_snapshot_not_admissible}
+
+  defp record_assignment_snapshot_for_phase(input, bundle, expected_phase) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(bundle),
          %{environment: %{target_environment: :rke2}} <- bundle,
          {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
          {:ok, journal} <- Journal.load(input.journal_path),
          key = journal_key(authority),
          reservation when is_map(reservation) <- Map.get(journal.reservations, key),
          :ok <- reservation_matches_authority(reservation, authority),
+         %{phase: ^expected_phase} <- reservation.dispatch,
          {:ok, _binding} <- ClaimBinding.from_journal(reservation, bundle, input.runner_id),
          {:ok, snapshot} <- ManagedAssignmentBundle.snapshot(bundle),
          :ok <- unchanged_assignment_snapshot(reservation, snapshot),
@@ -246,8 +366,6 @@ defmodule SymphonyElixir.WorkPackageClaim do
       _ -> {:error, :assignment_snapshot_not_admissible}
     end
   end
-
-  def record_assignment_snapshot(_input, _bundle), do: {:error, :assignment_snapshot_not_admissible}
 
   defp unchanged_assignment_snapshot(%{assignment_snapshot: snapshot}, snapshot), do: :ok
   defp unchanged_assignment_snapshot(%{assignment_snapshot: _other}, _snapshot), do: {:error, :assignment_snapshot_changed}
@@ -359,6 +477,37 @@ defmodule SymphonyElixir.WorkPackageClaim do
       {:error, _reason} = error -> error
     end
   end
+
+  defp with_confirmed_unstarted_claim(input, callback) when is_function(callback, 4) do
+    Journal.with_lock(input.journal_path, fn ->
+      with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
+           {:ok, journal} <- Journal.load(input.journal_path),
+           key = journal_key(authority),
+           reservation when is_map(reservation) <- Map.get(journal.reservations, key),
+           :ok <- reservation_matches_authority(reservation, authority),
+           %{phase: "confirmed"} = dispatch <- reservation.dispatch,
+           true <- is_nil(Map.get(dispatch, :allocation_id)),
+           true <- dispatch.authority_digest == Dispatch.authority_digest(input) do
+        callback.(authority, journal, key, reservation)
+      else
+        :missing -> {:error, :claim_journal_missing}
+        {:error, _reason} = error -> error
+        _ -> {:error, :preallocation_claim_state_changed}
+      end
+    end)
+  end
+
+  defp safely_allocate(allocation_fun) do
+    allocation_fun.()
+  rescue
+    _error -> {:held, :suspended_allocation_outcome_uncertain}
+  catch
+    _kind, _reason -> {:held, :suspended_allocation_outcome_uncertain}
+  end
+
+  defp allocation_uncertain_result({:held, _reason} = result), do: result
+  defp allocation_uncertain_result({:error, reason}), do: {:held, {:allocation_outcome_uncertain, reason}}
+  defp allocation_uncertain_result(_result), do: {:held, :suspended_allocation_outcome_uncertain}
 
   defp authority(input, now_ms) do
     authority(input, now_ms, :admission)
