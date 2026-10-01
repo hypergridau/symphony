@@ -183,3 +183,8 @@ Pre-execution abort input publication sends exact selectors to the fixed root
 service after confirmed deletion. The result reference is derived from the signed
 assignment; publication requires the matching retained journal and root
 acknowledgement. See [the runtime contract](elixir/README.md).
+
+Paused HGS-740 recovery supports one append-only reconciliation observation
+epoch for the exact retained generation-2 failed issuance. Historical inputs
+remain pinned and unchanged; fresh evidence uses the existing signed recovery
+and provider release path. See [the runtime contract](elixir/README.md).

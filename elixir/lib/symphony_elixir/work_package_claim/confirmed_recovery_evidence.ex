@@ -5,6 +5,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   transition.
   """
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryUnsubmittedPredecessor
 
   @contract_v1 "work-package-paused-confirmed-recovery.v1"
@@ -140,6 +141,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          true <- uuid?(payload["nonce"]),
          :ok <- validate_observation(payload["observation"], payload, bindings),
          :ok <- validate_provider_readback(payload["providerHeld"], payload, bindings),
+         :ok <- reconciliation_provider_binding(payload),
          {:ok, observation_at_ms} <- timestamp_ms(payload["observation"]["observedAt"]),
          {:ok, provider_at_ms} <- timestamp_ms(payload["providerHeld"]["observedAt"]),
          {:ok, issued_at_ms} <- timestamp_ms(payload["issuedAt"]),
@@ -156,6 +158,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
 
   def validate_payload(_payload, _bindings),
     do: {:error, :invalid_confirmed_recovery_evidence}
+
+  defp reconciliation_provider_binding(%{"observation" => %{"reconciliation" => metadata}} = payload) do
+    hash = :crypto.hash(:sha256, canonical_json(payload["providerHeld"])) |> Base.encode16(case: :lower)
+    if hash == metadata["providerHeldSHA256"], do: :ok, else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp reconciliation_provider_binding(_payload), do: :ok
 
   defp validate_contract(%{"contractVersion" => @contract_v1} = payload) do
     if exact_keys?(payload, @payload_fields_v1), do: :ok, else: {:error, :invalid_confirmed_recovery_evidence}
@@ -212,7 +221,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   defp valid_assignment_binding(_payload, _bindings), do: {:error, :invalid_confirmed_recovery_evidence}
 
   defp validate_observation(observation, payload, bindings) do
-    with true <- is_map(observation) and exact_keys?(observation, @observation_fields),
+    with true <- is_map(observation),
+         :ok <- observation_shape(observation, payload["contractVersion"]),
          true <- observation["dispatchPhase"] == "confirmed" and observation["localGenerationMax"] == 2,
          true <- Enum.all?(~w(globalPause runnerStopped neverSpawned supervisedWorkerAbsent workspaceAbsent turnsAbsent), &(observation[&1] == true)),
          true <- observation["processCount"] == 0,
@@ -232,6 +242,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
     else
       _ -> {:error, :invalid_confirmed_recovery_evidence}
     end
+  end
+
+  defp observation_shape(%{"reconciliation" => _metadata} = observation, @contract_v3) do
+    if exact_keys?(observation, ["reconciliation" | @observation_fields]),
+      do: ConfirmedRecoveryReconciliation.validate(observation),
+      else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
+  defp observation_shape(observation, _version) do
+    if exact_keys?(observation, @observation_fields), do: :ok, else: {:error, :invalid_confirmed_recovery_evidence}
   end
 
   defp validate_expected_claim(claim, payload, bindings) do

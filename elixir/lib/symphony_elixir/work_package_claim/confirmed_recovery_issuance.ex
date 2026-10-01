@@ -39,8 +39,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
     runtime = context.runtime
     host = context.host_ops
 
-    with :ok <- host.require_mutation_quiescent.(runtime, state_owner_uid(runtime, host)),
-         {:ok, bundle_bytes} <- host.read_issuer_bundle.(context.issue_id, bundle_path),
+    with :ok <- host.require_mutation_quiescent.(runtime, state_owner_uid(runtime, host)) do
+      case resume_reconciliation(context, bundle_path) do
+        :not_issued -> issue_new(context, bundle_path)
+        result -> result
+      end
+    end
+  end
+
+  defp resume_reconciliation(context, bundle_path) do
+    case Map.get(context.host_ops, :resume_reconciliation) do
+      callback when is_function(callback, 2) -> callback.(context, bundle_path)
+      _ -> :not_issued
+    end
+  end
+
+  defp issue_new(context, bundle_path) do
+    host = context.host_ops
+
+    with {:ok, bundle_bytes} <- host.read_issuer_bundle.(context.issue_id, bundle_path),
          do: issue_bundle_bytes(context, bundle_bytes, &fresh_kubernetes/2)
   end
 
@@ -77,6 +94,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance do
   end
 
   if Mix.env() == :test do
+    @doc false
+    @spec issue_locked_for_test(map(), String.t()) :: :ok | {:error, term()}
+    def issue_locked_for_test(context, path), do: issue_locked(context, path)
+
     @doc false
     @spec issue_bundle_with_test_context(
             SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext.t(),

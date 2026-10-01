@@ -12,6 +12,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.ExecutionFence.Persistence, as: FencePersistence
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryWorkflow, Journal}
 
   @state_root "/srv/dahlia-runner-state"
@@ -113,6 +115,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       read_public_key: &read_public_key/0,
       sign_recovery_payload: &sign_recovery_payload/1,
       read_issuer_bundle: &read_issuer_bundle/2,
+      resume_reconciliation: &EpochHost.resume/2,
       persist_issuer_outputs: &persist_issuer_outputs/3,
       verify_signed_evidence: &verify_signed_evidence/2,
       save_state: &save_state/3,
@@ -190,7 +193,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec verify_signed_evidence(binary(), map()) :: {:ok, map()} | {:error, term()}
   def verify_signed_evidence(bytes, bindings) do
     with {:ok, key} <- read_public_key(),
-         do: ConfirmedRecoveryEvidence.verify(bytes, key, bindings)
+         {:ok, payload} <- ConfirmedRecoveryEvidence.verify(bytes, key, bindings),
+         :ok <- EpochHost.verify_envelope(payload["observation"], bytes) do
+      {:ok, payload}
+    end
   end
 
   @doc false
@@ -216,7 +222,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @doc false
   @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
   def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
-    read_issuer_bundle_with(issue_id, path, &require_issuer_input_directory/1, &File.lstat/1, &File.read/1)
+    if path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id)), "issuer-input.json") do
+      with :ok <- require_issuer_input_directory(issue_id),
+           :ok <- EpochHost.require_directory(issue_id),
+           {:ok, bytes} <- EpochHost.read_private(path, 1_048_576),
+           {:ok, bundle} when is_map(bundle) <- Jason.decode(bytes),
+           true <- ConfirmedRecoveryEvidence.canonical_json(bundle) == bytes,
+           :ok <- Reconciliation.verify(bundle["observation"], marker_directory(issue_id), &EpochHost.read_private/2) do
+        {:ok, bytes}
+      else
+        _ -> {:error, :untrusted_issuer_bundle}
+      end
+    else
+      read_issuer_bundle_with(issue_id, path, &require_issuer_input_directory/1, &File.lstat/1, &File.read/1)
+    end
   end
 
   def read_issuer_bundle(_issue_id, _path), do: {:error, :untrusted_issuer_bundle}
@@ -225,18 +244,28 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec persist_issuer_outputs(String.t(), binary(), binary()) :: :ok | {:error, term()}
   def persist_issuer_outputs(issue_id, candidate, envelope)
       when is_binary(issue_id) and is_binary(candidate) and is_binary(envelope) do
-    persist_issuer_outputs_with(
-      issue_id,
-      candidate,
-      envelope,
-      &require_issue_id/1,
-      &require_issuer_input_directory/1,
-      &exclusive_durable_write/2,
-      &sync_directory/1
-    )
+    with :ok <- require_issue_id(issue_id),
+         {:ok, observation} <- Jason.decode(candidate),
+         :ok <- verify_reconciliation(observation) do
+      if Map.has_key?(observation, "reconciliation") do
+        EpochHost.persist(issue_id, candidate, envelope, &exclusive_durable_write/2, &sync_directory/1)
+      else
+        persist_issuer_outputs_with(
+          issue_id,
+          candidate,
+          envelope,
+          &require_issue_id/1,
+          &require_issuer_input_directory/1,
+          &exclusive_durable_write/2,
+          &sync_directory/1
+        )
+      end
+    end
   end
 
   def persist_issuer_outputs(_issue_id, _candidate, _envelope), do: {:error, :issuer_output_conflict}
+
+  defp verify_reconciliation(observation), do: EpochHost.verify(observation)
 
   defp verified_context(issue_id, pool, nonce, workflow_path, runtime) do
     {:ok,

@@ -6,10 +6,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuance
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer, as: Issuer
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   @now_ms 1_790_762_400_000
-  @issue "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+  @issue "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @profile "profile-1"
   @repository "hypergrid.au/symphony"
   @reservation "reservation-gen2"
@@ -62,6 +63,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
 
     assert :ok = Evidence.validate_payload(payload, absent_snapshot_bindings())
 
+    epoch_payload = reconciliation_payload(payload)
+    epoch_bindings = Map.put(absent_snapshot_bindings(), :reservation_id, epoch_payload["reservationId"])
+    assert :ok = Evidence.validate_payload(epoch_payload, epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "reconciliation", "historicalSHA256"], %{}), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "reconciliation", "epoch"], "epoch-2"), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "processCount"], 1), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "globalPause"], false), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "workspaceAbsent"], false), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "kubernetes", "jobs", "claimAbsent"], false), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["observation", "kubernetes", "pods", "claimAbsent"], false), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["providerHeld", "scopeState"], "released"), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["providerHeld", "credentialLeaseInventory", "leaseIds"], ["lease"]), epoch_bindings)
+    refute_payload_valid(put_in(epoch_payload, ["providerHeld", "oauthSlotLeaseInventory", "leaseCount"], 1), epoch_bindings)
+    refute_payload_valid(epoch_payload, Map.put(epoch_bindings, :now_ms, @now_ms + 61_000))
+
     bundle =
       Map.take(payload, ~w(assignmentSHA256 assignmentSnapshotState reservationId observation providerHeld))
       |> Map.put("predecessorClaimState", "unsubmitted")
@@ -69,6 +85,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     {public, private} = :crypto.generate_key(:eddsa, :ed25519)
     sign = fn message -> :crypto.sign(:eddsa, :none, message, [private, :ed25519]) end
     verify = fn envelope, bindings -> Evidence.verify_test_envelope(envelope, public, bindings) end
+    epoch_bundle = Map.put(bundle, "observation", epoch_payload["observation"]) |> Map.put("reservationId", epoch_payload["reservationId"]) |> Map.put("providerHeld", epoch_payload["providerHeld"])
+
+    assert {:ok, epoch_issued, _bytes, epoch_envelope} =
+             Issuer.issue(Evidence.canonical_json(epoch_bundle), @pool, @issue, @nonce, epoch_bindings, sign, verify)
+
+    assert {:ok, ^epoch_issued} = Evidence.verify_test_envelope(epoch_envelope, public, epoch_bindings)
     bindings = Issuer.bindings(bundle, @pool, @issue, @nonce, @now_ms)
     assert {:ok, issued, _bytes, envelope} = Issuer.issue(Evidence.canonical_json(bundle), @pool, @issue, @nonce, bindings, sign, verify)
     assert issued["contractVersion"] == "work-package-paused-confirmed-recovery.v3"
@@ -78,6 +100,42 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_payload_valid(put_in(payload, ["observation", "predecessorRetirement", "claim"], predecessor["claim"]), absent_snapshot_bindings())
     refute_payload_valid(put_in(payload, ["observation", "predecessorRetirement", "execution", "leases", predecessor["claim"]["sessionId"], "head"], "observed"), absent_snapshot_bindings())
     refute Evidence.signature_message("payload", "work-package-paused-confirmed-recovery.v3") == Evidence.signature_message("payload", "work-package-paused-confirmed-recovery.v2")
+  end
+
+  defp reconciliation_payload(payload) do
+    expected =
+      payload["observation"]["expected"]
+      |> Map.put("projectionId", "workpkg_4446a7d851764ecf9bf62bfbae26d1cc")
+      |> Map.put("reservationId", "workpkgreservation_e19008ccb2764fe79ca68bf500d20a1f")
+
+    payload =
+      payload
+      |> Map.put("reservationId", expected["reservationId"])
+      |> put_in(["observation", "expected"], expected)
+      |> put_in(["providerHeld", "expected"], expected)
+      |> put_in(["observation", "kubernetes", "claim", "reservationId"], expected["reservationId"])
+
+    payload = put_in(payload, ["providerHeld", "assignmentDigest"], Evidence.tuple_digest(expected))
+    retirement = payload["observation"]["predecessorRetirement"]["receipt"] |> Map.put("provider_projection_id", expected["projectionId"])
+    retirement = Map.put(retirement, "evidence_ref", Evidence.retirement_evidence_ref(retirement))
+
+    payload =
+      payload
+      |> put_in(["observation", "predecessorRetirement", "receipt"], retirement)
+      |> put_in(["observation", "predecessorRetirement", "execution", "retirement"], retirement)
+
+    metadata = %{
+      "contractVersion" => "hgs740-reconciliation-observation.v1",
+      "epoch" => "epoch-1",
+      "historicalSHA256" => ConfirmedRecoveryReconciliation.historical_hashes(),
+      "observedAt" => payload["observation"]["observedAt"],
+      "reviewedPreflightSHA256" => @fence_sha,
+      "providerReadbackSHA256" => @fence_sha,
+      "issuerInputSHA256" => @fence_sha,
+      "providerHeldSHA256" => :crypto.hash(:sha256, Evidence.canonical_json(payload["providerHeld"])) |> Base.encode16(case: :lower)
+    }
+
+    put_in(payload, ["observation", "reconciliation"], metadata)
   end
 
   test "rejects a changed provider tuple, non-held state, or stale provider readback" do
@@ -133,7 +191,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
   test "provider tuple digest uses the HGS485 field order and sorted scope keys" do
     claim = claim()
     assert Evidence.tuple_digest(claim) == Evidence.tuple_digest(%{claim | "scopeKeys" => Enum.reverse(claim["scopeKeys"])})
-    assert Evidence.tuple_digest(claim) == "98786bf424799b5c00d56df82356d2d0dc56d7d9e35e0e754b7ee67e75959f7d"
+    assert Evidence.tuple_digest(claim) == "4f2bda1e3d35af5d8b8d413818202dd3ec7ae539a1dde52a57349e9ec7b9b7b0"
   end
 
   test "retirement receipt evidence uses the producer's deterministic ETF tuple digest" do

@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost, as: RootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
@@ -21,6 +22,58 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     assert {:ok, %File.Stat{type: :directory}} = File.stat("/srv")
     File.mkdir_p!(@fixture_root)
     :ok
+  end
+
+  test "epoch issuance survives every publication crash prefix without replacing its signature" do
+    for prefix <- 0..3 do
+      issue_id = "66666666-6666-4666-8666-66666666666#{prefix}"
+      directory = RootHost.marker_directory(issue_id)
+      epoch = Path.join(directory, "reconciliation/epoch-1")
+      File.mkdir_p!(epoch)
+      for path <- [Path.dirname(directory), directory, Path.dirname(epoch), epoch], do: File.chmod!(path, 0o700)
+      Process.put(:epoch_writes, 0)
+
+      write = fn path, bytes ->
+        count = Process.get(:epoch_writes)
+
+        if count == prefix do
+          {:error, :synthetic_crash}
+        else
+          Process.put(:epoch_writes, count + 1)
+          RootHost.exclusive_durable_write_for_test(path, bytes)
+        end
+      end
+
+      sync = fn _directory -> :ok end
+      first = EpochHost.persist(issue_id, "candidate", "envelope", write, sync)
+      assert first == if(prefix == 3, do: :ok, else: {:error, :issuer_output_conflict})
+      assert :ok = EpochHost.persist(issue_id, "candidate", "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+      assert :ok = EpochHost.persist(issue_id, "candidate", "envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+      assert File.read!(Path.join(epoch, "issued-envelope.json")) == "envelope"
+      assert File.read!(Path.join(directory, "candidate.json")) == "candidate"
+      assert File.read!(Path.join(directory, "confirmed-root-envelope.json")) == "envelope"
+
+      assert {:error, :issuer_output_conflict} =
+               EpochHost.persist(issue_id, "candidate", "different-envelope", &RootHost.exclusive_durable_write_for_test/2, sync)
+
+      assert File.read!(Path.join(epoch, "issued-envelope.json")) == "envelope"
+    end
+  end
+
+  test "epoch private reader rejects writable files and symlinks on the actual filesystem" do
+    directory = Path.join(@fixture_root, "epoch-private-reader")
+    File.mkdir_p!(directory)
+    File.chmod!(directory, 0o700)
+    path = Path.join(directory, "evidence.json")
+    write_root_private(path, "{}")
+    assert {:ok, "{}"} = EpochHost.read_private(path, 10)
+    File.chmod!(path, 0o644)
+    assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(path, 10)
+    link = Path.join(directory, "redirect.json")
+    File.ln_s!(path, link)
+    assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(link, 10)
+    File.chmod!(path, 0o600)
+    assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(path, 1)
   end
 
   test "production WAL replays every on-disk crash prefix and preserves exact bytes" do

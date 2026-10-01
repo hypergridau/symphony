@@ -1539,3 +1539,23 @@ intent was appended. Frigga persists `recovery_pending`, releases only the
 local execution lease, and keeps the provider claim blocked for the existing
 never-started reconciliation path. Timeouts, lost replies, and other witness
 errors remain at `spawn_started` until exact root-log replay resolves them.
+
+### HGS-740 append-only observation reconciliation
+
+The exact retained HGS-736 issue `f77e349e-21d9-4bdf-bad3-ce08b302e7e8`,
+generation 2, may use the fixed `generation-2/reconciliation/epoch-1` input.
+`ConfirmedRecoveryReconciliation` verifies the pinned three historical hashes,
+unchanged claim/state/fence/graph/predecessor/witness bindings and immutable
+fresh input manifest. The existing v3 signature covers its explicit nested
+`hgs740-reconciliation-observation.v1` contract and provider-held digest.
+Historical timestamps are never made current; existing 60-second observation
+freshness and all no-worker/no-Job/no-Pod/quiescence guards still apply.
+
+`ConfirmedRecoveryReconciliationHost` owns fixed root-private file reads and
+append-only signature custody. The issuer retains the signed epoch envelope
+before publishing the base candidate/envelope. Restart republishes only exact
+saved bytes; stale or changed results fail closed without signing a new result.
+The native root signature verifier rechecks history and epoch custody before
+both initial and replayed WAL use. An existing epoch cannot be bypassed by a
+legacy observation lacking its manifest. No extra provider API or lifecycle
+engine is introduced. Source acceptance is separate from installed/live release.
