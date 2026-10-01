@@ -2,10 +2,20 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   @moduledoc """
   Coordinates the trusted host's durable root-witness and Dahlia prepare steps
   before passing the saved observation and journal guard to the RKE2 adapter.
+  After confirmed deletion, it asks the fixed root input-publisher socket to
+  publish the claim-bound HGS-733 inputs using selectors only.
   """
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.RKE2Job.{AbortPrepareJournal, JournalPrepareAckGuard, ManagedExecutorAdapter}
+  alias SymphonyElixir.ManagedExecutor.AbortResultPublisher
+
+  alias SymphonyElixir.RKE2Job.{
+    AbortPrepareJournal,
+    JournalPrepareAckGuard,
+    ManagedExecutorAdapter,
+    RootAbortInputPublisher
+  }
+
   alias SymphonyElixir.WorkPackageClaim.HostWitness
 
   @contract_version "work-package-pre-execution-abort-prepare.v1"
@@ -70,14 +80,21 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
         |> Map.put(:prepare_ack_guard_context, %{journal_root: caller_context.journal_root, claim: claim})
         |> Map.put(:confirmed_delete_journal, %{journal_root: caller_context.journal_root, claim: claim, record: record})
 
-      ManagedExecutorAdapter.confirm_abort_unstarted_owned(
-        allocation,
-        assignment,
-        idempotency_key,
-        record.observation,
-        prepared.prepare_ack,
-        context
-      )
+      with :ok <-
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               idempotency_key,
+               record.observation,
+               prepared.prepare_ack,
+               context
+             ),
+           :ok <- publish_root_abort_inputs(claim, record, allocation, assignment, caller_context) do
+        :ok
+      else
+        {:held, _reason} = held -> held
+        {:error, _reason} = error -> error
+      end
     else
       {:held, _reason} = held -> held
       :missing -> {:held, :abort_prepare_journal_missing}
@@ -161,7 +178,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
 
   defp no_production_test_seams?(context) do
     not Map.has_key?(context, :post_fun) and not Map.has_key?(context.witness_input, :host_witness_fun) and
-      Map.get(context, :host_witness, HostWitness) == HostWitness
+      Map.get(context, :host_witness, HostWitness) == HostWitness and
+      Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher) == RootAbortInputPublisher
   end
 
   defp valid_test_injections?(context) do
@@ -348,6 +366,48 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     end
   rescue
     _ -> {:held, :abort_prepare_root_intent_unverified}
+  end
+
+  defp publish_root_abort_inputs(claim, record, allocation, assignment, context) do
+    publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
+    uid = get_in(record.observation, ["job", "uid"])
+
+    with {:ok, _confirmed_delete} <-
+           AbortPrepareJournal.load_confirmed_delete(context.journal_root, claim, record, uid),
+         {:ok, claim_sha256} <- AbortPrepareJournal.identity_key(claim),
+         {:ok, result_reference} <- canonical_result_reference(context, assignment),
+         request = %{
+           "schemaVersion" => 1,
+           "operation" => "publish_pre_execution_abort_inputs",
+           "claimSHA256" => claim_sha256,
+           "assignmentDigest" => assignment.sha256,
+           "allocationId" => allocation.id,
+           "resultReference" => result_reference
+         },
+         :ok <- RootAbortInputPublisher.validate_request(request),
+         true <- is_atom(publisher) and Code.ensure_loaded?(publisher) and function_exported?(publisher, :publish, 1),
+         :ok <- publisher.publish(request) do
+      :ok
+    else
+      {:held, _reason} = held -> held
+      :missing -> {:held, :abort_prepare_confirmed_delete_checkpoint_missing}
+      {:error, _reason} -> {:held, :root_abort_input_publication_unavailable}
+      false -> {:held, :root_abort_input_publication_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_publication_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_publication_unavailable}
+  end
+
+  defp canonical_result_reference(context, assignment) do
+    with {:ok, reference} <- AbortResultPublisher.reference_for_assignment(assignment) do
+      case Map.fetch(context, :root_abort_result_reference) do
+        :error -> {:ok, reference}
+        {:ok, ^reference} -> {:ok, reference}
+        _ -> {:held, :root_abort_result_reference_mismatch}
+      end
+    end
   end
 
   defp validate_root_receipt(record, context, true, receipt) do

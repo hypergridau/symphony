@@ -16,6 +16,17 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
 
   @abort_result_stage "abort-result"
 
+  @doc "Selects the canonical result reference without claiming that a journal record exists."
+  @spec reference_for_assignment(map()) :: {:ok, String.t()} | {:error, atom()}
+  def reference_for_assignment(assignment) do
+    case ManagedAssignmentBundle.validate_bundle(assignment) do
+      :ok -> {:ok, result_reference(assignment.sha256 <> ":" <> @abort_result_stage)}
+      _ -> {:error, :invalid_abort_result_assignment}
+    end
+  rescue
+    _ -> {:error, :invalid_abort_result_assignment}
+  end
+
   @spec publish_or_reconcile_abort_result(map(), map(), map(), String.t(), term()) ::
           {:ok, String.t()} | {:error, atom()}
   def publish_or_reconcile_abort_result(allocation, assignment, result, idempotency_key, context) do

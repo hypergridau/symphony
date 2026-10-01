@@ -21,6 +21,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     key = assignment.sha256 <> ":abort-result"
     reference = reference(key)
     context = context(root, assignment)
+    assert {:ok, ^reference} = AbortResultPublisher.reference_for_assignment(assignment)
 
     assert {:ok, ^reference} =
              AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, context)
@@ -35,6 +36,15 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
              AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, context)
 
     assert {:ok, ^expected_bytes} = AbortResultJournal.load(root, reference, binding, expected_digest)
+  end
+
+  test "reference selection rejects invalid assignments and does not create a record", %{root: root} do
+    assert {:error, :invalid_abort_result_assignment} = AbortResultPublisher.reference_for_assignment(nil)
+
+    assignment = assignment()
+    assert {:ok, reference} = AbortResultPublisher.reference_for_assignment(assignment)
+    assert String.starts_with?(reference, "managed-abort-result:v1:")
+    assert File.ls!(root) == []
   end
 
   test "holds a changed allocation under the same stable reference", %{root: root} do
