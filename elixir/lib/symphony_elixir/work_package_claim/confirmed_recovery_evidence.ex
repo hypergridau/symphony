@@ -5,8 +5,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   transition.
   """
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryUnsubmittedPredecessor
+
   @contract_v1 "work-package-paused-confirmed-recovery.v1"
   @contract_v2 "work-package-paused-confirmed-recovery.v2"
+  @contract_v3 "work-package-paused-confirmed-recovery.v3"
   @signature_domain_v1 "hypergrid-work-package-recovery:hgs740-confirmed-root.v1\0"
   @signature_domain_v2 "hypergrid-work-package-recovery:hgs740-confirmed-root.v2\0"
   @hgs485_fingerprint "903b66d70e23219ee947bdbbdd738b29851302a24985edd4a69abc8a2875d8e6"
@@ -122,6 +125,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
   @spec signature_message(binary(), String.t()) :: binary() | nil
   def signature_message(payload, @contract_v1) when is_binary(payload), do: @signature_domain_v1 <> payload
   def signature_message(payload, @contract_v2) when is_binary(payload), do: @signature_domain_v2 <> payload
+  def signature_message(payload, @contract_v3) when is_binary(payload), do: "hypergrid-work-package-recovery:hgs740-confirmed-root.v3\0" <> payload
   def signature_message(_payload, _contract), do: nil
 
   @doc false
@@ -163,11 +167,17 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
       else: {:error, :invalid_confirmed_recovery_evidence}
   end
 
+  defp validate_contract(%{"contractVersion" => @contract_v3, "assignmentSnapshotState" => "absent"} = payload) do
+    if exact_keys?(payload, @payload_fields_v2) and is_nil(payload["assignmentSHA256"]),
+      do: :ok,
+      else: {:error, :invalid_confirmed_recovery_evidence}
+  end
+
   defp validate_contract(_payload), do: {:error, :invalid_confirmed_recovery_evidence}
 
   defp valid_bindings(payload, bindings) do
     expected_binding_keys =
-      if payload["contractVersion"] == @contract_v2,
+      if payload["contractVersion"] in [@contract_v2, @contract_v3],
         do: ~w(assignment_sha256 assignment_snapshot_state claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a,
         else: ~w(assignment_sha256 claim_journal_sha256 fence_sha256 generation issue_id now_ms nonce pool reservation_id responsibility_graph_sha256)a
 
@@ -192,7 +202,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
       else: {:error, :invalid_confirmed_recovery_evidence}
   end
 
-  defp valid_assignment_binding(%{"contractVersion" => @contract_v2, "assignmentSnapshotState" => "absent"} = payload, bindings) do
+  defp valid_assignment_binding(%{"contractVersion" => version, "assignmentSnapshotState" => "absent"} = payload, bindings) when version in [@contract_v2, @contract_v3] do
     if is_nil(payload["assignmentSHA256"]) and is_nil(bindings.assignment_sha256) and
          bindings.assignment_snapshot_state == "absent",
        do: :ok,
@@ -215,7 +225,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
          true <- fresh?(observed_at_ms, bindings.now_ms),
          :ok <- validate_expected_claim(observation["expected"], payload, bindings),
          :ok <- validate_service_units(observation["serviceUnits"], observation["witnessUnits"]),
-         :ok <- validate_witness_history(observation["witnesses"], observation["witnessLogSHA256"]),
+         :ok <- validate_witness_history(observation["witnesses"], observation["witnessLogSHA256"], payload["contractVersion"]),
          :ok <- validate_kubernetes(observation["kubernetes"], payload, bindings),
          :ok <- validate_predecessor(observation["predecessorRetirement"], payload, observation["expected"]) do
       :ok
@@ -270,9 +280,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
     is_map(value) and Enum.sort(Map.keys(value)) == Enum.sort(expected)
   end
 
-  defp validate_witness_history(witnesses, log_hashes) do
-    with true <- is_list(witnesses) and length(witnesses) == 2,
-         true <- Enum.map(witnesses, &Map.get(&1, "generation")) == [1, 2],
+  defp validate_witness_history(witnesses, log_hashes, version) do
+    generations = witness_generations(version)
+
+    with true <- is_list(witnesses) and length(witnesses) == length(generations),
+         true <- Enum.map(witnesses, &Map.get(&1, "generation")) == generations,
          true <-
            Enum.all?(witnesses, fn row ->
              is_map(row) and exact_keys?(row, ~w(generation sequence hash source acceptedBuildReceiptSHA256)) and
@@ -286,6 +298,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
       _ -> {:error, :invalid_confirmed_recovery_evidence}
     end
   end
+
+  defp witness_generations(@contract_v3), do: [2]
+  defp witness_generations(_version), do: [1, 2]
 
   defp validate_kubernetes(kube, payload, bindings) do
     with true <- is_map(kube) and exact_keys?(kube, ~w(observedAt cluster namespace claim jobs pods)),
@@ -317,6 +332,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence do
       {:error, :invalid_confirmed_recovery_evidence}
     end
   end
+
+  defp validate_predecessor(predecessor, %{"contractVersion" => @contract_v3}, current_claim),
+    do: ConfirmedRecoveryUnsubmittedPredecessor.validate(predecessor, current_claim)
 
   defp validate_predecessor(%{"execution" => execution, "claim" => claim, "receipt" => receipt} = predecessor, payload, current_claim)
        when map_size(predecessor) == 3 do

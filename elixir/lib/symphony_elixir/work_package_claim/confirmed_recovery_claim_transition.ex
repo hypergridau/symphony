@@ -28,6 +28,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryClaimTransition do
          true <- is_binary(reservation_id),
          true <- is_binary(issue_id),
          key <- Journal.reservation_key(issue_id, expected["managedProjectProfileId"], expected["repositoryRef"], 2),
+         {:ok, fence} <- reconcile_recovery_fence(fence, journal.reservations[key], payload),
          {:ok, next_journal} <- Dispatch.begin_confirmed_recovery(journal, key),
          {:ok, next_fence, :released} <-
            ExecutionFence.release(fence, %{issue_id: issue_id, generation: 2}, expected["sessionId"], :spawn_failed),
@@ -39,7 +40,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryClaimTransition do
            process_id: expected["processId"]
          },
          {:ok, next_graph, :released} <-
-           ResponsibilityGraph.release_runtime_lease(graph, expected["responsibleDelegationId"], runtime_lease, now_ms),
+           release_recovery_graph(graph, expected["responsibleDelegationId"], runtime_lease, payload, now_ms),
          {:ok, journal_bytes} <- Journal.encode_bytes(next_journal),
          {:ok, fence_bytes} <- FencePersistence.encode_bytes(next_fence),
          {:ok, graph_bytes} <- GraphPersistence.encode_bytes(next_graph) do
@@ -57,4 +58,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryClaimTransition do
 
   def prepare_postimages(_journal, _fence, _graph, _payload, _now_ms),
     do: {:error, :confirmed_claim_transition_rejected}
+
+  defp reconcile_recovery_fence(fence, reservation, %{"contractVersion" => "work-package-paused-confirmed-recovery.v3"}),
+    do: ExecutionFence.reconcile_unstarted_claim(fence, reservation)
+
+  defp reconcile_recovery_fence(fence, _reservation, _payload), do: {:ok, fence}
+
+  defp release_recovery_graph(graph, id, lease, %{"contractVersion" => "work-package-paused-confirmed-recovery.v3"}, now_ms),
+    do: ResponsibilityGraph.release_restart_blocked_runtime_lease(graph, id, lease, now_ms)
+
+  defp release_recovery_graph(graph, id, lease, _payload, now_ms),
+    do: ResponsibilityGraph.release_runtime_lease(graph, id, lease, now_ms)
 end

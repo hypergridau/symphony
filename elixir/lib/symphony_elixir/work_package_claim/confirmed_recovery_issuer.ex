@@ -11,6 +11,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
 
   @contract_v1 "work-package-paused-confirmed-recovery.v1"
   @contract_v2 "work-package-paused-confirmed-recovery.v2"
+  @contract_v3 "work-package-paused-confirmed-recovery.v3"
   @bundle_fields_v1 ~w(assignmentSHA256 observation providerHeld reservationId)
   @bundle_fields_v2 ~w(assignmentSHA256 assignmentSnapshotState observation providerHeld reservationId)
 
@@ -87,7 +88,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
     expires_at = DateTime.from_unix!(now_ms + 30_000, :millisecond) |> DateTime.to_iso8601()
 
     payload = %{
-      "contractVersion" => if(bundle["assignmentSnapshotState"] == "absent", do: @contract_v2, else: @contract_v1),
+      "contractVersion" => bundle_contract(bundle),
       "pool" => pool,
       "issueId" => issue_id,
       "generation" => 2,
@@ -116,6 +117,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuer do
       _ -> {:error, :invalid_bundle}
     end
   end
+
+  defp bundle_contract(%{"predecessorClaimState" => "unsubmitted"}), do: @contract_v3
+  defp bundle_contract(%{"assignmentSnapshotState" => "absent"}), do: @contract_v2
+  defp bundle_contract(_bundle), do: @contract_v1
+
+  defp valid_bundle_shape?(%{"predecessorClaimState" => "unsubmitted", "assignmentSnapshotState" => "absent", "assignmentSHA256" => nil} = bundle),
+    do: Enum.sort(Map.keys(bundle)) == Enum.sort(["predecessorClaimState" | @bundle_fields_v2])
+
+  defp valid_bundle_shape?(%{"predecessorClaimState" => _state}), do: false
 
   defp valid_bundle_shape?(%{"assignmentSnapshotState" => "absent", "assignmentSHA256" => nil} = bundle),
     do: Enum.sort(Map.keys(bundle)) == Enum.sort(@bundle_fields_v2)

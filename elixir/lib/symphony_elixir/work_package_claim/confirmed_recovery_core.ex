@@ -27,6 +27,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     Journal
   }
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryUnsubmittedPredecessor
+
   @issue_id "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @state_root "/srv/dahlia-runner-state"
   @local_receipt_fields ~w(assignmentDigest assignmentSHA256 completedAt contractVersion evidenceRef expected generation issueId nonce observationSHA256 pool postconditions postimages preimages proofSHA256 reservationId transactionId)
@@ -34,10 +36,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @state_file_metadata [:major_device, :minor_device, :inode, :uid, :gid, :mode, :links, :size, :mtime, :ctime]
   @marker_version "work-package-hgs740-local-transition.v1"
   @marker_version_v2 "work-package-hgs740-local-transition.v2"
+  @marker_version_v3 "work-package-hgs740-local-transition.v3"
   @receipt_version "work-package-hgs740-local-transition-receipt.v1"
   @receipt_version_v2 "work-package-hgs740-local-transition-receipt.v2"
+  @receipt_version_v3 "work-package-hgs740-local-transition-receipt.v3"
   @receipt_domain "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v1\0"
   @receipt_domain_v2 "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v2\0"
+  @receipt_domain_v3 "hypergrid-work-package-recovery:hgs740-local-transition-receipt.v3\0"
   @pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
   @state_names ~w(claimJournal fence responsibilityGraph)
   @type result :: {:ok, :applied | :already_applied} | {:error, term()}
@@ -277,7 +282,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   @doc false
   @spec local_receipt_payload(map()) :: map()
   def local_receipt_payload(fields) when is_map(fields) do
-    version = if fields["assignmentSnapshotState"] == "absent", do: @receipt_version_v2, else: @receipt_version
+    version = Map.get(fields, "contractVersion", if(fields["assignmentSnapshotState"] == "absent", do: @receipt_version_v2, else: @receipt_version))
     Map.put(fields, "contractVersion", version)
   end
 
@@ -319,6 +324,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   def local_receipt_bytes_valid?(_payload_bytes, _candidate_bytes, _marker), do: false
+
+  defp receipt_contract(%{"contractVersion" => @marker_version_v3}),
+    do: {@receipt_version_v3, @local_receipt_fields_v2, @receipt_domain_v3}
 
   defp receipt_contract(%{"contractVersion" => @marker_version_v2}),
     do: {@receipt_version_v2, @local_receipt_fields_v2, @receipt_domain_v2}
@@ -461,7 +469,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
-  defp observe_with_marker_contract(%{"contractVersion" => @marker_version_v2} = marker, cluster) do
+  defp observe_with_marker_contract(%{"contractVersion" => version} = marker, cluster) when version in [@marker_version_v2, @marker_version_v3] do
     ConfirmedRecoveryKubernetes.observe_without_assignment_snapshot(marker_claim(marker), cluster)
   end
 
@@ -475,7 +483,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   defp marker_claim(marker) do
     claim = Map.put(marker["expected"], "assignmentSHA256", marker["assignmentSHA256"])
 
-    if marker["contractVersion"] == @marker_version_v2,
+    if marker["contractVersion"] in [@marker_version_v2, @marker_version_v3],
       do: Map.put(claim, "assignmentSnapshotState", "absent"),
       else: claim
   end
@@ -904,7 +912,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
       now_ms: now_ms
     }
 
-    if payload["contractVersion"] == "work-package-paused-confirmed-recovery.v2",
+    if payload["contractVersion"] in ["work-package-paused-confirmed-recovery.v2", "work-package-paused-confirmed-recovery.v3"],
       do: Map.put(bindings, :assignment_snapshot_state, "absent"),
       else: bindings
   end
@@ -1213,9 +1221,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          true <- map_size(Map.get(reservation, :failed_worker_turns, %{})) == 0,
          true <- map_size(Map.get(reservation, :cleanup_receipts, %{})) == 0,
          :ok <- local_snapshot_contract(paths, reservation, payload, expected),
-         :ok <- exact_local_predecessor(paths, payload["observation"]["predecessorRetirement"], expected),
-         :ok <- exact_active_fence(paths.fence.state, issue_id, expected),
-         :ok <- exact_active_runtime_lease(paths.graph.state, expected),
+         :ok <- predecessor_contract(paths, payload, expected),
+         :ok <- fence_contract(paths, issue_id, expected, reservation, payload),
+         :ok <- runtime_lease_contract(paths.graph.state, expected, payload),
          :ok <- require_no_local_workers(payload["observation"]) do
       :ok
     else
@@ -1250,13 +1258,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          paths,
          reservation,
          %{
-           "contractVersion" => "work-package-paused-confirmed-recovery.v2",
+           "contractVersion" => version,
            "assignmentSnapshotState" => "absent",
            "assignmentSHA256" => nil,
            "issueId" => issue_id
          },
          expected
-       ) do
+       )
+       when version in ["work-package-paused-confirmed-recovery.v2", "work-package-paused-confirmed-recovery.v3"] do
     key = Journal.reservation_key(issue_id, expected["managedProjectProfileId"], expected["repositoryRef"], 2)
 
     with true <- is_nil(Map.get(reservation, :assignment_snapshot)),
@@ -1321,6 +1330,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
         nil
     end
   end
+
+  defp predecessor_contract(paths, %{"contractVersion" => "work-package-paused-confirmed-recovery.v3"} = payload, expected),
+    do: ConfirmedRecoveryUnsubmittedPredecessor.persisted(paths, payload["observation"]["predecessorRetirement"], expected)
+
+  defp predecessor_contract(paths, payload, expected),
+    do: exact_local_predecessor(paths, payload["observation"]["predecessorRetirement"], expected)
+
+  defp runtime_lease_contract(graph, expected, %{"contractVersion" => "work-package-paused-confirmed-recovery.v3"}),
+    do: ConfirmedRecoveryUnsubmittedPredecessor.blocked_lease(graph, expected)
+
+  defp runtime_lease_contract(graph, expected, _payload), do: exact_active_runtime_lease(graph, expected)
+
+  defp fence_contract(paths, issue_id, expected, reservation, %{"contractVersion" => "work-package-paused-confirmed-recovery.v3"}) do
+    with {:ok, candidate} <- ConfirmedRecoveryUnsubmittedPredecessor.reconciled_fence_candidate(paths.fence.state, reservation),
+         do: exact_active_fence(candidate, issue_id, expected)
+  end
+
+  defp fence_contract(paths, issue_id, expected, _reservation, _payload),
+    do: exact_active_fence(paths.fence.state, issue_id, expected)
 
   @doc false
   @spec exact_local_predecessor(map(), map(), map()) :: :ok | {:error, :predecessor_retirement_not_persisted}
@@ -1486,7 +1514,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
         end)
     }
 
-    if proof_payload["contractVersion"] == "work-package-paused-confirmed-recovery.v2",
+    if proof_payload["contractVersion"] in ["work-package-paused-confirmed-recovery.v2", "work-package-paused-confirmed-recovery.v3"],
       do: Map.put(marker, "assignmentSnapshotState", "absent"),
       else: marker
   end
@@ -1640,7 +1668,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
-  defp marker_snapshot_contract_in_bytes(%{"contractVersion" => @marker_version_v2} = marker, bytes) do
+  defp marker_snapshot_contract_in_bytes(%{"contractVersion" => version} = marker, bytes) when version in [@marker_version_v2, @marker_version_v3] do
     expected = marker["expected"]
     key = Journal.reservation_key(marker["issueId"], expected["managedProjectProfileId"], expected["repositoryRef"], 2)
 
@@ -1721,11 +1749,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     }
 
     receipt_fields =
-      if marker["contractVersion"] == @marker_version_v2,
+      if marker["contractVersion"] in [@marker_version_v2, @marker_version_v3],
         do: Map.put(receipt_fields, "assignmentSnapshotState", "absent"),
         else: receipt_fields
 
-    expected = local_receipt_payload(receipt_fields)
+    {receipt_version, _fields, _domain} = receipt_contract(marker)
+    expected = local_receipt_payload(Map.put(receipt_fields, "contractVersion", receipt_version))
 
     path = Path.join(marker_directory(marker["issueId"], runtime), "local-transition-candidate.json")
     bytes = ConfirmedRecoveryEvidence.canonical_json(expected)
@@ -1817,6 +1846,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     end
   end
 
+  defp marker_version(%{"contractVersion" => "work-package-paused-confirmed-recovery.v3"}),
+    do: @marker_version_v3
+
   defp marker_version(%{"contractVersion" => "work-package-paused-confirmed-recovery.v2"}),
     do: @marker_version_v2
 
@@ -1837,10 +1869,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp valid_marker_snapshot_contract?(%{
-         "contractVersion" => @marker_version_v2,
+         "contractVersion" => version,
          "assignmentSnapshotState" => "absent",
          "assignmentSHA256" => nil
-       }),
+       })
+       when version in [@marker_version_v2, @marker_version_v3],
        do: true
 
   defp valid_marker_snapshot_contract?(_marker), do: false

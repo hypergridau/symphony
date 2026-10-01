@@ -47,6 +47,39 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidenceTest do
     refute_valid(put_in(payload, ["observation", "kubernetes", "jobs", "itemCount"], -1))
   end
 
+  test "v3 binds a retirement-only predecessor and cannot be downgraded to v2" do
+    payload = absent_snapshot_payload()
+    predecessor = payload["observation"]["predecessorRetirement"]
+    receipt = Map.put(predecessor["receipt"], "provider_projection_id", payload["observation"]["expected"]["projectionId"])
+    receipt = Map.put(receipt, "evidence_ref", Evidence.retirement_evidence_ref(receipt))
+    execution = predecessor["execution"] |> Map.put("retirement", receipt) |> Map.put("cleaned_at_ms", receipt["retired_at_ms"]) |> Map.put("worker_host", nil)
+
+    payload =
+      payload
+      |> Map.put("contractVersion", "work-package-paused-confirmed-recovery.v3")
+      |> put_in(["observation", "predecessorRetirement"], %{"execution" => execution, "claim" => nil, "receipt" => receipt})
+      |> put_in(["observation", "witnesses"], Enum.filter(payload["observation"]["witnesses"], &(&1["generation"] == 2)))
+
+    assert :ok = Evidence.validate_payload(payload, absent_snapshot_bindings())
+
+    bundle =
+      Map.take(payload, ~w(assignmentSHA256 assignmentSnapshotState reservationId observation providerHeld))
+      |> Map.put("predecessorClaimState", "unsubmitted")
+
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+    sign = fn message -> :crypto.sign(:eddsa, :none, message, [private, :ed25519]) end
+    verify = fn envelope, bindings -> Evidence.verify_test_envelope(envelope, public, bindings) end
+    bindings = Issuer.bindings(bundle, @pool, @issue, @nonce, @now_ms)
+    assert {:ok, issued, _bytes, envelope} = Issuer.issue(Evidence.canonical_json(bundle), @pool, @issue, @nonce, bindings, sign, verify)
+    assert issued["contractVersion"] == "work-package-paused-confirmed-recovery.v3"
+    assert {:ok, ^issued} = Evidence.verify_test_envelope(envelope, public, bindings)
+    assert {:error, :invalid_confirmed_recovery_evidence} = Issuer.issue(Evidence.canonical_json(Map.delete(bundle, "predecessorClaimState")), @pool, @issue, @nonce, bindings, sign, verify)
+    refute_payload_valid(Map.put(payload, "contractVersion", "work-package-paused-confirmed-recovery.v2"), absent_snapshot_bindings())
+    refute_payload_valid(put_in(payload, ["observation", "predecessorRetirement", "claim"], predecessor["claim"]), absent_snapshot_bindings())
+    refute_payload_valid(put_in(payload, ["observation", "predecessorRetirement", "execution", "leases", predecessor["claim"]["sessionId"], "head"], "observed"), absent_snapshot_bindings())
+    refute Evidence.signature_message("payload", "work-package-paused-confirmed-recovery.v3") == Evidence.signature_message("payload", "work-package-paused-confirmed-recovery.v2")
+  end
+
   test "rejects a changed provider tuple, non-held state, or stale provider readback" do
     payload = payload()
     refute_valid(put_in(payload, ["providerHeld", "expected", "processId"], "foreign-process"))

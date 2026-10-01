@@ -101,6 +101,15 @@ using the provider's dual-auth held-claim readback; it must contain no auth mate
 validates its schema and freshness but does not fetch that provider readback itself, so this source
 path is not end-to-end live qualification.
 
+The absent-snapshot v2 bundle also includes `assignmentSnapshotState: "absent"` and a null
+assignment digest. A retirement-only v3 bundle adds `predecessorClaimState: "unsubmitted"`:
+no generation-1 provider claim or witness is fabricated. Its separately signed proof
+binds the exact persisted retirement and native source/grant digests, with a sole gen2
+witness and complete six-pool chains. Recovery releases the exact restart-blocked gen2
+lease while preserving blocked authority. The legacy contracts retain their stricter
+predecessor requirements; source tests and a read-only state probe are separate from live
+release qualification.
+
 The installed runner calls startup verification from a root `ExecStartPre` with an empty
 environment. Before an apply marker exists, startup is allowed only when that issue has no HGS-740
 evidence directory; once candidate evidence exists without its durable transaction marker, startup

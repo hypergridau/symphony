@@ -332,7 +332,7 @@ The provider claim remains held until signed host preflight proves the exact ret
 and complete, current Job/Pod absence.
 
 The HGS-740 confirmed-claim evidence verifier is a pure source boundary. It accepts only a
-domain-separated `work-package-paused-confirmed-recovery.v1` root signature, pinned to the
+domain-separated `work-package-paused-confirmed-recovery.v1`, `.v2`, or `.v3` root signature, pinned to the
 existing HGS-485 recovery signer fingerprint. The signed observation must bind the confirmed
 generation-2 claim, the retired generation-1 successor receipt, the six-pool no-spawn history,
 all stopped and masked services, no process/workspace/turn, complete claim-scoped RKE2 Job and
@@ -350,6 +350,19 @@ the nested HGS-485 observation keeps its existing insertion-ordered evidence has
 Before transition, Symphony also recomputes the predecessor retirement `evidence_ref` from the
 persisted receipt fields using the original deterministic Erlang term encoding; the candidate
 does not need to reproduce that encoding in Python.
+
+The v2 contract explicitly binds an absent assignment snapshot and null digest.
+The v3 contract additionally represents a genuinely unsubmitted generation-1 predecessor:
+its claim is null, its journal row and cross-pool root witness events are absent, and the
+sole witness belongs to generation 2. The canonical issuer bundle adds
+`predecessorClaimState: "unsubmitted"`. The native verifier checks the exact retained
+retirement source, recomputes its observation and four grant digests, and binds the
+derived fence receipt. The current pair must remain restart-blocked with its exact
+unobserved generation-2 lease. The existing unstarted-fence reconciliation and a narrow
+blocked-lease release compute WAL postimages without reactivating authority. V1/v2
+keep their full predecessor-claim and two-witness requirements. V3 proof, marker and
+local receipt versions use separate signature domains; WAL replay consumes the same
+precomputed postimages and never emits another lease-release event.
 
 `symphony --issue-hgs740-confirmed-recovery --workflow <trusted-WORKFLOW.md> --nonce <proof-nonce-uuid>
 --bundle <generation-2>/issuer-input.json <issue-uuid> <pool-key>` is the root-only issuance path. It requires the

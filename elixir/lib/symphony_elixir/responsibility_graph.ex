@@ -238,6 +238,24 @@ defmodule SymphonyElixir.ResponsibilityGraph do
   def release_runtime_lease(_state, _delegation_id, _runtime_lease, _now_ms),
     do: {:error, :invalid_runtime_lease_release}
 
+  @doc "Releases an exact restart-blocked lease after caller-verified confirmed recovery; authority remains blocked."
+  @spec release_restart_blocked_runtime_lease(state(), String.t(), map(), non_neg_integer()) ::
+          {:ok, state(), :released} | {:error, term()}
+  def release_restart_blocked_runtime_lease(state, id, lease, now_ms) do
+    with :ok <- validate_state(state),
+         {:ok, responsible} <- fetch_delegation(state, id),
+         :ok <- blocked_for_restart(responsible),
+         true <- responsible.role == :responsible and responsible.runtime_lease == lease,
+         {:ok, accountable} <- fetch_delegation(state, responsible.parent_delegation_id),
+         :ok <- blocked_for_restart(accountable),
+         true <- accountable.role == :accountable and is_nil(accountable.runtime_lease),
+         true <- no_active_successor_children?(state, id) do
+      release_bound_runtime_lease(state, id, responsible, now_ms)
+    else
+      _ -> {:error, :restart_blocked_runtime_lease_changed}
+    end
+  end
+
   @doc "Retires an expired delegation's exact lease with caller-verified never-submitted evidence."
   @spec retire_expired_unsubmitted(state(), String.t(), map() | nil, map(), non_neg_integer()) ::
           {:ok, state()} | {:error, term()}
