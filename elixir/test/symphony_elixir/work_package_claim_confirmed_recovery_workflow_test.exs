@@ -37,6 +37,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWorkflowTest do
     assert_denied(Map.put(files, @root <> @output <> "grid.md", :binary.copy("x", 524_289)))
   end
 
+  test "accepts the 130-file reconciliation export and rejects a 131st entry" do
+    {files, _receipt, controls} = fixture()
+    extra = for number <- 1..123, do: entry("scripts/symphony/bounded-#{number}.py", "control")
+    complete = %{controls | "files" => controls["files"] ++ extra}
+    assert :ok = verify(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(complete)))
+    oversized = %{complete | "files" => complete["files"] ++ [entry("scripts/symphony/overflow.py", "control")]}
+    assert_denied(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(oversized)))
+  end
+
   test "binds source commit, canonical receipt entries, blob identities and actual bytes" do
     {files, receipt, controls} = fixture()
     assert_denied(put_receipt(files, %{receipt | "sourceCommit" => String.duplicate("b", 40)}))

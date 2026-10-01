@@ -1542,6 +1542,10 @@ errors remain at `spawn_started` until exact root-log replay resolves them.
 
 ### HGS-740 append-only observation reconciliation
 
+The recovery workflow verifier accepts at most 130 canonical control entries,
+matching Dahlia's exporter after the two reconciliation files were added. A
+131st entry remains a denial; workflow byte, path and hash checks are unchanged.
+
 The exact retained HGS-736 issue `f77e349e-21d9-4bdf-bad3-ce08b302e7e8`,
 generation 2, may use the fixed `generation-2/reconciliation/epoch-1` input.
 `ConfirmedRecoveryReconciliation` verifies the pinned three historical hashes,

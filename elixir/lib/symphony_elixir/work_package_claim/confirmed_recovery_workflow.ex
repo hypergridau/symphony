@@ -36,7 +36,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWorkflow do
   defp verify_receipt(receipt, controls, read) do
     with %{"schemaVersion" => 1, "sourceCommit" => commit, "files" => canonical} <- controls,
          true <- is_binary(commit) and Regex.match?(~r/\A[0-9a-f]{40}\z/, commit),
-         true <- is_list(canonical) and length(canonical) in 1..128,
+         true <- is_list(canonical) and length(canonical) in 1..130,
          %{
            "schemaVersion" => 1,
            "derivation" => "canonical-linux-workflow-v1",
