@@ -210,3 +210,6 @@ selects that directory or fails closed once it exists. Root recovery requires
 the same masked, stopped unit before collection, signing and apply; generic
 successor-retirement service rules remain unchanged. Preflight computes the
 local transition without signing or writing state before reserving an epoch.
+Private evidence reads tolerate only the access-time update caused by reading
+the file; all identity, custody and mutation checks remain fixed. Failed signed
+observations remain retained and do not acquire fresh runtime authority.

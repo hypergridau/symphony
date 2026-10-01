@@ -1603,3 +1603,9 @@ and leaves lock ownership unchanged. Issuer-context verification now acquires
 this lock with pause, service, user-manager and process quiescence checks before
 fresh evidence collection. Contention, substituted inodes and unsafe metadata
 hold recovery closed.
+
+The private evidence reader permits the access-time change caused by a cold
+file read. Device, inode, type, owner, mode, link count, size, modification time,
+change time and every other stat field must remain unchanged. A native root
+fixture exercises an actual cold read; this source correction does not refresh
+or authorize replay of retained failed signed observations.

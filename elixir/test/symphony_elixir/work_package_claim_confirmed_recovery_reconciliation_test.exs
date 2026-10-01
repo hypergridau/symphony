@@ -433,15 +433,33 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
       assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private_for_test("/fixed/input", 3, denied)
     end
 
-    calls = :counters.new(1, [])
+    for change <- [
+          %{atime: 2},
+          %{inode: 2},
+          %{major_device: 2},
+          %{minor_device: 2},
+          %{mtime: 2},
+          %{ctime: 2},
+          %{mode: 0o644},
+          %{uid: 1001},
+          %{gid: 1001},
+          %{links: 2},
+          %{size: 4},
+          %{type: :symlink},
+          %{access: :read}
+        ] do
+      calls = :counters.new(1, [])
 
-    raced =
-      Map.put(operations, :lstat, fn _ ->
-        :counters.add(calls, 1, 1)
-        {:ok, if(:counters.get(calls, 1) == 1, do: info, else: %{info | inode: 2})}
-      end)
+      raced =
+        Map.put(operations, :lstat, fn _ ->
+          :counters.add(calls, 1, 1)
+          {:ok, if(:counters.get(calls, 1) == 1, do: info, else: struct(info, change))}
+        end)
 
-    assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private_for_test("/fixed/input", 3, raced)
+      expected = if change == %{atime: 2}, do: {:ok, "abc"}, else: {:error, :untrusted_reconciliation_file}
+      assert expected == EpochHost.read_private_for_test("/fixed/input", 3, raced)
+    end
+
     truncated = %{operations | read: fn _ -> {:ok, "ab"} end}
     assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private_for_test("/fixed/input", 3, truncated)
   end

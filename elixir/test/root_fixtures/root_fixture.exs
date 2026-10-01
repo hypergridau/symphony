@@ -113,7 +113,13 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     File.chmod!(directory, 0o700)
     path = Path.join(directory, "evidence.json")
     write_root_private(path, "{}")
+    # Force a cold read to advance atime independently of filesystem timestamp granularity.
+    :ok = :file.change_time(String.to_charlist(path), {{2000, 1, 1}, {0, 0, 0}}, File.stat!(path).mtime)
+    before_read = File.stat!(path)
     assert {:ok, "{}"} = EpochHost.read_private(path, 10)
+    after_read = File.stat!(path)
+    assert before_read.atime != after_read.atime
+    assert %{before_read | atime: after_read.atime} == after_read
     File.chmod!(path, 0o644)
     assert {:error, :untrusted_reconciliation_file} = EpochHost.read_private(path, 10)
     link = Path.join(directory, "redirect.json")

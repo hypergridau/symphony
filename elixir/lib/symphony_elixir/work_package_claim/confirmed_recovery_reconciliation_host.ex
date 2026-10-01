@@ -187,7 +187,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost do
          true <- band(mode, 0o777) == 0o600 and size in 1..maximum,
          {:ok, bytes} <- read.(path),
          true <- byte_size(bytes) == size,
-         {:ok, ^before} <- lstat.(path) do
+         {:ok, %File.Stat{} = after_read} <- lstat.(path),
+         # Reading may advance atime; every custody and mutation field must stay fixed.
+         true <- %{before | atime: after_read.atime} == after_read do
       {:ok, bytes}
     else
       _ -> {:error, :untrusted_reconciliation_file}
