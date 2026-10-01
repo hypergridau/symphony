@@ -24,6 +24,52 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     :ok
   end
 
+  test "root recovery locks the existing managed owner inode and preserves launcher exclusion" do
+    alias SymphonyElixir.ManagedLauncherLock, as: Lock
+    pool = "grid"
+    journal = "/srv/dahlia-runner-state/run/pools/grid/work-package.json"
+    {:ok, path} = Lock.pool_lock_path(journal, pool)
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "")
+    File.chmod!(path, 0o600)
+    :ok = :file.change_owner(String.to_charlist(path), @owner, @owner)
+    original = File.lstat!(path)
+    forbidden = fn -> flunk("untrusted lock entered") end
+
+    assert {:error, :pool_launcher_lock_file_untrusted} = Lock.with_exclusive_lock(path, forbidden)
+
+    assert :ok =
+             Lock.with_root_recovery_lock(journal, pool, fn ->
+               assert {:error, :pool_launcher_lock_busy} = Lock.with_root_recovery_lock(journal, pool, forbidden)
+               :ok
+             end)
+
+    assert File.lstat!(path) == original
+    assert {:error, :pool_launcher_lock_file_untrusted} = Lock.with_root_recovery_lock(journal, "foreign", forbidden)
+    assert {:error, :untrusted_pool_launcher_lock_path} = Lock.with_root_recovery_lock(journal <> ".other", pool, forbidden)
+
+    File.chmod!(path, 0o644)
+    assert {:error, :pool_launcher_lock_file_untrusted} = Lock.with_root_recovery_lock(journal, pool, forbidden)
+    File.chmod!(path, 0o600)
+    hardlink = path <> ".hardlink"
+    File.ln!(path, hardlink)
+    assert {:error, :pool_launcher_lock_file_untrusted} = Lock.with_root_recovery_lock(journal, pool, forbidden)
+    File.rm!(hardlink)
+
+    assert {:error, :pool_launcher_lock_inode_changed} =
+             Lock.with_root_recovery_lock(journal, pool, fn ->
+               File.rename!(path, path <> ".retained")
+               File.write!(path, "")
+               File.chmod!(path, 0o600)
+               :ok = :file.change_owner(String.to_charlist(path), @owner, @owner)
+               :ok
+             end)
+
+    File.rm!(path)
+    File.ln_s!(path <> ".retained", path)
+    assert {:error, :pool_launcher_lock_file_untrusted} = Lock.with_root_recovery_lock(journal, pool, forbidden)
+  end
+
   test "epoch issuance survives every publication crash prefix without replacing its signature" do
     for prefix <- 0..3 do
       issue_id = "66666666-6666-4666-8666-66666666666#{prefix}"

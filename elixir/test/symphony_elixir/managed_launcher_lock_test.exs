@@ -3,6 +3,16 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
 
   alias SymphonyElixir.ManagedLauncherLock
 
+  test "root recovery accepts no caller-selected lock root or foreign pool" do
+    forbidden = fn -> flunk("untrusted recovery entered") end
+
+    assert {:error, :pool_launcher_lock_file_untrusted} =
+             ManagedLauncherLock.with_root_recovery_lock("/tmp/foreign", "foreign", forbidden)
+
+    assert {:error, _} = ManagedLauncherLock.with_root_recovery_lock("/tmp/foreign", "grid", forbidden)
+    assert {:error, _} = ManagedLauncherLock.with_root_recovery_lock("/tmp/foreign", "grid", :invalid_callback)
+  end
+
   @tag skip: :os.type() != {:unix, :linux}
   test "derives the launcher lock only from the canonical pool journal path" do
     assert {:ok, "/srv/dahlia-runner-state/run/pools/hypergrid-gitops.lock"} =
@@ -68,6 +78,30 @@ defmodule SymphonyElixir.ManagedLauncherLockTest do
   end
 
   if :os.type() == {:unix, :linux} and File.regular?("/usr/bin/flock") do
+    test "substitution during a held OS lock is reported and the original inode remains excluded" do
+      directory = Path.join(System.tmp_dir!(), "symphony-lock-substitution-#{System.unique_integer([:positive])}")
+      File.mkdir_p!(directory)
+      on_exit(fn -> File.rm_rf(directory) end)
+      path = Path.join(directory, "pool.lock")
+      File.write!(path, "")
+      File.chmod!(path, 0o600)
+      retained = path <> ".retained"
+
+      assert {:error, :pool_launcher_lock_inode_changed} =
+               ManagedLauncherLock.with_exclusive_lock(path, fn ->
+                 File.rename!(path, retained)
+                 File.write!(path, "")
+                 File.chmod!(path, 0o600)
+
+                 assert {:error, :pool_launcher_lock_busy} =
+                          ManagedLauncherLock.with_exclusive_lock(retained, fn -> flunk("held inode entered") end)
+
+                 :ok
+               end)
+
+      assert :ok = ManagedLauncherLock.with_exclusive_lock(retained, fn -> :ok end)
+    end
+
     test "the OS lock excludes a second migration and releases after completion" do
       root = Path.expand(System.tmp_dir!())
       directory = Path.join(root, "symphony-launcher-lock-#{System.unique_integer([:positive])}")

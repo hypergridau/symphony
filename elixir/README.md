@@ -1563,3 +1563,12 @@ The native root signature verifier rechecks history and epoch custody before
 both initial and replayed WAL use. An existing epoch cannot be bypassed by a
 legacy observation lacking its manifest. No extra provider API or lifecycle
 engine is introduced. Source acceptance is separate from installed/live release.
+
+Root recovery uses the existing private UID 1001 launcher lock at the canonical
+pool path. The generic launcher still requires caller-owned files. The root-only
+entrypoint accepts only managed pools and UID 1001 ownership, checks the path
+and the lock holder's actual descriptor identity before and after the operation,
+and leaves lock ownership unchanged. Issuer-context verification now acquires
+this lock with pause, service, user-manager and process quiescence checks before
+fresh evidence collection. Contention, substituted inodes and unsafe metadata
+hold recovery closed.

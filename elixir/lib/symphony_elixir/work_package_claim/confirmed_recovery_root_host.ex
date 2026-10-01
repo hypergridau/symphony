@@ -83,17 +83,25 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          :ok <- ConfirmedRecoveryWorkflow.verify(workflow_path, pool, &read_root_file/2),
          :ok <- Workflow.set_workflow_file_path(workflow_path),
          :ok <- WorkflowStore.force_reload(),
-         {:ok, _runtime} <- runtime_paths(pool) do
-      require_services_quiescent()
+         {:ok, runtime} <- runtime_paths(pool),
+         {:ok, context} <- verified_context("f77e349e-21d9-4bdf-bad3-ce08b302e7e8", pool, "", workflow_path, runtime) do
+      with_pool_lock(context, fn -> :ok end)
     end
   end
 
   @doc false
   @spec with_pool_lock(ConfirmedRecoveryContext.t(), (-> term())) :: term()
   def with_pool_lock(%ConfirmedRecoveryContext{runtime: runtime, pool: pool}, fun) when is_function(fun, 0) do
-    with {:ok, lock_path} <- ManagedLauncherLock.pool_lock_path(runtime.journal_path, pool) do
-      ManagedLauncherLock.with_exclusive_lock(lock_path, fun)
+    with :ok <- require_root(),
+         :ok <- require_pool(pool),
+         :ok <- require_paused_gate(),
+         :ok <- require_mutation_quiescent(runtime, 1001) do
+      ManagedLauncherLock.with_root_recovery_lock(runtime.journal_path, pool, fn -> run_quiescent(runtime, fun) end)
     end
+  end
+
+  defp run_quiescent(runtime, fun) do
+    with :ok <- require_paused_gate(), :ok <- require_mutation_quiescent(runtime, 1001), do: fun.()
   end
 
   @doc false

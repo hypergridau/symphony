@@ -190,3 +190,6 @@ remain pinned and unchanged; fresh evidence uses the existing signed recovery
 and provider release path. See [the runtime contract](elixir/README.md).
 The recovery workflow verifier accepts the same bounded 130-file control export
 as Dahlia's reconciliation exporter.
+Root recovery acquires the existing UID 1001 launcher lock while retaining
+root signing authority. Preflight checks this lock before observations are
+collected, and recovery verifies the held inode throughout the operation.

@@ -14,6 +14,8 @@ defmodule SymphonyElixir.ManagedLauncherLock do
   @flock_ready_marker "symphony-unsubmitted-successor-lock-ready"
   @flock_busy_status 75
   @trusted_pools_root "/srv/dahlia-runner-state/run/pools"
+  @recovery_pools ~w(hypergrid-gitops hypergrid-infra midgard asgard orchestrator grid)
+  @managed_owner 1001
 
   @doc "Derives the adjacent pool launcher lock from the canonical journal path."
   @spec pool_lock_path(Path.t(), String.t()) :: {:ok, Path.t()} | {:error, term()}
@@ -80,13 +82,38 @@ defmodule SymphonyElixir.ManagedLauncherLock do
   @doc "Runs a callback while the derived existing pool lock is held exclusively by the OS."
   @spec with_exclusive_lock(Path.t(), (-> term())) :: term()
   def with_exclusive_lock(path, callback) when is_binary(path) and is_function(callback, 0) do
+    with {:ok, owner} <- effective_uid(), do: with_owner_lock(path, owner, callback)
+  end
+
+  def with_exclusive_lock(_path, _callback), do: {:error, :pool_launcher_lock_unavailable}
+
+  @doc "Root recovery holds the existing managed UID 1001 lock without changing its ownership."
+  @spec with_root_recovery_lock(Path.t(), String.t(), (-> term())) :: term()
+  def with_root_recovery_lock(journal, pool, callback) when pool in @recovery_pools and is_function(callback, 0) do
+    with {:ok, 0} <- effective_uid(),
+         {:ok, path} <- pool_lock_path(journal, pool) do
+      with_owner_lock(path, @managed_owner, callback)
+    else
+      {:error, _reason} = error -> error
+      _ -> {:error, :pool_launcher_lock_file_untrusted}
+    end
+  end
+
+  def with_root_recovery_lock(_journal, _pool, _callback), do: {:error, :pool_launcher_lock_file_untrusted}
+
+  defp with_owner_lock(path, owner, callback) do
     with :ok <- linux_only(),
          :ok <- trusted_flock_executable(),
-         :ok <- trusted_lock_file(path) do
+         :ok <- trusted_lock_file(path, owner),
+         {:ok, before} <- File.lstat(path) do
       case open_lock_port(path) do
         {:ok, port} ->
           try do
-            with :ok <- await_ready(port, <<>>), do: callback.()
+            with :ok <- await_ready(port, <<>>),
+                 :ok <- verify_held_inode(port, path, owner, before) do
+              result = callback.()
+              with :ok <- verify_held_inode(port, path, owner, before), do: result
+            end
           after
             close_lock_port(port)
           end
@@ -103,7 +130,28 @@ defmodule SymphonyElixir.ManagedLauncherLock do
     _kind, _reason -> {:error, :pool_launcher_lock_unavailable}
   end
 
-  def with_exclusive_lock(_path, _callback), do: {:error, :pool_launcher_lock_unavailable}
+  defp verify_held_inode(port, path, owner, before) do
+    with :ok <- trusted_lock_file(path, owner),
+         {:ok, after_stat} <- File.lstat(path),
+         true <- lock_identity(before) == lock_identity(after_stat),
+         {:os_pid, pid} <- Port.info(port, :os_pid),
+         directory <- "/proc/#{pid}/fd",
+         {:ok, entries} <- File.ls(directory),
+         true <- Enum.any?(entries, &held_inode?(Path.join(directory, &1), before)) do
+      :ok
+    else
+      _ -> {:error, :pool_launcher_lock_inode_changed}
+    end
+  end
+
+  defp held_inode?(path, expected) do
+    case File.stat(path) do
+      {:ok, actual} -> lock_identity(actual) == lock_identity(expected)
+      _ -> false
+    end
+  end
+
+  defp lock_identity(stat), do: Map.take(stat, [:major_device, :minor_device, :inode, :type, :uid, :gid, :mode, :links])
 
   @doc "Requires the exact pool's systemd unit to be loaded and fully inactive."
   @spec require_service_stopped(String.t()) :: :ok | {:error, term()}
@@ -185,10 +233,9 @@ defmodule SymphonyElixir.ManagedLauncherLock do
     end
   end
 
-  defp trusted_lock_file(path) do
+  defp trusted_lock_file(path, runner_uid) do
     if Path.type(path) == :absolute and Path.expand(path) == path and not String.starts_with?(path, ["//", "\\\\"]) do
-      with {:ok, runner_uid} <- effective_uid(),
-           {:ok, stat} <- File.lstat(path),
+      with {:ok, stat} <- File.lstat(path),
            true <- trusted_regular_metadata?(stat, runner_uid),
            :ok <- trusted_directory_ancestors(Path.dirname(path), runner_uid) do
         :ok
