@@ -172,6 +172,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       raw_write: &:file.write/2,
       raw_sync: &:file.sync/1,
       raw_close: &:file.close/1,
+      sync_directory: &sync_directory/1,
       read_file_info: &read_file_info/2,
       system_cmd: &system_cmd/1,
       now_ms: fn -> System.system_time(:millisecond) end,

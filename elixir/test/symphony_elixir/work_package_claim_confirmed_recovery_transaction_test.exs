@@ -44,7 +44,42 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       end
 
       context = %{fixture.context | host_ops: Map.put(original, :lstat, lstat)}
+      denied_sync = fn _path -> {:error, {:directory_sync_failed, :eio}} end
+      failure = %{context | host_ops: Map.put(context.host_ops, :sync_directory, denied_sync)}
+      before = Agent.get(fixture.vfs, & &1.files)
+      assert {:error, {:directory_sync_failed, :eio}} = Transaction.apply_with_test_context(failure)
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 0
+      marker = Jason.decode!(Agent.get(fixture.vfs, & &1.files[fixture.marker_path]))
+      assert marker["status"] == "applying"
+
+      for path <- Map.values(fixture.state_paths) do
+        assert Agent.get(fixture.vfs, & &1.files[path]) == before[path]
+      end
+
+      refute Map.has_key?(Agent.get(fixture.vfs, & &1.files), Path.join(base, "local-transition-receipt.json"))
+      # Restart after expiry uses the saved authorization time, never a new observation/signature.
+      expired_ops =
+        context.host_ops
+        |> Map.put(:now_ms, fn -> marker["verificationNowMs"] + 86_400_000 end)
+        |> Map.put(:observe_kubernetes_for_test, fn claim, cluster ->
+          assert claim["generation"] == 2
+          {:ok, synthetic_kubernetes_observation(cluster)}
+        end)
+        |> Map.put(:verify_signed_evidence, fn bytes, bindings ->
+          assert bindings.now_ms == marker["verificationNowMs"]
+          original.verify_signed_evidence.(bytes, bindings)
+        end)
+
+      context = %{context | host_ops: expired_ops}
       assert {:ok, :applied} = Transaction.apply_with_test_context(context)
+      applied_marker = Jason.decode!(Agent.get(fixture.vfs, & &1.files[fixture.marker_path]))
+
+      for key <- ~w(nonce proofSHA256 observationSHA256 verificationNowMs preimages postimages) do
+        assert applied_marker[key] == marker[key]
+      end
+
+      assert Agent.get(fixture.vfs, & &1.files[candidate]) == before[candidate]
+      assert Agent.get(fixture.vfs, & &1.files[proof]) == before[proof]
       assert {:ok, :already_applied} = Transaction.apply_with_test_context(context)
       files = Agent.get(fixture.vfs, & &1.files)
       assert files[Path.join(base, "candidate.json")] == "retained candidate"
@@ -880,7 +915,6 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       fixture = positive_apply_fixture()
       original_open = fixture.context.host_ops.raw_open
       original_rename = fixture.context.host_ops.rename
-      marker_directory = Path.dirname(fixture.marker_path)
 
       host_ops =
         case failure do
@@ -890,8 +924,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
             end)
 
           :directory_sync ->
-            Map.put(fixture.context.host_ops, :raw_open, fn path, modes ->
-              if path == marker_directory, do: {:error, :synthetic_sync_failure}, else: original_open.(path, modes)
+            Map.put(fixture.context.host_ops, :sync_directory, fn _path ->
+              {:error, {:directory_sync_failed, :synthetic_sync_failure}}
             end)
 
           :terminal_rename ->
@@ -1404,6 +1438,10 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
           send(parent, {:marker_io, {:open, path, modes}})
           {:ok, if(path == marker_path, do: :marker_file, else: :marker_directory)}
         end,
+        sync_directory: fn path ->
+          send(parent, {:marker_io, {:directory_sync, path}})
+          :ok
+        end,
         raw_write: fn file, bytes ->
           send(parent, {:marker_io, {:write, file, bytes}})
           :ok
@@ -1432,9 +1470,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert_received {:marker_io, {:sync, :marker_file}}
     assert_received {:marker_io, {:chmod, ^marker_path, 0o600}}
     assert_received {:marker_io, {:close, :marker_file}}
-    assert_received {:marker_io, {:open, ^marker_directory, [:read, :raw]}}
-    assert_received {:marker_io, {:sync, :marker_directory}}
-    assert_received {:marker_io, {:close, :marker_directory}}
+    assert_received {:marker_io, {:directory_sync, ^marker_directory}}
     refute_received {:marker_io, _}
   end
 
@@ -1916,6 +1952,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         raw_open: fn path, _modes -> {:ok, {:raw_file, path}} end,
         raw_write: fn {:raw_file, path}, bytes -> vfs_raw_write(vfs, path, bytes, marker_path) end,
         raw_sync: fn _file -> :ok end,
+        sync_directory: fn _path -> :ok end,
         raw_close: fn _file -> :ok end,
         change_owner: fn path, uid, gid -> vfs_change_owner(vfs, path, uid, gid) end,
         chmod: fn path, mode -> vfs_chmod(vfs, path, mode) end,

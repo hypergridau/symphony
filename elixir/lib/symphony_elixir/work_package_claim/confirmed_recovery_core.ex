@@ -135,6 +135,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     @doc false
     def persist_initial_marker_with_test_context(marker_path, marker, runtime),
       do: persist_initial_marker(marker_path, marker, runtime)
+
+    @doc false
+    @spec replace_marker_with_test_context(Path.t(), binary(), map()) :: :ok | {:error, term()}
+    def replace_marker_with_test_context(marker_path, bytes, runtime),
+      do: durable_replace(marker_path, bytes, runtime)
   end
 
   defp apply_authorized_context(%ConfirmedRecoveryContext{} = context) do
@@ -2289,15 +2294,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp fsync_directory(path, runtime) do
-    case host(runtime, :raw_open, [path, [:read, :raw]]) do
-      {:ok, directory} ->
-        result = host(runtime, :raw_sync, [directory])
-        host(runtime, :raw_close, [directory])
-        result
-
-      {:error, reason} ->
-        {:error, {:directory_sync_failed, reason}}
-    end
+    host(runtime, :sync_directory, [path])
   end
 
   defp marker_directory(issue_id, runtime),

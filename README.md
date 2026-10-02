@@ -217,3 +217,9 @@ Owner authorization permits only one fixed epoch-5 successor for this same
 generation-2 claim. It pins all four historical epochs and failure seals,
 verifies the fourth signature at its recorded issuance, and cannot downgrade
 once reserved. Epoch 5 does not authorize another execution generation or epoch.
+
+HGS-740 WAL durability uses separate file-sync and protected Linux directory-sync
+operations. Directory opens require `O_DIRECTORY` and `O_NOFOLLOW`; failures
+retain the applying transaction and keep provider release closed. Recovery uses
+the same saved signed evidence, nonce and authorization time; it does not collect
+or sign a new reconciliation epoch or waive provider first-release freshness.

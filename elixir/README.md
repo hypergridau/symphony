@@ -1615,3 +1615,9 @@ using that historical time as current authority. Fifth publication retains
 signed outputs only inside epoch 5, keeps base/epoch-4 outputs unchanged, and
 holds closed on missing inputs. A failed durable fifth reservation permits no
 automatic further epoch.
+
+HGS-740 WAL durability uses separate file-sync and protected Linux directory-sync
+operations. Directory opens require `O_DIRECTORY` and `O_NOFOLLOW`; failures
+retain the applying transaction and keep provider release closed. Recovery uses
+the same saved signed evidence, nonce and authorization time; it does not collect
+or sign a new reconciliation epoch or waive provider first-release freshness.
