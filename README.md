@@ -133,6 +133,15 @@ unpaused gate keep the transition held.
 The completion command does not unpause admission. This source change does not install the
 ExecStartPre hook, run on a host, or qualify a live recovery.
 
+The root adapter now exposes a read-only `read_local_receipt_snapshot/4` handoff.
+Under the existing paused/quiescent launcher lock it verifies the recorded proof
+at its saved verification time, reconstructs the deterministic transition, checks
+the current recovered lineage, and returns exact marker, candidate, proof,
+observation and committed postimage bytes. It does not issue a receipt or fresh
+release observation, sign, publish files, release the provider or relax startup.
+This supplies native-verified bytes for the separate Dahlia release-only contract;
+owner authorization, fresh attestation and receipt publication remain separate gates.
+
 The apply and complete commands require all six pool units and both witness units stopped and
 masked, the state owner's user manager inactive, and no process running under the state owner's
 UID. State files retain their original UID, GID, and mode from the durable marker; after each

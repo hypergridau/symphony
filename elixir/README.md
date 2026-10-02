@@ -437,6 +437,19 @@ anchors. The completed marker must have original anchor metadata at startup. Do 
 the pool until root apply/complete succeeds and the drop-in `ExecStartPre` verifier is
 installed from the same attested source build.
 
+`ConfirmedRecoveryRootHost.read_local_receipt_snapshot/4` authorizes the exact
+issue/pool/workflow/nonce through the existing root adapter and holds the same
+paused/quiescent pool lock. `ConfirmedRecoveryCore.local_receipt_snapshot/1`
+re-verifies the saved proof at `verificationNowMs`, recomputes deterministic
+postimages from sealed preimages, checks the recovered journal/fence/graph
+lineage, and compares the existing local candidate with the native candidate
+builder. Protected descriptor reads return all three committed byte strings;
+marker bytes, postimages, pause and quiescence are rechecked before return.
+No fresh observation, signing or filesystem publication occurs. A partial,
+completed, mismatched or changed transition holds the handoff closed. This is
+the native byte-source integration for Dahlia's source-only release contract,
+not a receipt issuer, CLI command or live recovery authorization.
+
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the

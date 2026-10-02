@@ -20,6 +20,59 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
   alias SymphonyElixir.WorkPackageClaim.Journal
 
+  test "native receipt snapshot verifies applied bytes without signing, writing or refreshing proof time" do
+    for snapshot_state <- [:present, :absent] do
+      fixture = positive_apply_fixture(snapshot_state)
+      assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+      before = Agent.get(fixture.vfs, & &1.files)
+      marker = Jason.decode!(before[fixture.marker_path])
+      original = fixture.context.host_ops
+
+      ops =
+        original
+        |> Map.put(:now_ms, fn -> marker["verificationNowMs"] + 86_400_000 end)
+        |> Map.put(:sign_recovery_payload, fn _ -> flunk("snapshot must not sign") end)
+        |> Map.put(:observe_kubernetes_for_test, fn _, _ -> flunk("snapshot must not refresh observation") end)
+        |> Map.put(:verify_signed_evidence, fn bytes, bindings ->
+          assert bindings.now_ms == marker["verificationNowMs"]
+          original.verify_signed_evidence.(bytes, bindings)
+        end)
+
+      context = %{fixture.context | host_ops: ops}
+      assert {:ok, snapshot} = Transaction.local_receipt_snapshot(context)
+      assert snapshot.marker_bytes == before[fixture.marker_path]
+      assert snapshot.proof_bytes == fixture.proof_bytes
+      assert snapshot.candidate_bytes == before[Path.join(Path.dirname(fixture.marker_path), "local-transition-candidate.json")]
+
+      assert Enum.all?(snapshot.committed_images, fn {name, bytes} ->
+               sha256(bytes) == marker["postimages"][name]["sha256"]
+             end)
+
+      assert Agent.get(fixture.vfs, & &1.files) == before
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+      refute Map.has_key?(before, Path.join(Path.dirname(fixture.marker_path), "local-transition-receipt.json"))
+    end
+  end
+
+  test "native receipt snapshot denies changed candidate, proof, marker and committed state" do
+    fixture = positive_apply_fixture(:absent)
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+    before = Agent.get(fixture.vfs, & &1.files)
+    directory = Path.dirname(fixture.marker_path)
+    paths = [fixture.marker_path, Path.join(directory, "local-transition-candidate.json"), Path.join(directory, "confirmed-root-envelope.json") | Map.values(fixture.state_paths)]
+
+    for path <- paths do
+      Agent.update(fixture.vfs, fn state -> %{state | files: Map.put(before, path, "changed synthetic bytes")} end)
+      assert {:error, :hgs740_local_receipt_snapshot_held_closed} = Transaction.local_receipt_snapshot(fixture.context)
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+    end
+
+    Agent.update(fixture.vfs, fn state -> %{state | files: before} end)
+    denied = %{fixture.context | host_ops: Map.put(fixture.context.host_ops, :require_paused_gate, fn -> {:error, :not_paused} end)}
+    assert {:error, :hgs740_local_receipt_snapshot_held_closed} = Transaction.local_receipt_snapshot(denied)
+    assert Transaction.local_receipt_snapshot(%{}) == {:error, :hgs740_local_receipt_snapshot_held_closed}
+  end
+
   test "Core applies and replays fixed successor inputs without falling back to base history" do
     for epoch <- ~w(epoch-4 epoch-5) do
       fixture = positive_apply_fixture(:absent)

@@ -69,6 +69,60 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
 
   def apply(_issue_id, _pool, _workflow_path, _nonce), do: {:error, :invalid_confirmed_recovery_request}
 
+  @doc false
+  @spec local_receipt_snapshot(ConfirmedRecoveryContext.t()) :: {:ok, map()} | {:error, term()}
+  def local_receipt_snapshot(%ConfirmedRecoveryContext{} = context) do
+    runtime = runtime_with_host(context)
+    directory = marker_directory(context.issue_id, runtime)
+    candidate_path = Path.join(directory, "local-transition-candidate.json")
+
+    with :ok <- validate_context(context),
+         :ok <- host0(runtime, :require_paused_gate),
+         :ok <- host0(runtime, :require_services_quiescent),
+         {:ok, marker_bytes} <- read_trusted_evidence(marker_path(context.issue_id, runtime), runtime),
+         {:ok, marker} when is_map(marker) <- Jason.decode(marker_bytes),
+         :ok <- validate_marker_identity(marker, context.issue_id, context.pool, context.nonce),
+         true <- marker["status"] == "local_applied",
+         :ok <- marker_postimages_valid(marker),
+         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]),
+         {:ok, preimages} <- paths_from_marker_preimages(marker, runtime),
+         {:ok, _observation, observation_bytes, proof_bytes, payload} <- verify_saved_proof(marker, preimages),
+         true <- digest(observation_bytes) == marker["observationSHA256"],
+         true <- digest(proof_bytes) == marker["proofSHA256"],
+         :ok <- verify_local_claim(preimages, payload, runtime),
+         {:ok, computed} <- prepare_postimages(preimages, payload, runtime, marker["verificationNowMs"]),
+         true <- postimages_match_marker?(computed, marker),
+         :ok <- release_state_invariants(marker, runtime),
+         {:ok, current} <- read_state_preimages(runtime),
+         images = %{"claimJournal" => current.journal.bytes},
+         images = Map.put(images, "fence", current.fence.bytes),
+         images = Map.put(images, "responsibilityGraph", current.graph.bytes),
+         true <- Enum.all?(images, fn {name, bytes} -> digest(bytes) == marker["postimages"][name]["sha256"] end),
+         {:ok, candidate_bytes} <- read_trusted_evidence(candidate_path, runtime),
+         true <- candidate_bytes == local_candidate_bytes(marker),
+         {:ok, inputs} <- signed_input_directory(directory, runtime),
+         {:ok, ^observation_bytes} <- read_trusted_evidence(Path.join(inputs, "candidate.json"), runtime),
+         {:ok, ^proof_bytes} <- read_trusted_evidence(Path.join(inputs, "confirmed-root-envelope.json"), runtime),
+         {:ok, ^candidate_bytes} <- read_trusted_evidence(candidate_path, runtime),
+         {:ok, ^marker_bytes} <- read_trusted_evidence(marker_path(context.issue_id, runtime), runtime),
+         :ok <- verify_postimages(marker, runtime),
+         :ok <- host0(runtime, :require_paused_gate),
+         :ok <- host0(runtime, :require_services_quiescent),
+         :ok <- require_mutation_quiescent(runtime, marker["stateOwnership"]["claimJournal"]["uid"]) do
+      snapshot = %{marker_bytes: marker_bytes, candidate_bytes: candidate_bytes}
+      snapshot = Map.merge(snapshot, %{committed_images: images, proof_bytes: proof_bytes})
+      {:ok, Map.put(snapshot, :observation_bytes, observation_bytes)}
+    else
+      _ -> {:error, :hgs740_local_receipt_snapshot_held_closed}
+    end
+  rescue
+    _ -> {:error, :hgs740_local_receipt_snapshot_held_closed}
+  catch
+    _, _ -> {:error, :hgs740_local_receipt_snapshot_held_closed}
+  end
+
+  def local_receipt_snapshot(_context), do: {:error, :hgs740_local_receipt_snapshot_held_closed}
+
   @doc "Completes a locally applied recovery after exact provider release and fresh no-Job/no-Pod readback."
   @spec complete(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def complete(issue_id, pool, workflow_path)
@@ -1752,7 +1806,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     with :ok <- durable_replace(path, Jason.encode!(applied_marker), runtime), do: {:ok, applied_marker}
   end
 
-  defp publish_local_candidate(marker, _marker_path, runtime) do
+  defp local_candidate_bytes(marker) do
     receipt_fields = %{
       "pool" => marker["pool"],
       "issueId" => marker["issueId"],
@@ -1793,8 +1847,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     {receipt_version, _fields, _domain} = receipt_contract(marker)
     expected = local_receipt_payload(Map.put(receipt_fields, "contractVersion", receipt_version))
 
+    ConfirmedRecoveryEvidence.canonical_json(expected)
+  end
+
+  defp publish_local_candidate(marker, _marker_path, runtime) do
     path = Path.join(marker_directory(marker["issueId"], runtime), "local-transition-candidate.json")
-    bytes = ConfirmedRecoveryEvidence.canonical_json(expected)
+    bytes = local_candidate_bytes(marker)
 
     case read_trusted_evidence(path, runtime) do
       {:ok, ^bytes} -> :ok

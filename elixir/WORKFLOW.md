@@ -78,6 +78,9 @@ Optional pre-spawn recovery receipts use host-only `DAHLIA_WORK_PACKAGE_RECOVERY
 and `DAHLIA_WORK_PACKAGE_RECOVERY_PUBLIC_KEY` settings documented in `README.md`. Workers must
 not change those settings, receipt files or private authority journals. The signing key remains
 outside the runtime. Receipt adoption preserves history and retains normal native admission checks.
+The root-only local receipt snapshot adapter verifies and returns existing protected
+HGS-740 bytes under the paused pool lock. It does not sign or publish a receipt,
+refresh the observation, release authority or permit worker access to those bytes.
 The host may admit another eligible issue after verifying that a never-submitted generation
 already released its exact authority and has no local workspace. Workers must not fabricate
 cleanup, change retained grants or remove journals to trigger that exception.

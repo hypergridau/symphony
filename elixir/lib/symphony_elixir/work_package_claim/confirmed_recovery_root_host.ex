@@ -53,6 +53,14 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   end
 
   @doc false
+  @spec read_local_receipt_snapshot(String.t(), String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def read_local_receipt_snapshot(issue_id, pool, workflow_path, nonce) do
+    with {:ok, context} <- authorize_apply(issue_id, pool, workflow_path, nonce) do
+      with_pool_lock(context, fn -> ConfirmedRecoveryCore.local_receipt_snapshot(context) end)
+    end
+  end
+
+  @doc false
   @spec authorize_completion(String.t(), String.t(), String.t()) :: result()
   def authorize_completion(issue_id, pool, workflow_path) do
     with :ok <- require_root(),
