@@ -15,10 +15,274 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryKubernetes, as: Kubernetes
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryLineage
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryProviderRelease, as: ProviderRelease
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseProtocol, as: Release
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Facade
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
   alias SymphonyElixir.WorkPackageClaim.Journal
+
+  test "release protocol binds a real native snapshot and never recollects or resigns retained authority" do
+    {fixture, enrollment, ports, state} = release_fixture()
+    frozen = Agent.get(fixture.vfs, & &1.files)
+    assert {:ok, :created, bundle} = Release.run("approval-local", enrollment, ports)
+    assert bundle["binding"]["originalObservedAt"] != release_iso(Agent.get(state, & &1.now))
+    candidate = Jason.decode!(bundle["receipt"])["payload"] |> Base.url_decode64!(padding: false)
+    assert candidate == frozen[fixture.local_candidate_path]
+    after_create = Agent.get(fixture.vfs, & &1.files)
+    assert {:ok, :retained, ^bundle} = Release.run("approval-local", enrollment, ports)
+    Agent.update(state, &%{&1 | now: &1.now + 86_400_000})
+    assert {:ok, :retained, ^bundle} = Release.run("approval-local", enrollment, ports)
+    assert Agent.get(state, & &1.collections) == 1
+    assert Agent.get(state, & &1.signatures) == 3
+    assert Agent.get(fixture.vfs, & &1.files) == after_create
+    assert Map.take(after_create, Map.keys(frozen)) == frozen
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+  end
+
+  test "release protocol reserves once and holds partial collection without retries" do
+    {_fixture, enrollment, ports, state} = release_fixture()
+
+    failed = %{
+      ports
+      | collect: fn _ ->
+          Agent.update(state, &%{&1 | collections: &1.collections + 1})
+          {:error, :synthetic_readback_failure}
+        end
+    }
+
+    assert {:error, :synthetic_readback_failure} = Release.run("approval-local", enrollment, failed)
+    assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+    assert Agent.get(state, & &1.collections) == 1
+    assert Agent.get(state, & &1.signatures) == 1
+  end
+
+  test "release protocol denies changed owner action source expiry lock and enrollment before collection" do
+    for field <- ~w(approverRef targetAction expiresAt supersededByApprovalId) do
+      {_fixture, enrollment, ports, state} = release_fixture()
+      Agent.update(state, fn s -> %{s | decision: Map.put(s.decision, field, "changed")} end)
+      assert {:error, _} = Release.run("approval-local", enrollment, ports)
+      assert Agent.get(state, & &1.collections) == 0
+    end
+
+    {_fixture, enrollment, ports, state} = release_fixture()
+    blocked = %{ports | with_lock: fn _ -> {:error, :synthetic_lock_busy} end}
+    assert {:error, :synthetic_lock_busy} = Release.run("approval-local", enrollment, blocked)
+    assert {:error, :hgs740_release_protocol_not_admitted} = Release.run("approval-local", %{enrollment | trust_enrolled: false}, ports)
+    assert {:error, :hgs740_release_protocol_not_admitted} = ConfirmedRecoveryRootHost.release_only("issue", "pool", "workflow", "decision")
+    assert Agent.get(state, & &1.collections) == 0
+  end
+
+  test "release snapshot enforces manifest ownership content and missing-input holds" do
+    {fixture, _enrollment, _ports, _state} = release_fixture()
+    path = Path.join(Path.dirname(fixture.epoch_candidate), "manifest.json")
+    original = fixture.context.host_ops
+
+    lstat = fn p ->
+      if p == path, do: {:ok, %File.Stat{type: :regular, uid: 1001, mode: 0o600, links: 1, size: 100}}, else: original.lstat.(p)
+    end
+
+    assert {:error, :hgs740_release_binding_held_closed} = Transaction.release_only_snapshot(%{fixture.context | host_ops: Map.put(original, :lstat, lstat)})
+    Agent.update(fixture.vfs, fn s -> %{s | files: Map.put(s.files, path, "changed manifest")} end)
+    assert {:error, :hgs740_release_binding_held_closed} = Transaction.release_only_snapshot(fixture.context)
+  end
+
+  test "release protocol denies nonempty lease inventory and expiration during collection" do
+    for failure <- [:lease, :expired] do
+      {fixture, enrollment, ports, state} = release_fixture()
+
+      collect = fn binding ->
+        {:ok, readbacks} = ports.collect.(binding)
+
+        if failure == :expired do
+          Agent.update(state, &%{&1 | now: &1.now + 60_001})
+          {:ok, readbacks}
+        else
+          {:ok, put_in(readbacks, ["provider", "credentialLeases"], ["synthetic-lease"])}
+        end
+      end
+
+      assert {:error, _} = Release.run("approval-local", enrollment, %{ports | collect: collect})
+      refute Map.has_key?(Agent.get(fixture.vfs, & &1.files), Path.join(Path.dirname(fixture.marker_path), "local-transition-receipt.json"))
+      assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+    end
+  end
+
+  defp release_fixture do
+    fixture = epoch_five_snapshot_fixture()
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+    assert {:ok, snapshot} = Transaction.release_only_snapshot(fixture.context)
+    {public, private} = :crypto.generate_key(:eddsa, :ed25519)
+    heads = %{"dahlia" => String.duplicate("a", 40), "symphony" => String.duplicate("b", 40)}
+    spki = <<0x30, 0x2A, 0x30, 0x05, 0x06, 0x03, 0x2B, 0x65, 0x70, 0x03, 0x21, 0x00>> <> public
+    fingerprint = sha256(Base.encode64(spki))
+    enrollment = %{protocol_accepted: true, trust_enrolled: true, owner_principal: "synthetic-owner"}
+    enrollment = Map.put(enrollment, :native_public_key, public)
+    enrollment = Map.put(enrollment, :native_fingerprint, fingerprint)
+    enrollment = Map.put(enrollment, :source_heads, heads)
+    {:ok, binding} = Release.binding(snapshot, heads)
+    {:ok, completed, 0} = DateTime.from_iso8601(Jason.decode!(snapshot.candidate_bytes)["completedAt"])
+    now = max(fixture.bindings.now_ms, DateTime.to_unix(completed, :millisecond)) + 86_400_000
+    decision = release_decision(binding, now)
+    initial = %{now: now, decision: decision, collections: 0, signatures: 0, locked: false}
+    {:ok, state} = Agent.start_link(fn -> initial end)
+
+    ports = %{
+      with_lock: fn fun ->
+        Agent.update(state, &%{&1 | locked: true})
+
+        try do
+          fun.()
+        after
+          Agent.update(state, &%{&1 | locked: false})
+        end
+      end,
+      snapshot: fn ->
+        assert Agent.get(state, & &1.locked)
+        Transaction.release_only_snapshot(fixture.context)
+      end,
+      approval: fn "approval-local" -> {:ok, Agent.get(state, & &1.decision)} end,
+      now: fn -> Agent.get(state, & &1.now) end,
+      read: fn name -> Transaction.release_only_artifact(fixture.context, name, nil) end,
+      create: fn name, bytes ->
+        assert Agent.get(state, & &1.locked)
+        Transaction.release_only_artifact(fixture.context, name, bytes)
+      end,
+      sign: fn bytes ->
+        assert Agent.get(state, & &1.locked)
+        Agent.update(state, &%{&1 | signatures: &1.signatures + 1})
+        {:ok, :crypto.sign(:eddsa, :none, bytes, [private, :ed25519])}
+      end,
+      collect: fn b ->
+        assert Agent.get(state, & &1.locked)
+        Agent.update(state, &%{&1 | collections: &1.collections + 1})
+        {:ok, release_readbacks(b, Agent.get(state, & &1.now))}
+      end
+    }
+
+    {fixture, enrollment, ports, state}
+  end
+
+  test "release protocol rechecks custody and human authority after signing" do
+    for failure <- [:decision, :postimage] do
+      {fixture, enrollment, ports, state} = release_fixture()
+
+      sign = fn bytes ->
+        result = ports.sign.(bytes)
+
+        if Agent.get(state, & &1.signatures) == 3 do
+          if failure == :decision do
+            Agent.update(state, fn s -> %{s | decision: Map.put(s.decision, "approvalState", "declined")} end)
+          else
+            Agent.update(fixture.vfs, fn s -> %{s | files: Map.put(s.files, fixture.state_paths.fence, "changed")} end)
+          end
+        end
+
+        result
+      end
+
+      assert {:error, _} = Release.run("approval-local", enrollment, %{ports | sign: sign})
+      refute Map.has_key?(Agent.get(fixture.vfs, & &1.files), Path.join(Path.dirname(fixture.marker_path), "local-transition-receipt.json"))
+      assert Agent.get(state, & &1.collections) == 1
+    end
+  end
+
+  test "release protocol denies incomplete inventories and source substitutions" do
+    for {path, value} <- [
+          {["jobs", "complete"], false},
+          {["pods", "items"], ["pod"]},
+          {["provider", "sourceIdentity"], "untrusted"},
+          {["provider", "oauthSlotLeases"], ["released"]},
+          {["host", "workerCount"], false},
+          {["custody", "verified"], false}
+        ] do
+      {fixture, enrollment, ports, _state} = release_fixture()
+
+      collect = fn binding ->
+        {:ok, readbacks} = ports.collect.(binding)
+        {:ok, put_in(readbacks, path, value)}
+      end
+
+      assert {:error, _} = Release.run("approval-local", enrollment, %{ports | collect: collect})
+      assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+      refute Map.has_key?(Agent.get(fixture.vfs, & &1.files), Path.join(Path.dirname(fixture.marker_path), "local-transition-receipt.json"))
+    end
+  end
+
+  test "release artifacts are bounded exclusive fixed-path writes and crash prefixes never recollect" do
+    for artifact <- ["release-only-attempt.json", "release-only-attestation.json", "local-transition-receipt.json"] do
+      {fixture, enrollment, ports, state} = release_fixture()
+
+      create = fn name, bytes ->
+        result = ports.create.(name, bytes)
+        if name == artifact, do: {:error, :synthetic_directory_sync_failure}, else: result
+      end
+
+      assert {:error, :synthetic_directory_sync_failure} = Release.run("approval-local", enrollment, %{ports | create: create})
+      count = Agent.get(state, & &1.collections)
+      assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+      assert Agent.get(state, & &1.collections) == count
+      assert {:error, :invalid_release_artifact} = Transaction.release_only_artifact(fixture.context, "../arbitrary", "bytes")
+      oversized = String.duplicate("x", 262_145)
+      result = Transaction.release_only_artifact(fixture.context, "release-only-bundle.json", oversized)
+      assert {:error, :invalid_release_artifact} = result
+      assert {:error, _} = Transaction.release_only_artifact(fixture.context, artifact, "replacement")
+    end
+  end
+
+  defp release_decision(binding, now) do
+    %{
+      "approvalId" => "approval-local",
+      "workspaceId" => binding["expected"]["workspaceId"],
+      "companyId" => binding["expected"]["companyId"],
+      "approvalState" => "approved",
+      "targetAction" => "hgs740_release_local",
+      "decisionMode" => "human",
+      "approverType" => "user",
+      "approverRef" => "synthetic-owner",
+      "decisionActorType" => "user",
+      "decisionActorRef" => "synthetic-owner",
+      "supersededByApprovalId" => nil,
+      "decidedAt" => release_iso(now - 60_000),
+      "expiresAt" => release_iso(now + 600_000),
+      "decisionPayload" => %{
+        "protocolVersion" => "hgs740-release-only.v1",
+        "bindingSHA256" => sha256(Evidence.canonical_json(binding)),
+        "sourceHeads" => binding["sourceHeads"],
+        "attemptId" => "11111111-2222-4333-8444-555555555555",
+        "allowedActions" => ~w(collect_release_attestation issue_local_transition_receipt),
+        "nativeDecisionId" => nil
+      }
+    }
+  end
+
+  defp release_readbacks(binding, now) do
+    stamp = %{"observedAt" => release_iso(now)}
+
+    %{
+      "host" => Map.merge(stamp, %{"sourceIdentity" => "native-host", "globalPause" => true, "unitsMaskedAndQuiescent" => true, "workerCount" => 0}),
+      "provider" =>
+        Map.merge(stamp, %{
+          "sourceIdentity" => "provider-core:postgres",
+          "expected" => binding["expected"],
+          "state" => "claimed_held",
+          "complete" => true,
+          "credentialLeases" => [],
+          "oauthSlotLeases" => []
+        }),
+      "jobs" => Map.merge(stamp, %{"sourceIdentity" => "kubernetes:jobs", "complete" => true, "items" => [], "resourceVersion" => "1"}),
+      "pods" => Map.merge(stamp, %{"sourceIdentity" => "kubernetes:pods", "complete" => true, "items" => [], "resourceVersion" => "1"}),
+      "custody" =>
+        Map.merge(stamp, %{
+          "sourceIdentity" => "native-custody",
+          "verified" => true,
+          "markerSHA256" => binding["markerSHA256"],
+          "postimages" => binding["postimages"],
+          "sourceHeads" => binding["sourceHeads"]
+        })
+    }
+  end
+
+  defp release_iso(ms), do: ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
 
   test "native receipt snapshot verifies applied bytes without signing, writing or refreshing proof time" do
     for snapshot_state <- [:present, :absent] do
@@ -129,6 +393,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     Agent.update(fixture.vfs, fn state ->
       files = state.files
       files = files |> Map.put(candidate, files[Path.join(base, "candidate.json")]) |> Map.put(proof, fixture.proof_bytes)
+      metadata = Jason.decode!(files[candidate])["reconciliation"]
+      files = Map.put(files, Path.join(epoch, "manifest.json"), Evidence.canonical_json(metadata))
       files = files |> Map.put(Path.join(base, "candidate.json"), "retained base observation") |> Map.put(Path.join(base, "confirmed-root-envelope.json"), "retained base proof")
       %{state | files: files}
     end)
@@ -1961,6 +2227,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       "observation" => observation
     }
 
+    payload = fixture_epoch_metadata(snapshot_state, payload, now_ms)
+
     payload = Map.merge(payload, contract.payload_fields)
 
     payload_bytes = Evidence.canonical_json(payload)
@@ -1980,7 +2248,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         "signature" => Base.url_encode64(signature, padding: false)
       })
 
-    observation_bytes = Evidence.canonical_json(observation)
+    observation_bytes = Evidence.canonical_json(payload["observation"])
     {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths(pool)
     root_operations = ConfirmedRecoveryRootHost.operations()
     paths = [runtime.journal_path, runtime.execution_fence_path, runtime.responsibility_graph_path]
@@ -2170,6 +2438,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
   defp fixture_identity(:v3), do: {"f77e349e-21d9-4bdf-bad3-ce08b302e7e8", "hypergrid-gitops"}
   defp fixture_identity(_snapshot), do: {"24e34a86-b214-41bc-8a35-9e1d31bfb8e4", "midgard"}
+
+  defp fixture_epoch_metadata(:v3, payload, now_ms) do
+    observed_at = now_ms |> DateTime.from_unix!(:millisecond) |> DateTime.to_iso8601()
+    metadata = %{"epoch" => "epoch-5", "observedAt" => observed_at, "contractVersion" => "hgs740-reconciliation-observation.v5"}
+    observation = payload["observation"] |> Map.put("observedAt", observed_at) |> Map.put("reconciliation", metadata)
+    Map.put(payload, "observation", observation)
+  end
+
+  defp fixture_epoch_metadata(_snapshot, payload, _now), do: payload
 
   defp reservation_key(expected) do
     Journal.reservation_key(

@@ -60,6 +60,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
     end
   end
 
+  @doc "Release-only production entry remains closed until separate protocol acceptance and trust enrollment."
+  @spec release_only(String.t(), String.t(), String.t(), String.t()) :: {:error, atom()}
+  def release_only(_issue_id, _pool, _workflow_path, _decision_id),
+    do: {:error, :hgs740_release_protocol_not_admitted}
+
   @doc false
   @spec authorize_completion(String.t(), String.t(), String.t()) :: result()
   def authorize_completion(issue_id, pool, workflow_path) do

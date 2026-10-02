@@ -123,6 +123,57 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
 
   def local_receipt_snapshot(_context), do: {:error, :hgs740_local_receipt_snapshot_held_closed}
 
+  @doc false
+  @spec release_only_snapshot(ConfirmedRecoveryContext.t()) :: {:ok, map()} | {:error, term()}
+  def release_only_snapshot(%ConfirmedRecoveryContext{} = context) do
+    runtime = runtime_with_host(context)
+    path = Path.join(marker_directory(context.issue_id, runtime), "reconciliation/epoch-5/manifest.json")
+
+    with {:ok, snapshot} <- local_receipt_snapshot(context),
+         {:ok, observation} <- Jason.decode(snapshot.observation_bytes),
+         %{"epoch" => "epoch-5", "observedAt" => observed_at} = metadata <- observation["reconciliation"],
+         true <- observed_at == observation["observedAt"],
+         {:ok, manifest} <- read_trusted_evidence(path, runtime),
+         true <- manifest == ConfirmedRecoveryEvidence.canonical_json(metadata),
+         {:ok, ^snapshot} <- local_receipt_snapshot(context),
+         {:ok, ^manifest} <- read_trusted_evidence(path, runtime) do
+      {:ok, Map.put(snapshot, :manifest_bytes, manifest)}
+    else
+      _ -> {:error, :hgs740_release_binding_held_closed}
+    end
+  rescue
+    _ -> {:error, :hgs740_release_binding_held_closed}
+  end
+
+  @doc false
+  @spec release_only_artifact(ConfirmedRecoveryContext.t(), String.t(), binary() | nil) :: term()
+  def release_only_artifact(%ConfirmedRecoveryContext{} = context, name, bytes)
+      when name in ["release-only-attempt.json", "release-only-attestation.json", "release-only-bundle.json", "local-transition-receipt.json"] and
+             (is_nil(bytes) or (is_binary(bytes) and byte_size(bytes) <= 262_144)) do
+    runtime = runtime_with_host(context)
+    path = Path.join(marker_directory(context.issue_id, runtime), name)
+
+    with :ok <- validate_context(context),
+         :ok <- host0(runtime, :require_paused_gate),
+         :ok <- host0(runtime, :require_services_quiescent) do
+      if is_nil(bytes), do: read_trusted_evidence(path, runtime), else: create_release_artifact(path, bytes, runtime)
+    end
+  end
+
+  def release_only_artifact(_context, _name, _bytes), do: {:error, :invalid_release_artifact}
+
+  defp create_release_artifact(path, bytes, runtime) do
+    with :ok <- trusted_evidence_directory(Path.dirname(path), runtime),
+         {:error, :enoent} <- read_trusted_evidence(path, runtime),
+         :ok <- durable_create(path, bytes, runtime),
+         {:ok, ^bytes} <- read_trusted_evidence(path, runtime) do
+      :ok
+    else
+      {:ok, _} -> {:error, :release_artifact_already_exists}
+      error -> error
+    end
+  end
+
   @doc "Completes a locally applied recovery after exact provider release and fresh no-Job/no-Pod readback."
   @spec complete(String.t(), String.t(), String.t()) :: :ok | {:error, term()}
   def complete(issue_id, pool, workflow_path)

@@ -1553,6 +1553,39 @@ local execution lease, and keeps the provider claim blocked for the existing
 never-started reconciliation path. Timeouts, lost replies, and other witness
 errors remain at `spawn_started` until exact root-log replay resolves them.
 
+### Source-only HGS-740 release protocol
+
+`ConfirmedRecoveryReleaseProtocol.run/3` coordinates the paired release-only
+contract through trusted host ports. Native `release_only_snapshot/1` verifies the
+existing `local_applied` snapshot and exact protected epoch-5 manifest. The binding
+pins its complete old claim, nonce, historical observation/proof, candidate,
+marker, manifest, three committed postimages and enrolled source heads.
+
+The native key signs a projection of an authoritative Dahlia human approval;
+it does not grant human authority. Approved unsuperseded owner identity, exact
+action list, source/binding hash, attempt UUID and expiry must match. A fixed
+exclusive `release-only-attempt.json` reservation precedes one bounded collection.
+Complete provider, Job, Pod, host and custody readbacks produce a distinct
+attestation with at most 60 seconds of validity and five seconds of future skew.
+Its observation must follow the historical receipt completion time. Snapshot and
+ledger are reread before and after signing the unchanged original v3 candidate.
+Attestation, receipt and final bundle use fixed root-owned private artifact paths,
+exclusive bounded writes, file and directory sync, and protected readback.
+
+Partial attempts never recollect or resign. Exact complete retained bundles may
+be read after expiry without writes. Dahlia separately checks the authoritative
+local decision and an action-bound provider prepare/confirm decision inside its
+existing admission transaction, including freshness at both first writes.
+Synthetic tests exercise the native coordinator and provider consumption; Linux
+root fixtures additionally check real artifact permissions, hardlinks and exclusive
+publication. No private test key is exported.
+
+`ConfirmedRecoveryRootHost.release_only/4` always returns
+`:hgs740_release_protocol_not_admitted`. There is no CLI, real collector or provider
+release invocation. Production protocol acceptance and trusted owner/attestor,
+ledger and source enrollment require a separate reviewed admission. Existing
+recovery commands, legacy freshness gates and startup authority remain unchanged.
+
 ### HGS-740 append-only observation reconciliation
 
 The `app: nil` recovery escript starts Req alone after its native observer checks

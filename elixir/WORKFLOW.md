@@ -81,6 +81,10 @@ outside the runtime. Receipt adoption preserves history and retains normal nativ
 The root-only local receipt snapshot adapter verifies and returns existing protected
 HGS-740 bytes under the paused pool lock. It does not sign or publish a receipt,
 refresh the observation, release authority or permit worker access to those bytes.
+The paired release-only coordinator is source-only: its production host entry is
+unconditionally closed. Test ports bind the durable human ledger, one distinct
+fresh attestation and locked issuance of the original epoch-5 receipt. No workflow
+setting enables it or grants a worker signing, collection or provider authority.
 The host may admit another eligible issue after verifying that a never-submitted generation
 already released its exact authority and has no local workspace. Workers must not fabricate
 cleanup, change retained grants or remove journals to trigger that exception.
