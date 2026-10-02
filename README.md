@@ -134,6 +134,11 @@ The completion command does not unpause admission. This source change does not i
 ExecStartPre hook, run on a host, or qualify a live recovery.
 
 The root adapter now exposes a read-only `read_local_receipt_snapshot/4` handoff.
+Synthetic qualification now covers the Hypergrid pool's generation-two v3
+retirement-only state in epoch 5, including a durable-sync failure, restart after
+expiry, unchanged signed inputs, blocked grants, repeatable snapshots and denial
+when an epoch input disappears. Dahlia's paired fixture checks the actual native
+marker, candidate and state bytes; representative binding metadata is test-only.
 Under the existing paused/quiescent launcher lock it verifies the recorded proof
 at its saved verification time, reconstructs the deterministic transition, checks
 the current recovered lineage, and returns exact marker, candidate, proof,

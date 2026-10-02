@@ -73,6 +73,78 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     assert Transaction.local_receipt_snapshot(%{}) == {:error, :hgs740_local_receipt_snapshot_held_closed}
   end
 
+  test "epoch-5 v3 snapshot preserves blocked authority and immutable historical inputs after restart" do
+    fixture = epoch_five_snapshot_fixture()
+    before = Agent.get(fixture.vfs, & &1.files)
+    failed = %{fixture.context | host_ops: Map.put(fixture.context.host_ops, :sync_directory, fn _ -> {:error, :synthetic_sync_failure} end)}
+    assert {:error, :synthetic_sync_failure} = Transaction.apply_with_test_context(failed)
+    applying = Jason.decode!(Agent.get(fixture.vfs, & &1.files[fixture.marker_path]))
+    original = fixture.context.host_ops
+
+    ops =
+      original
+      |> Map.put(:now_ms, fn -> applying["verificationNowMs"] + 86_400_000 end)
+      |> Map.put(:observe_kubernetes_for_test, fn _, cluster -> {:ok, synthetic_kubernetes_observation(cluster)} end)
+      |> Map.put(:verify_signed_evidence, fn bytes, bindings ->
+        assert bindings.now_ms == applying["verificationNowMs"]
+        original.verify_signed_evidence.(bytes, bindings)
+      end)
+
+    context = %{fixture.context | host_ops: ops}
+    assert {:ok, :applied} = Transaction.apply_with_test_context(context)
+    committed = Agent.get(fixture.vfs, & &1.files)
+    context = %{context | host_ops: Map.put(ops, :observe_kubernetes_for_test, fn _, _ -> flunk("snapshot must not collect") end)}
+    assert {:ok, snapshot} = Transaction.local_receipt_snapshot(context)
+    assert {:ok, ^snapshot} = Transaction.local_receipt_snapshot(context)
+    marker = Jason.decode!(snapshot.marker_bytes)
+    candidate = Jason.decode!(snapshot.candidate_bytes)
+    assert marker["contractVersion"] == "work-package-hgs740-local-transition.v3"
+    assert candidate["contractVersion"] == "work-package-hgs740-local-transition-receipt.v3"
+    assert candidate["assignmentSnapshotState"] == "absent"
+    assert candidate["completedAt"] == marker["completedAt"]
+    assert candidate["assignmentDigest"] == Evidence.tuple_digest(fixture.expected)
+    assert snapshot.proof_bytes == before[fixture.epoch_proof]
+    assert snapshot.observation_bytes == before[fixture.epoch_candidate]
+    assert snapshot.marker_bytes == committed[fixture.marker_path]
+    assert {:ok, graph} = GraphPersistence.decode_bytes(snapshot.committed_images["responsibilityGraph"])
+    assert graph.delegations["accountable-gen2"].status == :blocked
+    assert graph.delegations["responsible-gen2"].status == :blocked
+    assert graph.delegations["responsible-gen2"].runtime_lease == nil
+    assert Agent.get(fixture.vfs, & &1.files) == committed
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+
+    for path <- [fixture.epoch_candidate, fixture.epoch_proof] do
+      Agent.update(fixture.vfs, fn state -> %{state | files: Map.delete(committed, path)} end)
+      assert {:error, :hgs740_local_receipt_snapshot_held_closed} = Transaction.local_receipt_snapshot(context)
+    end
+  end
+
+  defp epoch_five_snapshot_fixture do
+    fixture = positive_apply_fixture(:v3)
+    base = Path.dirname(fixture.marker_path)
+    epoch = Path.join(base, "reconciliation/epoch-5")
+    candidate = Path.join(epoch, "candidate.json")
+    proof = Path.join(epoch, "confirmed-root-envelope.json")
+
+    Agent.update(fixture.vfs, fn state ->
+      files = state.files
+      files = files |> Map.put(candidate, files[Path.join(base, "candidate.json")]) |> Map.put(proof, fixture.proof_bytes)
+      files = files |> Map.put(Path.join(base, "candidate.json"), "retained base observation") |> Map.put(Path.join(base, "confirmed-root-envelope.json"), "retained base proof")
+      %{state | files: files}
+    end)
+
+    original = fixture.context.host_ops
+
+    lstat = fn path ->
+      if path in [epoch, Path.dirname(epoch)],
+        do: {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}},
+        else: original.lstat.(path)
+    end
+
+    context = %{fixture.context | host_ops: Map.put(original, :lstat, lstat)}
+    Map.merge(fixture, %{context: context, epoch_candidate: candidate, epoch_proof: proof})
+  end
+
   test "Core applies and replays fixed successor inputs without falling back to base history" do
     for epoch <- ~w(epoch-4 epoch-5) do
       fixture = positive_apply_fixture(:absent)
@@ -1841,12 +1913,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   defp positive_apply_fixture(snapshot_state \\ :present) do
-    issue_id = "24e34a86-b214-41bc-8a35-9e1d31bfb8e4"
+    {issue_id, pool} = fixture_identity(snapshot_state)
     nonce = "11111111-2222-4333-8444-555555555501"
     now_ms = 1_790_762_400_000
 
     {expected, _old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor, present_assignment_sha} =
-      confirmed_preimages(issue_id, now_ms)
+      snapshot_preimages(snapshot_state, issue_id, now_ms)
 
     journal_bytes = fixture_journal_bytes(snapshot_state, journal_bytes, expected)
     contract = fixture_recovery_contract(snapshot_state, present_assignment_sha)
@@ -1881,7 +1953,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       )
 
     payload = %{
-      "pool" => "midgard",
+      "pool" => pool,
       "issueId" => issue_id,
       "generation" => 2,
       "reservationId" => expected["reservationId"],
@@ -1909,7 +1981,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       })
 
     observation_bytes = Evidence.canonical_json(observation)
-    {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths("midgard")
+    {:ok, runtime} = ConfirmedRecoveryRootHost.fixed_runtime_paths(pool)
     root_operations = ConfirmedRecoveryRootHost.operations()
     paths = [runtime.journal_path, runtime.execution_fence_path, runtime.responsibility_graph_path]
 
@@ -2046,15 +2118,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
     context = %ConfirmedRecoveryContext{
       issue_id: issue_id,
-      pool: "midgard",
+      pool: pool,
       nonce: nonce,
-      workflow_path: "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/midgard.md",
+      workflow_path: "/srv/dahlia-runner-state/dahlia/config/symphony/workflows/#{pool}.md",
       runtime: runtime,
       host_ops: host_ops
     }
 
     bindings = %{
-      pool: "midgard",
+      pool: pool,
       issue_id: issue_id,
       generation: 2,
       reservation_id: expected["reservationId"],
@@ -2096,6 +2168,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     }
   end
 
+  defp fixture_identity(:v3), do: {"f77e349e-21d9-4bdf-bad3-ce08b302e7e8", "hypergrid-gitops"}
+  defp fixture_identity(_snapshot), do: {"24e34a86-b214-41bc-8a35-9e1d31bfb8e4", "midgard"}
+
   defp reservation_key(expected) do
     Journal.reservation_key(
       expected["issueId"],
@@ -2130,6 +2205,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   defp fixture_journal_bytes(:absent, journal_bytes, expected),
     do: remove_journal_snapshot(journal_bytes, expected)
 
+  defp fixture_journal_bytes(:v3, journal_bytes, expected),
+    do: remove_journal_snapshot(journal_bytes, expected)
+
   defp fixture_journal_bytes(_snapshot_state, journal_bytes, _expected), do: journal_bytes
 
   defp fixture_recovery_contract(:present, assignment_sha) do
@@ -2145,6 +2223,12 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
   defp fixture_recovery_contract(:absent, _assignment_sha), do: fixture_absent_recovery_contract()
   defp fixture_recovery_contract(:explicit_null, _assignment_sha), do: fixture_absent_recovery_contract()
+
+  defp fixture_recovery_contract(:v3, _assignment_sha) do
+    contract = fixture_absent_recovery_contract()
+    version = "work-package-paused-confirmed-recovery.v3"
+    %{contract | version: version, payload_fields: Map.put(contract.payload_fields, "contractVersion", version)}
+  end
 
   defp fixture_absent_recovery_contract do
     version = "work-package-paused-confirmed-recovery.v2"
@@ -2206,7 +2290,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
-  defp snapshot_binding_matches?(bindings, %{"contractVersion" => "work-package-paused-confirmed-recovery.v2"}) do
+  defp snapshot_binding_matches?(bindings, %{"contractVersion" => version})
+       when version in ["work-package-paused-confirmed-recovery.v2", "work-package-paused-confirmed-recovery.v3"] do
     Map.get(bindings, :assignment_snapshot_state) == "absent" and
       Map.has_key?(bindings, :assignment_snapshot_state)
   end
@@ -2437,6 +2522,79 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
       "scopeState" => "released"
     }
   end
+
+  defp snapshot_preimages(:v3, issue_id, now_ms) do
+    {expected, old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor, assignment_sha} =
+      confirmed_preimages(issue_id, now_ms)
+
+    {:ok, journal} = Journal.decode_bytes(journal_bytes)
+    journal = %{journal | reservations: Map.take(journal.reservations, [reservation_key(expected)])}
+    {:ok, journal_bytes} = Journal.encode_bytes(journal)
+    {:ok, graph} = GraphPersistence.decode_bytes(graph_bytes)
+
+    graph =
+      Enum.reduce(~w(accountable-gen2 responsible-gen2), graph, fn id, state ->
+        state
+        |> put_in([:delegations, id, :status], :blocked)
+        |> put_in([:delegations, id, :blocked_on], :restart_reconciliation)
+      end)
+
+    observation = %{"provider_projection_id" => expected["projectionId"], "workspace_absent" => true, "process_count" => 0}
+    receipt = Map.put(predecessor["receipt"], "provider_projection_id", expected["projectionId"])
+    receipt = Map.put(receipt, "observation_sha256", native_fixture_digest(observation))
+    grant_fields = ~w(id parent_delegation_id role actor_id scope authority budget expires_at_ms expected_deliverable expected_evidence return_to_parent)a
+    ids = ~w(accountable-gen1 responsible-gen1 accountable-gen2 responsible-gen2)
+    fields = ~w(prior_accountable_digest prior_responsible_digest successor_accountable_digest successor_responsible_digest)
+
+    receipt =
+      Enum.zip(ids, fields)
+      |> Enum.reduce(receipt, fn {id, field}, acc ->
+        Map.put(acc, field, native_fixture_digest(Map.take(graph.delegations[id], grant_fields)))
+      end)
+
+    receipt = Map.put(receipt, "evidence_ref", Evidence.retirement_evidence_ref(receipt))
+    source = Map.drop(receipt, ~w(active_process linear_state local_claim provider_claim provider_projection_id retired_at_ms workspace))
+    source = source |> Map.put("observation", observation) |> Map.put("prepared_at_ms", receipt["retired_at_ms"])
+
+    graph =
+      Enum.reduce(~w(accountable-gen1 responsible-gen1), graph, fn id, state ->
+        state
+        |> put_in([:delegations, id, :terminal_reason], :unsubmitted_successor)
+        |> put_in([:delegations, id, :terminal_evidence], source)
+      end)
+
+    {:ok, graph_bytes} = GraphPersistence.encode_bytes(graph)
+    {:ok, fence} = FencePersistence.decode_bytes(fence_bytes)
+    session = expected["sessionId"]
+    lease = Map.merge(fence.executions[issue_id].leases[session], %{head: "unobserved", last_heartbeat_at: 0})
+    fence = put_in(fence, [:executions, issue_id, :ownership], :unknown)
+    fence = put_in(fence, [:executions, issue_id, :leases, session], lease)
+    fence = put_in(fence, [:sessions, session], lease)
+
+    native_receipt =
+      Map.new(receipt, fn {key, value} ->
+        {String.to_existing_atom(key), if(value == "absent", do: :absent, else: value)}
+      end)
+
+    [retired] = fence.history
+    retired = %{retired | retirement: native_receipt}
+
+    retired =
+      Map.update!(retired, :leases, fn leases ->
+        Map.new(leases, fn {id, row} -> {id, Map.put(row, :release_reason, "claim_not_submitted")} end)
+      end)
+
+    fence = %{fence | history: [retired]}
+    {:ok, fence_bytes} = FencePersistence.encode_bytes(fence)
+    [execution] = Jason.decode!(fence_bytes)["history"]
+    predecessor = %{"execution" => execution, "claim" => nil, "receipt" => execution["retirement"]}
+    {expected, old_claim, journal_bytes, fence_bytes, graph_bytes, predecessor, assignment_sha}
+  end
+
+  defp snapshot_preimages(_snapshot, issue_id, now_ms), do: confirmed_preimages(issue_id, now_ms)
+
+  defp native_fixture_digest(value),
+    do: :crypto.hash(:sha256, :erlang.term_to_binary(value, [:deterministic])) |> Base.encode16(case: :lower)
 
   defp confirmed_preimages(issue_id, now_ms) do
     nonce1 = "generation-one-private-nonce"
