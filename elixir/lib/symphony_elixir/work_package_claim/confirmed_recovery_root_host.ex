@@ -14,6 +14,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryContext, ConfirmedRecoveryEvidence}
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedFirst
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedFourthEpoch, as: FailedFourth
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: FailedSecond
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: FailedSigned
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
@@ -99,10 +100,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   defp verify_issuer_preflight(context) do
     directory = marker_directory(context.issue_id)
 
-    with :ok <- ConfirmedRecoveryIssuerPreflight.verify(directory),
+    with :ok <- verify_failed_fourth_before_collection(context.issue_id, directory),
+         :ok <- ConfirmedRecoveryIssuerPreflight.verify(directory),
          {:ok, bytes} <- EpochHost.read_private(Path.join(directory, "issuer-input.json"), 1_048_576),
          {:ok, bundle} <- Jason.decode(bytes),
          do: ConfirmedRecoveryCore.preflight_transition(context, bundle)
+  end
+
+  defp verify_failed_fourth_before_collection(issue_id, directory) do
+    case File.lstat(Reconciliation.epoch_directory(directory, "epoch-4")) do
+      {:error, :enoent} -> :ok
+      {:ok, %File.Stat{type: :directory}} -> require_epoch_issuer_directory(issue_id, "epoch-5")
+      _ -> {:error, :invalid_reconciliation_epoch}
+    end
   end
 
   @doc false
@@ -272,7 +282,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec read_issuer_bundle(String.t(), String.t()) :: {:ok, binary()} | {:error, term()}
   def read_issuer_bundle(issue_id, path) when is_binary(issue_id) and is_binary(path) do
     epoch =
-      Enum.find(["epoch-1", "epoch-2", "epoch-3", "epoch-4"], fn name ->
+      Enum.find(["epoch-1", "epoch-2", "epoch-3", "epoch-4", "epoch-5"], fn name ->
         path == Path.join(Reconciliation.epoch_directory(marker_directory(issue_id), name), "issuer-input.json")
       end)
 
@@ -294,8 +304,13 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
 
   def read_issuer_bundle(_issue_id, _path), do: {:error, :untrusted_issuer_bundle}
 
-  defp require_epoch_issuer_directory(issue_id, "epoch-4") do
-    require_signed_predecessor_directory(issue_id, &trusted_root_directory/1, &File.ls/1, &EpochHost.require_unapplied_predecessor/2)
+  defp require_epoch_issuer_directory(issue_id, epoch) when epoch in ["epoch-4", "epoch-5"] do
+    verify = fn metadata, directory ->
+      binding = if epoch == "epoch-5", do: Map.put(metadata, "signedPredecessorEpoch4", FailedFourth.predecessor_binding()), else: metadata
+      EpochHost.require_unapplied_predecessor(binding, directory)
+    end
+
+    require_signed_predecessor_directory(issue_id, &trusted_root_directory/1, &File.ls/1, verify)
   end
 
   defp require_epoch_issuer_directory(issue_id, _epoch), do: require_issuer_input_directory(issue_id)

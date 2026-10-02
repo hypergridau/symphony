@@ -213,3 +213,7 @@ local transition without signing or writing state before reserving an epoch.
 Private evidence reads tolerate only the access-time update caused by reading
 the file; all identity, custody and mutation checks remain fixed. Failed signed
 observations remain retained and do not acquire fresh runtime authority.
+Owner authorization permits only one fixed epoch-5 successor for this same
+generation-2 claim. It pins all four historical epochs and failure seals,
+verifies the fourth signature at its recorded issuance, and cannot downgrade
+once reserved. Epoch 5 does not authorize another execution generation or epoch.

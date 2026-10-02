@@ -3,6 +3,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
 
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedEpoch, as: FailedEpoch
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedFourthEpoch, as: FailedFourthEpoch
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: FailedSecondEpoch
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: FailedSignedEpoch
 
@@ -18,9 +19,19 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   @spec historical_hashes() :: map()
   def historical_hashes, do: @historical
 
-  @doc "Once epoch 4 exists, signed transaction inputs must come from it or fail closed."
+  @doc "A reserved fixed successor supplies transaction inputs or holds closed."
   @spec input_directory(String.t(), function()) :: {:ok, String.t()} | {:error, term()}
   def input_directory(directory, lstat) do
+    successor = epoch_directory(directory, "epoch-5")
+
+    case lstat.(successor) do
+      {:error, :enoent} -> fourth_input_directory(directory, lstat)
+      {:ok, %File.Stat{type: :directory}} -> {:ok, successor}
+      _ -> {:error, :invalid_reconciliation_epoch}
+    end
+  end
+
+  defp fourth_input_directory(directory, lstat) do
     successor = epoch_directory(directory, "epoch-4")
 
     case lstat.(successor) do
@@ -31,7 +42,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
   end
 
   @spec epoch_directory(String.t(), String.t()) :: String.t()
-  def epoch_directory(directory, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3", "epoch-4"],
+  def epoch_directory(directory, epoch \\ "epoch-1") when epoch in ["epoch-1", "epoch-2", "epoch-3", "epoch-4", "epoch-5"],
     do: Path.join([directory, "reconciliation", epoch])
 
   @spec validate(map()) :: :ok | {:error, :invalid_reconciliation_epoch}
@@ -75,6 +86,11 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
     do:
       Enum.sort(Map.keys(metadata)) == Enum.sort(["signedPredecessorEpoch3", "predecessorEpoch2", "ancestorEpoch1" | @fields]) and
         metadata["contractVersion"] == "hgs740-reconciliation-observation.v4" and FailedSignedEpoch.valid?(metadata)
+
+  defp valid_metadata?(%{"epoch" => "epoch-5"} = metadata),
+    do:
+      Enum.sort(Map.keys(metadata)) == Enum.sort(["signedPredecessorEpoch4", "signedPredecessorEpoch3", "predecessorEpoch2", "ancestorEpoch1" | @fields]) and
+        metadata["contractVersion"] == "hgs740-reconciliation-observation.v5" and FailedFourthEpoch.valid?(metadata)
 
   defp valid_metadata?(_metadata), do: false
 
@@ -121,6 +137,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation do
 
   defp verify_predecessor(%{"epoch" => "epoch-4"} = metadata, directory, read),
     do: FailedSignedEpoch.verify(metadata, directory, read)
+
+  defp verify_predecessor(%{"epoch" => "epoch-5"} = metadata, directory, read),
+    do: FailedFourthEpoch.verify(metadata, directory, read)
 
   defp verify_predecessor(_metadata, _directory, _read), do: :ok
 

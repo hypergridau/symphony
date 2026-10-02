@@ -1609,3 +1609,9 @@ file read. Device, inode, type, owner, mode, link count, size, modification time
 change time and every other stat field must remain unchanged. A native root
 fixture exercises an actual cold read; this source correction does not refresh
 or authorize replay of retained failed signed observations.
+The fixed epoch-5 successor references every retained epoch and seal. Issuer
+preflight verifies the failed fourth signature at its recorded issuance without
+using that historical time as current authority. Fifth publication retains
+signed outputs only inside epoch 5, keeps base/epoch-4 outputs unchanged, and
+holds closed on missing inputs. A failed durable fifth reservation permits no
+automatic further epoch.

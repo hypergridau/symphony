@@ -20,39 +20,41 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  test "Core applies and replays fourth-directory signed inputs without falling back to base history" do
-    fixture = positive_apply_fixture(:absent)
-    base = Path.dirname(fixture.marker_path)
-    fourth = Path.join(base, "reconciliation/epoch-4")
-    candidate = Path.join(fourth, "candidate.json")
-    proof = Path.join(fourth, "confirmed-root-envelope.json")
+  test "Core applies and replays fixed successor inputs without falling back to base history" do
+    for epoch <- ~w(epoch-4 epoch-5) do
+      fixture = positive_apply_fixture(:absent)
+      base = Path.dirname(fixture.marker_path)
+      successor = Path.join(base, "reconciliation/" <> epoch)
+      candidate = Path.join(successor, "candidate.json")
+      proof = Path.join(successor, "confirmed-root-envelope.json")
 
-    Agent.update(fixture.vfs, fn state ->
-      files = state.files
-      next = files |> Map.put(candidate, files[Path.join(base, "candidate.json")]) |> Map.put(proof, fixture.proof_bytes)
-      next = next |> Map.put(Path.join(base, "candidate.json"), "retained candidate") |> Map.put(Path.join(base, "confirmed-root-envelope.json"), "retained envelope")
-      %{state | files: next}
-    end)
+      Agent.update(fixture.vfs, fn state ->
+        files = state.files
+        next = files |> Map.put(candidate, files[Path.join(base, "candidate.json")]) |> Map.put(proof, fixture.proof_bytes)
+        next = next |> Map.put(Path.join(base, "candidate.json"), "retained candidate") |> Map.put(Path.join(base, "confirmed-root-envelope.json"), "retained envelope")
+        %{state | files: next}
+      end)
 
-    original = fixture.context.host_ops
+      original = fixture.context.host_ops
 
-    lstat = fn path ->
-      if path in [fourth, Path.dirname(fourth)],
-        do: {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}},
-        else: original.lstat.(path)
+      lstat = fn path ->
+        if path in [successor, Path.dirname(successor)],
+          do: {:ok, %File.Stat{type: :directory, uid: 0, gid: 0, mode: 0o700}},
+          else: original.lstat.(path)
+      end
+
+      context = %{fixture.context | host_ops: Map.put(original, :lstat, lstat)}
+      assert {:ok, :applied} = Transaction.apply_with_test_context(context)
+      assert {:ok, :already_applied} = Transaction.apply_with_test_context(context)
+      files = Agent.get(fixture.vfs, & &1.files)
+      assert files[Path.join(base, "candidate.json")] == "retained candidate"
+      assert files[Path.join(base, "confirmed-root-envelope.json")] == "retained envelope"
+      assert Map.has_key?(files, fixture.marker_path)
+      refute Map.has_key?(files, Path.join(successor, "transaction.json"))
+      Agent.update(fixture.vfs, fn state -> %{state | files: Map.delete(state.files, candidate)} end)
+      assert {:error, _} = Transaction.apply_with_test_context(context)
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
     end
-
-    context = %{fixture.context | host_ops: Map.put(original, :lstat, lstat)}
-    assert {:ok, :applied} = Transaction.apply_with_test_context(context)
-    assert {:ok, :already_applied} = Transaction.apply_with_test_context(context)
-    files = Agent.get(fixture.vfs, & &1.files)
-    assert files[Path.join(base, "candidate.json")] == "retained candidate"
-    assert files[Path.join(base, "confirmed-root-envelope.json")] == "retained envelope"
-    assert Map.has_key?(files, fixture.marker_path)
-    refute Map.has_key?(files, Path.join(fourth, "transaction.json"))
-    Agent.update(fixture.vfs, fn state -> %{state | files: Map.delete(state.files, candidate)} end)
-    assert {:error, _} = Transaction.apply_with_test_context(context)
-    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
   end
 
   test "issuance transition preflight computes the real apply proposal without publishing or writing" do
@@ -2863,12 +2865,16 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     proof_path = Path.join(directory, "confirmed-root-envelope.json")
     files = %{observation_path => observation_bytes, proof_path => proof_bytes}
     fourth = Path.join(directory, "reconciliation/epoch-4")
+    fifth = Path.join(directory, "reconciliation/epoch-5")
     parent = self()
 
     host_ops =
       ConfirmedRecoveryRootHost.operations()
       |> Map.merge(%{
         lstat: fn
+          ^fifth ->
+            {:error, :enoent}
+
           ^fourth ->
             {:error, :enoent}
 

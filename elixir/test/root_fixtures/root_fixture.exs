@@ -107,6 +107,55 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
     end
   end
 
+  test "fifth publication crash prefixes retain base and signed fourth history exactly" do
+    for prefix <- 0..3 do
+      issue = "99999999-9999-4999-8999-99999999999#{prefix}"
+      directory = RootHost.marker_directory(issue)
+      fourth = Path.join(directory, "reconciliation/epoch-4")
+      fifth = Path.join(directory, "reconciliation/epoch-5")
+      File.mkdir_p!(fourth)
+      File.mkdir_p!(fifth)
+      for path <- [Path.dirname(directory), directory, Path.dirname(fifth), fourth, fifth], do: File.chmod!(path, 0o700)
+
+      for path <- [directory, fourth] do
+        write_root_private(Path.join(path, "candidate.json"), "historical candidate")
+        write_root_private(Path.join(path, "confirmed-root-envelope.json"), "historical envelope")
+      end
+
+      Process.put(:fifth_writes, 0)
+
+      write = fn path, bytes ->
+        count = Process.get(:fifth_writes)
+
+        if count == prefix do
+          {:error, :synthetic_crash}
+        else
+          Process.put(:fifth_writes, count + 1)
+          RootHost.exclusive_durable_write_for_test(path, bytes)
+        end
+      end
+
+      candidate = "{\"reconciliation\":{\"epoch\":\"epoch-5\"}}"
+      first = EpochHost.persist(issue, candidate, "fifth envelope", write, fn _ -> :ok end)
+      assert first == if(prefix == 3, do: :ok, else: {:error, :issuer_output_conflict})
+      write = &RootHost.exclusive_durable_write_for_test/2
+      sync = fn _ -> :ok end
+
+      for _ <- 1..2 do
+        assert :ok == EpochHost.persist(issue, candidate, "fifth envelope", write, sync)
+      end
+
+      for path <- [directory, fourth] do
+        assert File.read!(Path.join(path, "candidate.json")) == "historical candidate"
+        assert File.read!(Path.join(path, "confirmed-root-envelope.json")) == "historical envelope"
+      end
+
+      assert File.read!(Path.join(fifth, "candidate.json")) == candidate
+      assert File.read!(Path.join(fifth, "issued-envelope.json")) == "fifth envelope"
+      assert {:error, :issuer_output_conflict} = EpochHost.persist(issue, candidate, "replacement", write, sync)
+    end
+  end
+
   test "epoch private reader rejects writable files and symlinks on the actual filesystem" do
     directory = Path.join(@fixture_root, "epoch-private-reader")
     File.mkdir_p!(directory)

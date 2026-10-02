@@ -175,13 +175,43 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationTest do
 
   test "signed input selection cannot fall back from a reserved fourth epoch" do
     successor = Epoch.epoch_directory(@directory, "epoch-4")
-    assert {:ok, @directory} = Epoch.input_directory(@directory, fn ^successor -> {:error, :enoent} end)
-    reserved = fn ^successor -> {:ok, %File.Stat{type: :directory}} end
+    assert {:ok, @directory} = Epoch.input_directory(@directory, fn _ -> {:error, :enoent} end)
+    reserved = fn path -> if path == successor, do: {:ok, %File.Stat{type: :directory}}, else: {:error, :enoent} end
     assert {:ok, ^successor} = Epoch.input_directory(@directory, reserved)
 
     for result <- [{:ok, %File.Stat{type: :symlink}}, {:ok, %File.Stat{type: :regular}}, {:error, :eacces}] do
-      assert {:error, :invalid_reconciliation_epoch} = Epoch.input_directory(@directory, fn ^successor -> result end)
+      lstat = fn path -> if path == successor, do: result, else: {:error, :enoent} end
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.input_directory(@directory, lstat)
     end
+  end
+
+  test "fifth metadata carries every immutable predecessor binding and no additional schema" do
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedFourthEpoch, as: Fourth
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSecondEpoch, as: Second
+    alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryFailedSignedEpoch, as: Third
+    {observation, _, _} = fixture()
+
+    metadata =
+      Map.merge(observation["reconciliation"], %{
+        "contractVersion" => "hgs740-reconciliation-observation.v5",
+        "epoch" => "epoch-5",
+        "historicalSHA256" => Epoch.historical_hashes(),
+        "ancestorEpoch1" => FailedEpoch.predecessor_binding(),
+        "predecessorEpoch2" => Second.predecessor_binding(),
+        "signedPredecessorEpoch3" => Third.predecessor_binding(),
+        "signedPredecessorEpoch4" => Fourth.predecessor_binding()
+      })
+
+    bound = Map.put(observation, "reconciliation", metadata)
+    assert :ok = Epoch.validate(bound)
+
+    for field <- ~w(ancestorEpoch1 predecessorEpoch2 signedPredecessorEpoch3 signedPredecessorEpoch4 historicalSHA256) do
+      assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(put_in(bound, ["reconciliation", field], %{}))
+    end
+
+    assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(put_in(bound, ["expected", "generation"], 3))
+    assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(put_in(bound, ["reconciliation", "epoch"], "epoch-6"))
+    assert {:error, :invalid_reconciliation_epoch} = Epoch.validate(put_in(bound, ["reconciliation", "extra"], "authority"))
   end
 
   test "signed predecessor pins its base outputs, full epoch and unsigned ancestry" do
