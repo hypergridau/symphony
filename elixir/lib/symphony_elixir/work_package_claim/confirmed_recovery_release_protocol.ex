@@ -181,29 +181,43 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseProtocol do
 
   defp create(snapshot, binding, decision, auth, enrollment, ports) do
     with :ok <- ports.create.("release-only-attempt.json", Evidence.canonical_json(auth)),
+         {:ok, ^auth} <- authorize(decision, binding, enrollment.owner_principal, ports.now.()),
          {:ok, auth_raw} <- envelope(auth, @auth_domain, enrollment, ports),
          started <- ports.now.(),
          {:ok, readbacks} <- ports.collect.(binding),
+         {:ok, ^snapshot} <- ports.snapshot.(),
+         {:ok, ^decision} <- ports.approval.(decision["approvalId"]),
          now <- ports.now.(),
          {:ok, observed} <- observations(readbacks, binding, started, now),
          :ok <- receipt_history(snapshot, observed),
-         {:ok, ^snapshot} <- ports.snapshot.(),
-         {:ok, ^decision} <- ports.approval.(decision["approvalId"]),
          {:ok, ^auth} <- authorize(decision, binding, enrollment.owner_principal, now),
          {:ok, attestation} <- attest(readbacks, binding, auth_raw, auth, observed, now),
+         :ok <- current_evidence(decision, binding, auth, attestation, enrollment, ports),
          {:ok, attest_raw} <- envelope(attestation, @attest_domain, enrollment, ports),
+         :ok <- current_evidence(decision, binding, auth, attestation, enrollment, ports),
          :ok <- ports.create.("release-only-attestation.json", attest_raw),
-         :ok <- fresh(attestation, ports.now.()),
          {:ok, ^snapshot} <- ports.snapshot.(),
          {:ok, ^decision} <- ports.approval.(decision["approvalId"]),
+         :ok <- current_evidence(decision, binding, auth, attestation, enrollment, ports),
          {:ok, receipt_raw} <- envelope_bytes(snapshot.candidate_bytes, @receipt_domain, enrollment, ports),
-         :ok <- fresh(attestation, ports.now.()),
          {:ok, ^snapshot} <- ports.snapshot.(),
          {:ok, ^decision} <- ports.approval.(decision["approvalId"]),
+         :ok <- current_evidence(decision, binding, auth, attestation, enrollment, ports),
          :ok <- ports.create.("local-transition-receipt.json", receipt_raw),
          bundle = %{"binding" => binding, "authorization" => auth_raw, "attestation" => attest_raw, "receipt" => receipt_raw},
+         {:ok, ^snapshot} <- ports.snapshot.(),
+         {:ok, ^decision} <- ports.approval.(decision["approvalId"]),
+         :ok <- current_evidence(decision, binding, auth, attestation, enrollment, ports),
          :ok <- ports.create.("release-only-bundle.json", Evidence.canonical_json(bundle)) do
       {:ok, :created, bundle}
+    end
+  end
+
+  defp current_evidence(decision, binding, auth, attestation, enrollment, ports) do
+    now = ports.now.()
+
+    with {:ok, ^auth} <- authorize(decision, binding, enrollment.owner_principal, now) do
+      fresh(attestation, now)
     end
   end
 

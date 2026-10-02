@@ -107,6 +107,86 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
+  test "release protocol rejects evidence expiring during snapshot and ledger rereads" do
+    for port <- [:snapshot, :approval], stage <- 2..5, evidence <- [:attestation, :authorization] do
+      {fixture, enrollment, ports, state} = release_fixture()
+      deadline = Agent.get(state, & &1.now) + if(evidence == :authorization, do: 30_000, else: 60_000)
+
+      if evidence == :authorization do
+        Agent.update(state, fn s -> %{s | decision: Map.put(s.decision, "expiresAt", release_iso(deadline))} end)
+      end
+
+      {:ok, calls} = Agent.start_link(fn -> 0 end)
+      reread = Map.fetch!(ports, port)
+
+      delayed = fn args ->
+        result = apply(reread, args)
+        count = Agent.get_and_update(calls, fn n -> {n + 1, n + 1} end)
+        if count == stage, do: Agent.update(state, &%{&1 | now: deadline})
+        result
+      end
+
+      changed =
+        case port do
+          :snapshot -> %{ports | snapshot: fn -> delayed.([]) end}
+          :approval -> %{ports | approval: fn id -> delayed.([id]) end}
+        end
+
+      reason =
+        case evidence do
+          :authorization -> :hgs740_owner_decision_not_admitted
+          :attestation -> :hgs740_release_attestation_expired
+        end
+
+      assert {:error, ^reason} = Release.run("approval-local", enrollment, changed)
+      assert Agent.get(calls, & &1) == stage
+      assert Agent.get(state, & &1.signatures) == min(stage - 1, 3)
+      files = Agent.get(fixture.vfs, & &1.files)
+      directory = Path.dirname(fixture.marker_path)
+      refute Map.has_key?(files, Path.join(directory, "release-only-bundle.json"))
+
+      if stage < 5, do: refute(Map.has_key?(files, Path.join(directory, "local-transition-receipt.json")))
+      if stage == 2, do: refute(Map.has_key?(files, Path.join(directory, "release-only-attestation.json")))
+      assert Map.has_key?(files, Path.join(directory, "release-only-attempt.json"))
+      assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+      assert Agent.get(state, & &1.collections) == 1
+      assert Agent.get(fixture.vfs, & &1.files) == files
+    end
+  end
+
+  test "release protocol rejects expiration during signing and receipt publication" do
+    for boundary <- [:attestation_sign, :receipt_sign, :receipt_write] do
+      {fixture, enrollment, ports, state} = release_fixture()
+      deadline = Agent.get(state, & &1.now) + 60_000
+
+      sign = fn bytes ->
+        result = ports.sign.(bytes)
+        count = Agent.get(state, & &1.signatures)
+
+        if {boundary, count} in [{:attestation_sign, 2}, {:receipt_sign, 3}] do
+          Agent.update(state, &%{&1 | now: deadline})
+        end
+
+        result
+      end
+
+      create = fn name, bytes ->
+        result = ports.create.(name, bytes)
+        if boundary == :receipt_write and name == "local-transition-receipt.json", do: Agent.update(state, &%{&1 | now: deadline})
+        result
+      end
+
+      assert {:error, :hgs740_release_attestation_expired} = Release.run("approval-local", enrollment, %{ports | sign: sign, create: create})
+      files = Agent.get(fixture.vfs, & &1.files)
+      directory = Path.dirname(fixture.marker_path)
+      refute Map.has_key?(files, Path.join(directory, "release-only-bundle.json"))
+      if boundary != :receipt_write, do: refute(Map.has_key?(files, Path.join(directory, "local-transition-receipt.json")))
+      if boundary == :attestation_sign, do: refute(Map.has_key?(files, Path.join(directory, "release-only-attestation.json")))
+      assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+      assert Agent.get(fixture.vfs, & &1.files) == files
+    end
+  end
+
   defp release_fixture do
     fixture = epoch_five_snapshot_fixture()
     assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)

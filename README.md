@@ -152,7 +152,9 @@ protected original epoch-5 manifest to an action-scoped Dahlia human approval
 ledger projection. Trusted test ports reserve one attempt before collecting a
 distinct release attestation, recheck custody and the decision around signing,
 then exclusively publish the unchanged v3 receipt and retained bundle. Partial
-attempts hold without recollection; complete bundles replay read-only. The original
+attempts hold without recollection; complete bundles replay read-only. Authorization
+and attestation freshness are checked after slow snapshot and ledger rereads,
+immediately before signing and each subsequent publication. The original
 sealed observation and native state stay unchanged. Production `release_only/4`
 is unconditionally closed pending separate protocol acceptance, owner/attestor
 enrollment and real collector admission. This source change performs no live

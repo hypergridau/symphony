@@ -1569,6 +1569,11 @@ Complete provider, Job, Pod, host and custody readbacks produce a distinct
 attestation with at most 60 seconds of validity and five seconds of future skew.
 Its observation must follow the historical receipt completion time. Snapshot and
 ledger are reread before and after signing the unchanged original v3 candidate.
+After these potentially slow rereads, one current clock sample revalidates both
+authorization and attestation immediately before signing or publication. Signing
+and receipt writes are followed by another freshness check before publishing the
+next artifact, including the final retained bundle. Expiry at the deadline holds
+the existing partial attempt closed without replacement signatures or collection.
 Attestation, receipt and final bundle use fixed root-owned private artifact paths,
 exclusive bounded writes, file and directory sync, and protected readback.
 
