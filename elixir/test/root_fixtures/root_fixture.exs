@@ -1,6 +1,7 @@
 defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
   use ExUnit.Case, async: false
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore, as: Core
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost, as: RootHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Transaction
@@ -426,6 +427,22 @@ defmodule SymphonyElixir.RootFixtures.ConfirmedRecoveryTest do
 
     assert context.runtime.execution_fence_path ==
              "/srv/dahlia-runner-state/workspaces/pools/midgard/.symphony/execution-fence.json"
+
+    assert {:error, :hgs740_release_protocol_not_admitted} = RootHost.release_only(@issue_id, @pool, recovery, "synthetic")
+    artifact_context = %{context | host_ops: Map.put(context.host_ops, :require_paused_gate, fn -> :ok end)}
+    artifact_context = %{artifact_context | host_ops: Map.put(artifact_context.host_ops, :require_services_quiescent, fn -> :ok end)}
+    artifact = Path.join(Transaction.marker_directory(@issue_id), "release-only-attempt.json")
+    assert :ok = Core.release_only_artifact(artifact_context, "release-only-attempt.json", "synthetic-only")
+    assert {:ok, "synthetic-only"} = Core.release_only_artifact(artifact_context, "release-only-attempt.json", nil)
+    assert {:error, :release_artifact_already_exists} = Core.release_only_artifact(artifact_context, "release-only-attempt.json", "replacement")
+    File.chmod!(artifact, 0o644)
+    assert {:error, :untrusted_hgs740_evidence} = Core.release_only_artifact(artifact_context, "release-only-attempt.json", nil)
+    File.chmod!(artifact, 0o600)
+    hardlink = artifact <> ".hardlink"
+    File.ln!(artifact, hardlink)
+    assert {:error, :untrusted_hgs740_evidence} = Core.release_only_artifact(artifact_context, "release-only-attempt.json", nil)
+    File.rm!(hardlink)
+    assert File.read!(artifact) == "synthetic-only"
 
     other = Path.join(Path.dirname(recovery), "grid.md")
     File.chown!(other, @owner)

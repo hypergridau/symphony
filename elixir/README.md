@@ -437,6 +437,19 @@ anchors. The completed marker must have original anchor metadata at startup. Do 
 the pool until root apply/complete succeeds and the drop-in `ExecStartPre` verifier is
 installed from the same attested source build.
 
+`ConfirmedRecoveryRootHost.read_local_receipt_snapshot/4` authorizes the exact
+issue/pool/workflow/nonce through the existing root adapter and holds the same
+paused/quiescent pool lock. `ConfirmedRecoveryCore.local_receipt_snapshot/1`
+re-verifies the saved proof at `verificationNowMs`, recomputes deterministic
+postimages from sealed preimages, checks the recovered journal/fence/graph
+lineage, and compares the existing local candidate with the native candidate
+builder. Protected descriptor reads return all three committed byte strings;
+marker bytes, postimages, pause and quiescence are rechecked before return.
+No fresh observation, signing or filesystem publication occurs. A partial,
+completed, mismatched or changed transition holds the handoff closed. This is
+the native byte-source integration for Dahlia's source-only release contract,
+not a receipt issuer, CLI command or live recovery authorization.
+
 Before the Job create, the claim journal retains the exact validated non-secret
 assignment bundle. A different bundle for the same confirmed claim is rejected.
 Retained allocation recovery reads this snapshot and checks it against the
@@ -1539,6 +1552,59 @@ intent was appended. Frigga persists `recovery_pending`, releases only the
 local execution lease, and keeps the provider claim blocked for the existing
 never-started reconciliation path. Timeouts, lost replies, and other witness
 errors remain at `spawn_started` until exact root-log replay resolves them.
+
+### Source-only HGS-740 release protocol
+
+`ConfirmedRecoveryReleaseProtocol.run/3` coordinates the paired release-only
+contract through trusted host ports. Native `release_only_snapshot/1` verifies the
+existing `local_applied` snapshot and exact protected epoch-5 manifest. The binding
+pins its complete old claim, nonce, historical observation/proof, candidate,
+marker, manifest, three committed postimages and enrolled source heads.
+
+The native key signs a projection of an authoritative Dahlia human approval;
+it does not grant human authority. Approved unsuperseded owner identity, exact
+action list, source/binding hash, attempt UUID and expiry must match. A fixed
+exclusive `release-only-attempt.json` reservation precedes one bounded collection.
+Complete provider, Job, Pod, host and custody readbacks produce a distinct
+attestation with at most 60 seconds of validity and five seconds of future skew.
+Its observation must follow the historical receipt completion time. Snapshot and
+ledger are reread before and after signing the unchanged original v3 candidate.
+After these potentially slow rereads, one current clock sample revalidates both
+authorization and attestation immediately before signing or publication. Signing
+and receipt writes are followed by another freshness check before publishing the
+next artifact, including the final retained bundle. Expiry at the deadline holds
+the existing partial attempt closed without replacement signatures or collection.
+Attestation, receipt and final bundle use fixed root-owned private artifact paths,
+exclusive bounded writes, file and directory sync, and protected readback.
+
+Partial attempts never recollect or resign. Exact complete retained bundles may
+be read after expiry without writes. Dahlia separately checks the authoritative
+local decision and an action-bound provider prepare/confirm decision inside its
+existing admission transaction, including freshness at both first writes.
+Synthetic tests exercise the native coordinator and provider consumption; Linux
+root fixtures additionally check real artifact permissions, hardlinks and exclusive
+publication. No private test key is exported.
+
+`ConfirmedRecoveryRootHost.release_only/4` always returns
+`:hgs740_release_protocol_not_admitted`. Trusted `release_only/5` composes the
+existing native custody, pool lock, pause/systemd/process guards, bounded Kubernetes
+collector and authoritative provider ledger/held reads. `ConfirmedRecoveryReleaseHostPorts`
+passes the original nested cluster binding to the existing Kubernetes collector.
+Empty Job inventories require matching first/final resource versions; churn holds
+the retained attempt closed. Qualification composes the actual Kubernetes collector
+with doubles only for credential loading and external Job/Pod list calls.
+`ConfirmedRecoveryReleaseRuntime`
+reads existing root-private runner/admin identities; it creates no credential.
+`ConfirmedRecoveryReleaseTransport` supplies gated decision/held/prepare/confirm
+HTTPS calls with fixed origin, bounded streamed bodies, timeouts and no redirect
+or automatic retry. The coordinator still issues only the local bundle; provider
+prepare/confirm needs its separate durable human decision. Its exact retained
+bundle must not be recollected or resigned after a timeout. Publication rechecks
+authority and freshness after file open, immediately before raw writes and after
+durability operations. Adapter tests use doubles only at external boundaries.
+There is no production CLI admission. Production protocol acceptance and trusted owner/attestor,
+ledger and source enrollment require a separate reviewed admission. Existing
+recovery commands, legacy freshness gates and startup authority remain unchanged.
 
 ### HGS-740 append-only observation reconciliation
 

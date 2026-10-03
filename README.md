@@ -133,6 +133,37 @@ unpaused gate keep the transition held.
 The completion command does not unpause admission. This source change does not install the
 ExecStartPre hook, run on a host, or qualify a live recovery.
 
+The root adapter now exposes a read-only `read_local_receipt_snapshot/4` handoff.
+Synthetic qualification now covers the Hypergrid pool's generation-two v3
+retirement-only state in epoch 5, including a durable-sync failure, restart after
+expiry, unchanged signed inputs, blocked grants, repeatable snapshots and denial
+when an epoch input disappears. Dahlia's paired fixture checks the actual native
+marker, candidate and state bytes; representative binding metadata is test-only.
+Under the existing paused/quiescent launcher lock it verifies the recorded proof
+at its saved verification time, reconstructs the deterministic transition, checks
+the current recovered lineage, and returns exact marker, candidate, proof,
+observation and committed postimage bytes. It does not issue a receipt or fresh
+release observation, sign, publish files, release the provider or relax startup.
+This supplies native-verified bytes for the separate Dahlia release-only contract;
+owner authorization, fresh attestation and receipt publication remain separate gates.
+
+The paired source-only release coordinator binds that native snapshot and the
+protected original epoch-5 manifest to an action-scoped Dahlia human approval
+ledger projection. Native host ports now reuse existing locking, root custody,
+bounded Kubernetes evidence, protected provider identities and fixed HTTPS ledger
+and held-state transport. Trusted ports reserve one attempt before collecting a
+distinct release attestation, recheck custody and the decision around signing,
+then exclusively publish the unchanged v3 receipt and retained bundle. Partial
+attempts hold without recollection; complete bundles replay read-only. Authorization
+and attestation freshness are checked after slow snapshot and ledger rereads,
+immediately before signing and each subsequent publication. The original
+sealed observation and native state stay unchanged. Production `release_only/4`
+is unconditionally closed pending separate protocol acceptance, owner/attestor
+enrollment and installed collector admission. A gated trusted composition is
+available for isolated qualification, while normal production commands remain closed.
+This source change performs no live
+collection, signing, provider release, deployment, unpause or epoch allocation.
+
 The apply and complete commands require all six pool units and both witness units stopped and
 masked, the state owner's user manager inactive, and no process running under the state owner's
 UID. State files retain their original UID, GID, and mode from the durable marker; after each

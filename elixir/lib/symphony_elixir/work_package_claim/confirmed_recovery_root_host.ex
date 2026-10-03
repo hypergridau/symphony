@@ -20,6 +20,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts, as: ReleasePorts
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseProtocol, as: ReleaseProtocol
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseRuntime, as: ReleaseRuntime
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryWorkflow, Journal}
 
   @state_root "/srv/dahlia-runner-state"
@@ -50,6 +53,36 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
          {:ok, runtime} <- runtime_paths(pool) do
       verified_context(issue_id, pool, nonce, workflow_path, runtime)
     end
+  end
+
+  @doc false
+  @spec read_local_receipt_snapshot(String.t(), String.t(), String.t(), String.t()) :: {:ok, map()} | {:error, term()}
+  def read_local_receipt_snapshot(issue_id, pool, workflow_path, nonce) do
+    with {:ok, context} <- authorize_apply(issue_id, pool, workflow_path, nonce) do
+      with_pool_lock(context, fn -> ConfirmedRecoveryCore.local_receipt_snapshot(context) end)
+    end
+  end
+
+  @doc "Release-only production entry remains closed until separate protocol acceptance and trust enrollment."
+  @spec release_only(String.t(), String.t(), String.t(), String.t()) :: {:error, atom()}
+  def release_only(_issue_id, _pool, _workflow_path, _decision_id),
+    do: {:error, :hgs740_release_protocol_not_admitted}
+
+  @doc "Trusted composition only; the four-argument production command remains closed."
+  @spec release_only(String.t(), String.t(), String.t(), String.t(), map()) :: term()
+  def release_only(issue_id, pool, workflow_path, decision_id, runtime) do
+    with true <- runtime[:protocol_accepted] == true and runtime[:trust_enrolled] == true,
+         {:ok, context} <- authorize_apply(issue_id, pool, workflow_path, runtime.nonce),
+         {:ok, public} <- read_public_key(),
+         true <- runtime.native_fingerprint == @signer_fingerprint and runtime.native_public_key == public,
+         {:ok, provider} <- ReleaseRuntime.provider(context, runtime) do
+      ports = ReleasePorts.build(context, runtime, provider)
+      ReleaseProtocol.run(decision_id, runtime, ports)
+    else
+      _ -> {:error, :hgs740_release_protocol_not_admitted}
+    end
+  rescue
+    _ -> {:error, :hgs740_release_protocol_held_closed}
   end
 
   @doc false
