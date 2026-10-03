@@ -1588,7 +1588,12 @@ publication. No private test key is exported.
 `ConfirmedRecoveryRootHost.release_only/4` always returns
 `:hgs740_release_protocol_not_admitted`. Trusted `release_only/5` composes the
 existing native custody, pool lock, pause/systemd/process guards, bounded Kubernetes
-collector and authoritative provider ledger/held reads. `ConfirmedRecoveryReleaseRuntime`
+collector and authoritative provider ledger/held reads. `ConfirmedRecoveryReleaseHostPorts`
+passes the original nested cluster binding to the existing Kubernetes collector.
+Empty Job inventories require matching first/final resource versions; churn holds
+the retained attempt closed. Qualification composes the actual Kubernetes collector
+with doubles only for credential loading and external Job/Pod list calls.
+`ConfirmedRecoveryReleaseRuntime`
 reads existing root-private runner/admin identities; it creates no credential.
 `ConfirmedRecoveryReleaseTransport` supplies gated decision/held/prepare/confirm
 HTTPS calls with fixed origin, bounded streamed bodies, timeouts and no redirect

@@ -188,8 +188,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   end
 
   test "host ports compose native custody and publication with real provider transport boundaries" do
-    for mode <- [:success, :slow_read, :slow_open, :partial_sync, :changed_claim, :missing_inventory] do
-      {fixture, enrollment, original, state} = release_fixture()
+    modes = ~w(success slow_read slow_open partial_sync changed_claim missing_inventory changed_kube_resource_version)a
+
+    for mode <- modes do
+      {fixture, enrollment, original, state} = release_fixture("https://10.0.14.10:6443")
+      {:ok, snapshot} = Transaction.release_only_snapshot(fixture.context)
+      {:ok, binding} = Release.binding(snapshot, enrollment.source_heads)
+      now = DateTime.utc_now() |> DateTime.to_unix(:millisecond)
+      Agent.update(state, &%{&1 | now: now, decision: release_decision(binding, now)})
+      clock = fn -> max(DateTime.utc_now() |> DateTime.to_unix(:millisecond), Agent.get(state, & &1.now)) end
       plug = {__MODULE__, make_ref()}
       provider = %{protocol_accepted: true, trust_enrolled: true, runner_token: "synthetic-runner", admin_token: "synthetic-admin", test_plug: plug}
       transport = SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport
@@ -210,7 +217,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
 
             %{
               "sourceIdentity" => "provider-core:postgres",
-              "observedAt" => release_iso(Agent.get(state, & &1.now)),
+              "observedAt" => release_iso(clock.()),
               "expected" => expected,
               "assignmentDigest" => Evidence.tuple_digest(expected),
               "projectionState" => "active",
@@ -240,14 +247,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         conn |> Plug.Conn.put_resp_header("cache-control", "no-store") |> Req.Test.json(%{"data" => data})
       end)
 
-      host = fixture.context.host_ops |> Map.put(:now_ms, original.now) |> Map.put(:sign_recovery_payload, original.sign)
+      host = fixture.context.host_ops |> Map.put(:now_ms, clock) |> Map.put(:sign_recovery_payload, original.sign)
       open = host.raw_open
       sync = host.raw_sync
 
       host =
         Map.put(host, :raw_open, fn path, modes ->
           if mode == :slow_open and String.ends_with?(path, "release-only-attestation.json") do
-            Agent.update(state, &%{&1 | now: &1.now + 60_001})
+            delayed = clock.() + 60_001
+            Agent.update(state, &%{&1 | now: delayed})
           end
 
           open.(path, modes)
@@ -264,17 +272,38 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
         with_lock: original.with_lock,
         approval: fn b, id -> transport.approval(b, id, provider) end,
         held: fn b -> transport.held(b, provider) end,
-        kubernetes: fn claim, _cluster ->
+        kubernetes: fn claim, cluster ->
           assert claim["assignmentSnapshotState"] == "absent"
+          assert cluster["apiServer"] == "https://10.0.14.10:6443"
           Agent.update(state, &%{&1 | collections: &1.collections + 1})
-          if mode == :slow_read, do: Agent.update(state, &%{&1 | now: &1.now + 60_001})
 
-          {:ok,
-           %{
-             "observedAt" => release_iso(Agent.get(state, & &1.now)),
-             "jobs" => %{"itemCount" => 0, "confirmingItemCount" => 0, "claimAbsent" => true, "confirmingResourceVersion" => "rv-1"},
-             "pods" => %{"itemCount" => 0, "claimAbsent" => true, "resourceVersion" => "rv-2"}
-           }}
+          if mode == :slow_read do
+            delayed = clock.() + 60_001
+            Agent.update(state, &%{&1 | now: delayed})
+          end
+
+          loader = fn ^claim -> {:ok, :synthetic_context, cluster["caSha256"]} end
+          calls = :atomics.new(1, [])
+
+          jobs = fn "frigga", :synthetic_context ->
+            count = :atomics.add_get(calls, 1, 1)
+            version = if mode == :changed_kube_resource_version, do: Integer.to_string(count), else: "42"
+            {:ok, %{items: [], resource_version: version}}
+          end
+
+          pods = fn "frigga", :synthetic_context -> {:ok, %{items: [], resource_version: "43"}} end
+
+          result =
+            Kubernetes.observe_without_assignment_snapshot_with_test_adapter(
+              claim,
+              cluster,
+              loader,
+              jobs,
+              pods
+            )
+
+          assert :atomics.get(calls, 1) == 2
+          result
         end
       }
 
@@ -296,8 +325,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
-  defp release_fixture do
-    fixture = epoch_five_snapshot_fixture()
+  defp release_fixture(api_server \\ "https://synthetic.invalid") do
+    fixture = epoch_five_snapshot_fixture(api_server)
     assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
     assert {:ok, snapshot} = Transaction.release_only_snapshot(fixture.context)
     {public, private} = :crypto.generate_key(:eddsa, :ed25519)
@@ -572,8 +601,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
-  defp epoch_five_snapshot_fixture do
-    fixture = positive_apply_fixture(:v3)
+  defp epoch_five_snapshot_fixture(api_server \\ "https://synthetic.invalid") do
+    fixture = positive_apply_fixture(:v3, api_server)
     base = Path.dirname(fixture.marker_path)
     epoch = Path.join(base, "reconciliation/epoch-5")
     candidate = Path.join(epoch, "candidate.json")
@@ -2367,7 +2396,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     }
   end
 
-  defp positive_apply_fixture(snapshot_state \\ :present) do
+  defp positive_apply_fixture(snapshot_state \\ :present, api_server \\ "https://synthetic.invalid") do
     {issue_id, pool} = fixture_identity(snapshot_state)
     nonce = "11111111-2222-4333-8444-555555555501"
     now_ms = 1_790_762_400_000
@@ -2399,7 +2428,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
           "dispatchPhase" => "confirmed",
           "kubernetes" => %{
             "cluster" => %{
-              "apiServer" => "https://synthetic.invalid",
+              "apiServer" => api_server,
               "caSha256" => String.duplicate("c", 64)
             }
           }

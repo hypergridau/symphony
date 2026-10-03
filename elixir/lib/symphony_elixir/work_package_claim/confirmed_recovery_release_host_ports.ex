@@ -108,7 +108,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts do
          {:ok, held} <- external.held.(binding),
          true <- held_valid?(held, binding),
          claim = Map.merge(binding["expected"], %{"assignmentSHA256" => nil, "assignmentSnapshotState" => "absent"}),
-         {:ok, kube} <- external.kubernetes.(claim, original["kubernetes"]),
+         {:ok, kube} <- external.kubernetes.(claim, original["kubernetes"]["cluster"]),
          true <- empty_kubernetes?(kube),
          {:ok, ^snapshot} <- Core.release_only_snapshot(context),
          :ok <- host.require_paused_gate.(),
@@ -161,7 +161,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts do
   end
 
   defp empty_kubernetes?(k) do
-    k["jobs"]["itemCount"] === 0 and k["jobs"]["confirmingItemCount"] === 0 and
+    k["jobs"]["itemCount"] === 0 and
+      k["jobs"]["firstResourceVersion"] == k["jobs"]["confirmingResourceVersion"] and
       k["pods"]["itemCount"] === 0 and k["jobs"]["claimAbsent"] == true and k["pods"]["claimAbsent"] == true
   end
 
