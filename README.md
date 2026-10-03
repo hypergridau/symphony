@@ -149,7 +149,9 @@ owner authorization, fresh attestation and receipt publication remain separate g
 
 The paired source-only release coordinator binds that native snapshot and the
 protected original epoch-5 manifest to an action-scoped Dahlia human approval
-ledger projection. Trusted test ports reserve one attempt before collecting a
+ledger projection. Native host ports now reuse existing locking, root custody,
+bounded Kubernetes evidence, protected provider identities and fixed HTTPS ledger
+and held-state transport. Trusted ports reserve one attempt before collecting a
 distinct release attestation, recheck custody and the decision around signing,
 then exclusively publish the unchanged v3 receipt and retained bundle. Partial
 attempts hold without recollection; complete bundles replay read-only. Authorization
@@ -157,7 +159,9 @@ and attestation freshness are checked after slow snapshot and ledger rereads,
 immediately before signing and each subsequent publication. The original
 sealed observation and native state stay unchanged. Production `release_only/4`
 is unconditionally closed pending separate protocol acceptance, owner/attestor
-enrollment and real collector admission. This source change performs no live
+enrollment and installed collector admission. A gated trusted composition is
+available for isolated qualification, while normal production commands remain closed.
+This source change performs no live
 collection, signing, provider release, deployment, unpause or epoch allocation.
 
 The apply and complete commands require all six pool units and both witness units stopped and

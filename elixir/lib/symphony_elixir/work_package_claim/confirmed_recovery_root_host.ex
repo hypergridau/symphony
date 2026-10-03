@@ -20,6 +20,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts, as: ReleasePorts
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseProtocol, as: ReleaseProtocol
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseRuntime, as: ReleaseRuntime
   alias SymphonyElixir.WorkPackageClaim.{ConfirmedRecoveryWorkflow, Journal}
 
   @state_root "/srv/dahlia-runner-state"
@@ -64,6 +67,23 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   @spec release_only(String.t(), String.t(), String.t(), String.t()) :: {:error, atom()}
   def release_only(_issue_id, _pool, _workflow_path, _decision_id),
     do: {:error, :hgs740_release_protocol_not_admitted}
+
+  @doc "Trusted composition only; the four-argument production command remains closed."
+  @spec release_only(String.t(), String.t(), String.t(), String.t(), map()) :: term()
+  def release_only(issue_id, pool, workflow_path, decision_id, runtime) do
+    with true <- runtime[:protocol_accepted] == true and runtime[:trust_enrolled] == true,
+         {:ok, context} <- authorize_apply(issue_id, pool, workflow_path, runtime.nonce),
+         {:ok, public} <- read_public_key(),
+         true <- runtime.native_fingerprint == @signer_fingerprint and runtime.native_public_key == public,
+         {:ok, provider} <- ReleaseRuntime.provider(context, runtime) do
+      ports = ReleasePorts.build(context, runtime, provider)
+      ReleaseProtocol.run(decision_id, runtime, ports)
+    else
+      _ -> {:error, :hgs740_release_protocol_not_admitted}
+    end
+  rescue
+    _ -> {:error, :hgs740_release_protocol_held_closed}
+  end
 
   @doc false
   @spec authorize_completion(String.t(), String.t(), String.t()) :: result()

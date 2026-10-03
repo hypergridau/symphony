@@ -1586,8 +1586,18 @@ root fixtures additionally check real artifact permissions, hardlinks and exclus
 publication. No private test key is exported.
 
 `ConfirmedRecoveryRootHost.release_only/4` always returns
-`:hgs740_release_protocol_not_admitted`. There is no CLI, real collector or provider
-release invocation. Production protocol acceptance and trusted owner/attestor,
+`:hgs740_release_protocol_not_admitted`. Trusted `release_only/5` composes the
+existing native custody, pool lock, pause/systemd/process guards, bounded Kubernetes
+collector and authoritative provider ledger/held reads. `ConfirmedRecoveryReleaseRuntime`
+reads existing root-private runner/admin identities; it creates no credential.
+`ConfirmedRecoveryReleaseTransport` supplies gated decision/held/prepare/confirm
+HTTPS calls with fixed origin, bounded streamed bodies, timeouts and no redirect
+or automatic retry. The coordinator still issues only the local bundle; provider
+prepare/confirm needs its separate durable human decision. Its exact retained
+bundle must not be recollected or resigned after a timeout. Publication rechecks
+authority and freshness after file open, immediately before raw writes and after
+durability operations. Adapter tests use doubles only at external boundaries.
+There is no production CLI admission. Production protocol acceptance and trusted owner/attestor,
 ledger and source enrollment require a separate reviewed admission. Existing
 recovery commands, legacy freshness gates and startup authority remain unchanged.
 

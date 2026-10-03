@@ -187,6 +187,115 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
+  test "host ports compose native custody and publication with real provider transport boundaries" do
+    for mode <- [:success, :slow_read, :slow_open, :partial_sync, :changed_claim, :missing_inventory] do
+      {fixture, enrollment, original, state} = release_fixture()
+      plug = {__MODULE__, make_ref()}
+      provider = %{protocol_accepted: true, trust_enrolled: true, runner_token: "synthetic-runner", admin_token: "synthetic-admin", test_plug: plug}
+      transport = SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport
+
+      Req.Test.stub(plug, fn conn ->
+        assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer synthetic-runner"]
+        assert Plug.Conn.get_req_header(conn, "x-provider-admin-token") == ["synthetic-admin"]
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+
+        data =
+          if String.ends_with?(conn.request_path, "/decision-readback") do
+            assert Jason.decode!(body)["approvalId"] == "approval-local"
+            Agent.get(state, & &1.decision)
+          else
+            {:ok, snap} = Transaction.release_only_snapshot(fixture.context)
+            {:ok, b} = Release.binding(snap, enrollment.source_heads)
+            expected = b["expected"]
+
+            %{
+              "sourceIdentity" => "provider-core:postgres",
+              "observedAt" => release_iso(Agent.get(state, & &1.now)),
+              "expected" => expected,
+              "assignmentDigest" => Evidence.tuple_digest(expected),
+              "projectionState" => "active",
+              "mutationState" => "applied",
+              "reservationState" => "claimed",
+              "executionCapacityState" => "held",
+              "scopeState" => "held",
+              "credentialLeaseInventory" => %{"complete" => true, "leaseIds" => [], "readbacks" => []},
+              "oauthSlotLeaseInventory" => %{"complete" => true, "leaseCount" => 0, "leaseIds" => [], "leases" => []}
+            }
+          end
+
+        data =
+          if mode == :changed_claim and String.ends_with?(conn.request_path, "/held") do
+            put_in(data, ["expected", "processId"], "changed")
+          else
+            data
+          end
+
+        data =
+          if mode == :missing_inventory and String.ends_with?(conn.request_path, "/held") do
+            Map.delete(data, "credentialLeaseInventory")
+          else
+            data
+          end
+
+        conn |> Plug.Conn.put_resp_header("cache-control", "no-store") |> Req.Test.json(%{"data" => data})
+      end)
+
+      host = fixture.context.host_ops |> Map.put(:now_ms, original.now) |> Map.put(:sign_recovery_payload, original.sign)
+      open = host.raw_open
+      sync = host.raw_sync
+
+      host =
+        Map.put(host, :raw_open, fn path, modes ->
+          if mode == :slow_open and String.ends_with?(path, "release-only-attestation.json") do
+            Agent.update(state, &%{&1 | now: &1.now + 60_001})
+          end
+
+          open.(path, modes)
+        end)
+
+      host =
+        Map.put(host, :raw_sync, fn file ->
+          if mode == :partial_sync and Agent.get(state, & &1.signatures) > 0, do: {:error, :synthetic_sync_failure}, else: sync.(file)
+        end)
+
+      context = %{fixture.context | host_ops: host}
+
+      boundaries = %{
+        with_lock: original.with_lock,
+        approval: fn b, id -> transport.approval(b, id, provider) end,
+        held: fn b -> transport.held(b, provider) end,
+        kubernetes: fn claim, _cluster ->
+          assert claim["assignmentSnapshotState"] == "absent"
+          Agent.update(state, &%{&1 | collections: &1.collections + 1})
+          if mode == :slow_read, do: Agent.update(state, &%{&1 | now: &1.now + 60_001})
+
+          {:ok,
+           %{
+             "observedAt" => release_iso(Agent.get(state, & &1.now)),
+             "jobs" => %{"itemCount" => 0, "confirmingItemCount" => 0, "claimAbsent" => true, "confirmingResourceVersion" => "rv-1"},
+             "pods" => %{"itemCount" => 0, "claimAbsent" => true, "resourceVersion" => "rv-2"}
+           }}
+        end
+      }
+
+      adapter = SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts
+      ports = adapter.with_test_boundaries(context, enrollment, boundaries)
+
+      if mode == :success do
+        assert {:ok, :created, bundle} = Release.run("approval-local", enrollment, ports)
+        Agent.update(state, &%{&1 | now: &1.now + 86_400_000})
+        assert {:ok, :retained, ^bundle} = Release.run("approval-local", enrollment, ports)
+        assert Agent.get(state, & &1.collections) == 1
+        assert Agent.get(state, & &1.signatures) == 3
+      else
+        assert {:error, _} = Release.run("approval-local", enrollment, ports)
+        retained = Agent.get(state, &Map.take(&1, [:collections, :signatures]))
+        assert {:error, :hgs740_partial_attempt_held_closed} = Release.run("approval-local", enrollment, ports)
+        assert Agent.get(state, &Map.take(&1, [:collections, :signatures])) == retained
+      end
+    end
+  end
+
   defp release_fixture do
     fixture = epoch_five_snapshot_fixture()
     assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
