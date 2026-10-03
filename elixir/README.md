@@ -1590,6 +1590,11 @@ publication. No private test key is exported.
 existing native custody, pool lock, pause/systemd/process guards, bounded Kubernetes
 collector and authoritative provider ledger/held reads. `ConfirmedRecoveryReleaseHostPorts`
 passes the original nested cluster binding to the existing Kubernetes collector.
+The read-only local snapshot compares recomputed transition JSON with exact
+typed equality after duplicate-key-safe decoding. Historical object property order
+may differ after a large journal is decoded and re-encoded. The retained signed
+postimages and actual persisted state still require exact bytes and hashes; this
+does not relax mutating recovery, refresh historical proof time or rewrite state.
 Empty Job inventories require matching first/final resource versions; churn holds
 the retained attempt closed. Qualification composes the actual Kubernetes collector
 with doubles only for credential loading and external Job/Pod list calls.
