@@ -380,7 +380,8 @@ Issuance, apply, completion and issuer-context verification require the fixed
 root-controlled Linux workflow at
 `/srv/dahlia-runner-state/dahlia/config/symphony/recovery-workflows/<pool-key>.md`.
 Dahlia's canonical recovery exporter supplies a complete six-pool derivation
-receipt. The native verifier checks its source commit against the installed
+receipt. Its canonical control list admits at most 135 entries, matching the
+paired release contract export; entry 136 is rejected. The native verifier checks its source commit against the installed
 `linux-control-receipt.json`, canonical source and renderer entries and Git blob
 identities, fixed workspace inputs, and every output hash through bounded
 root-controlled reads. Partial exports, changed unselected pools and alternate
