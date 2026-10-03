@@ -536,6 +536,63 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
     end
   end
 
+  test "receipt recomputation accepts historical object order but still binds persisted bytes" do
+    fixture = positive_apply_fixture(:absent)
+    assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)
+    original = Agent.get(fixture.vfs, & &1.files)
+    journal = original[fixture.state_paths.journal]
+    ordered = Jason.decode!(journal, objects: :ordered_objects)
+    reordered = Jason.encode!(reverse_object_order(ordered))
+    refute reordered == journal
+    assert Jason.decode!(reordered) === Jason.decode!(journal)
+    files = replace_snapshot_journal(fixture, original, reordered)
+    Agent.update(fixture.vfs, fn state -> %{state | files: files} end)
+    assert {:ok, snapshot} = Transaction.local_receipt_snapshot(fixture.context)
+    assert snapshot.committed_images["claimJournal"] == reordered
+    assert Agent.get(fixture.vfs, & &1.files) == files
+    assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+
+    # Equal JSON content in the live file cannot replace the retained bytes.
+    changed = Map.put(files, fixture.state_paths.journal, journal)
+    Agent.update(fixture.vfs, fn state -> %{state | files: changed} end)
+    assert {:error, :hgs740_local_receipt_snapshot_held_closed} = Transaction.local_receipt_snapshot(fixture.context)
+
+    invalid = [
+      Jason.encode!(Map.put(Jason.decode!(journal), "schema_version", 1.0)),
+      Jason.encode!(Map.put(Jason.decode!(journal), "unexpected", true)),
+      ~s({"schema_version":1,"schema_version":1,"reservations":{}}),
+      "malformed"
+    ]
+
+    for bytes <- invalid do
+      changed = replace_snapshot_journal(fixture, original, bytes)
+      Agent.update(fixture.vfs, fn state -> %{state | files: changed} end)
+      assert {:error, :hgs740_local_receipt_snapshot_held_closed} = Transaction.local_receipt_snapshot(fixture.context)
+      assert Agent.get(fixture.vfs, & &1.files) == changed
+      assert Agent.get(fixture.vfs, & &1.state_write_calls) == 3
+    end
+  end
+
+  defp reverse_object_order(%Jason.OrderedObject{values: pairs}) do
+    %Jason.OrderedObject{values: Enum.reverse(Enum.map(pairs, fn {key, value} -> {key, reverse_object_order(value)} end))}
+  end
+
+  defp reverse_object_order(values) when is_list(values), do: Enum.map(values, &reverse_object_order/1)
+  defp reverse_object_order(value), do: value
+
+  defp replace_snapshot_journal(fixture, files, bytes) do
+    marker = Jason.decode!(files[fixture.marker_path])
+    marker = put_in(marker, ["postimages", "claimJournal"], %{"sha256" => sha256(bytes), "bytes" => Base.url_encode64(bytes, padding: false)})
+    candidate_path = Path.join(Path.dirname(fixture.marker_path), "local-transition-candidate.json")
+    candidate = Jason.decode!(files[candidate_path])
+    candidate = put_in(candidate, ["postimages", "claimJournalSHA256"], sha256(bytes))
+
+    files
+    |> Map.put(fixture.marker_path, Jason.encode!(marker))
+    |> Map.put(candidate_path, Evidence.canonical_json(candidate))
+    |> Map.put(fixture.state_paths.journal, bytes)
+  end
+
   test "native receipt snapshot denies changed candidate, proof, marker and committed state" do
     fixture = positive_apply_fixture(:absent)
     assert {:ok, :applied} = Transaction.apply_with_test_context(fixture.context)

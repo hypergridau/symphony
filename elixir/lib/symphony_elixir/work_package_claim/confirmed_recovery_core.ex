@@ -91,7 +91,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
          true <- digest(proof_bytes) == marker["proofSHA256"],
          :ok <- verify_local_claim(preimages, payload, runtime),
          {:ok, computed} <- prepare_postimages(preimages, payload, runtime, marker["verificationNowMs"]),
-         true <- postimages_match_marker?(computed, marker),
+         true <- recomputed_postimages_match_marker?(computed, marker),
          :ok <- release_state_invariants(marker, runtime),
          {:ok, current} <- read_state_preimages(runtime),
          images = %{"claimJournal" => current.journal.bytes},
@@ -971,6 +971,21 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     else
       _ -> {:error, :invalid_saved_hgs740_proof}
     end
+  end
+
+  # Recomputing a decoded large journal can change BEAM map enumeration order.
+  # Only this read-only check compares transition semantics. The marker's own
+  # image integrity and all persisted-image checks still bind exact bytes.
+  defp recomputed_postimages_match_marker?(postimages, marker) do
+    Enum.all?(~w(claimJournal fence responsibilityGraph), fn name ->
+      with {:ok, retained} <- Base.url_decode64(marker["postimages"][name]["bytes"], padding: false),
+           {:ok, computed} <- decode_candidate_bytes(postimages[name].bytes),
+           {:ok, original} <- decode_candidate_bytes(retained) do
+        computed === original
+      else
+        _ -> false
+      end
+    end)
   end
 
   defp postimages_match_marker?(postimages, marker) do
