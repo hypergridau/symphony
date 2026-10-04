@@ -10,7 +10,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
 
   @hgs736_issue_uuid "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @hgs736_no_checkout_constraint "qualification/hgs-736/started-no-checkout/" <>
-                                   @hgs736_issue_uuid <> "/generation-1"
+                                   @hgs736_issue_uuid <> "/generation-3"
 
   test "bounds command output through System.cmd's collectable sink" do
     {sink, 0} = System.cmd("git", ["--version"], stderr_to_stdout: true, into: struct(BoundedOutput, limit: 4))
@@ -164,7 +164,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     assert key == assignment.sha256 <> ":worker-checkout"
     assert subject.assignmentDigest == assignment.sha256
     assert subject.issueUuid == @hgs736_issue_uuid
-    assert subject.generation == 1
+    assert subject.generation == 3
     assert subject.runnerId == assignment.seat
     assert_receive {:broker, :revoke, "hgs736-checkout"}
     assert_receive {:broker, :checkout_denial, "hgs736-checkout", "hypergridau/symphony", "2026-09-27T00:10:00Z"}
@@ -173,30 +173,37 @@ defmodule SymphonyElixir.WorkerOneShotTest do
   end
 
   test "reserved HGS-736 intent fails closed before any worker or broker operation" do
-    invalid_assignments = [
-      assignment(
-        "00000000-0000-4000-8000-000000000000",
-        1,
-        ["repository", "no-production-workload", @hgs736_no_checkout_constraint]
-      ),
-      assignment(@hgs736_issue_uuid, 2, ["repository", "no-production-workload", @hgs736_no_checkout_constraint]),
-      assignment(
-        @hgs736_issue_uuid,
-        1,
-        ["repository", "no-production-workload", @hgs736_no_checkout_constraint <> "-typo"]
-      ),
-      assignment(
-        @hgs736_issue_uuid,
-        1,
-        ["repository", "no-production-workload", @hgs736_no_checkout_constraint, "qualification/hgs-736/duplicate"]
-      )
-    ]
+    constraints = ["repository", "no-production-workload", @hgs736_no_checkout_constraint]
+
+    invalid_assignments =
+      Enum.map([1, 2, 4], &assignment(@hgs736_issue_uuid, &1, constraints)) ++
+        [
+          assignment("00000000-0000-4000-8000-000000000000", 3, constraints),
+          assignment(@hgs736_issue_uuid, 3, constraints ++ ["qualification/hgs-736/duplicate"]),
+          assignment(@hgs736_issue_uuid, 3, [@hgs736_no_checkout_constraint <> "-typo"])
+        ]
 
     for assignment <- invalid_assignments do
       deps = no_operation_deps()
 
       assert %{exit_code: 1, result: %{status: "failed", reason: "invalid_hgs736_checkout_qualification"}} =
                CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+    end
+  end
+
+  test "HGS-736 rejects historical and future constraint generations before any operation" do
+    for generation <- [1, 2, 4] do
+      constraint =
+        "qualification/hgs-736/started-no-checkout/" <>
+          @hgs736_issue_uuid <>
+          "/generation-#{generation}"
+
+      for signed_generation <- [generation, 3] do
+        assignment = assignment(@hgs736_issue_uuid, signed_generation, [constraint])
+
+        assert %{exit_code: 1, result: %{reason: "invalid_hgs736_checkout_qualification"}} =
+                 CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), no_operation_deps())
+      end
     end
   end
 
@@ -209,6 +216,13 @@ defmodule SymphonyElixir.WorkerOneShotTest do
 
     assert {:error, "invalid_hgs736_checkout_qualification", _result} =
              OneShot.run(misbound, environment(assignment), no_operation_deps())
+
+    for generation <- [1, 2, 4] do
+      misbound_generation = put_in(decoded.subject.generation, generation)
+
+      assert {:error, "invalid_hgs736_checkout_qualification", _result} =
+               OneShot.run(misbound_generation, environment(assignment), no_operation_deps())
+    end
 
     mismatched_job = Map.put(environment(assignment), "SYMPHONY_ASSIGNMENT_ID", "other-job")
 
@@ -1103,7 +1117,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
   defp hgs736_assignment do
     assignment(
       @hgs736_issue_uuid,
-      1,
+      3,
       ["repository", "no-production-workload", @hgs736_no_checkout_constraint]
     )
   end
