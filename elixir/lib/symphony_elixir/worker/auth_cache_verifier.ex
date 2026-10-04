@@ -40,29 +40,68 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
 
   @spec run(map(), map()) :: outcome()
   def run(env, deps) when is_map(env) and is_map(deps) do
+    case verify(env, deps) do
+      {:ok, bytes} -> %{exit_code: 0, result: result("codex_login_status_authenticated", bytes)}
+      {:error, _phase} -> %{exit_code: 1, result: result("unverified", 0)}
+    end
+  end
+
+  def run(_env, _deps), do: %{exit_code: 1, result: result("unverified", 0)}
+
+  @doc "Operator diagnosis retains only the failed check; it is never a cleanup receipt."
+  @spec diagnose(map(), map()) :: outcome()
+  def diagnose(env, deps \\ %{}) do
+    {status, phase, exit_code} =
+      case verify(env, deps) do
+        {:ok, _bytes} -> {"passed", "complete", 0}
+        {:error, phase} -> {"failed", phase, 1}
+      end
+
+    %{
+      exit_code: exit_code,
+      result: %{"contractVersion" => "symphony-auth-cache-diagnostic.v1", "status" => status, "phase" => phase}
+    }
+  end
+
+  defp verify(env, deps) when is_map(env) and is_map(deps) do
     stat = Map.get(deps, :stat, &File.lstat/1)
     read_auth = Map.get(deps, :read_auth, &File.read/1)
     auth_shape = Map.get(deps, :auth_shape, fn -> oauth_cache_shape?(read_auth) end)
     canary = Map.get(deps, :canary, &oauth_canary/0)
 
-    with true <- supported_host?(deps),
-         true <- env["CODEX_HOME"] == @codex_home,
-         {:ok, before} <- stat.(@auth_file),
-         true <- valid_auth_file?(before),
-         true <- auth_shape.(),
-         0 <- canary.(),
-         {:ok, after_stat} <- stat.(@auth_file),
-         true <- valid_auth_file?(after_stat),
-         true <- auth_shape.() do
-      %{exit_code: 0, result: result("codex_login_status_authenticated", after_stat.size)}
+    with :ok <- check(supported_host?(deps), "unsupported_host"),
+         :ok <- check(env["CODEX_HOME"] == @codex_home, "invalid_context"),
+         {:ok, _before} <- private_cache(stat, "cache_unavailable", "cache_custody_invalid"),
+         :ok <- check(auth_shape.(), "cache_shape_invalid"),
+         :ok <- canary_result(canary.()),
+         {:ok, after_stat} <- private_cache(stat, "post_canary_cache_unavailable", "post_canary_cache_custody_invalid"),
+         :ok <- check(auth_shape.(), "post_canary_cache_shape_invalid") do
+      {:ok, after_stat.size}
     else
-      _ -> %{exit_code: 1, result: result("unverified", 0)}
+      {:error, phase} -> {:error, phase}
+      _ -> {:error, "unexpected_failure"}
     end
   rescue
-    _ -> %{exit_code: 1, result: result("unverified", 0)}
+    _ -> {:error, "unexpected_failure"}
+  catch
+    _, _ -> {:error, "unexpected_failure"}
   end
 
-  def run(_env, _deps), do: %{exit_code: 1, result: result("unverified", 0)}
+  defp verify(_env, _deps), do: {:error, "invalid_context"}
+
+  defp check(true, _phase), do: :ok
+  defp check(_other, phase), do: {:error, phase}
+
+  defp private_cache(stat, unavailable, custody) do
+    case stat.(@auth_file) do
+      {:ok, value} -> if valid_auth_file?(value), do: {:ok, value}, else: {:error, custody}
+      _ -> {:error, unavailable}
+    end
+  end
+
+  defp canary_result(0), do: :ok
+  defp canary_result(code) when code in [124, 137], do: {:error, "canary_timeout"}
+  defp canary_result(_code), do: {:error, "canary_failed"}
 
   defp supported_host?(deps),
     do: match?({:unix, _}, :os.type()) or (Code.ensure_loaded?(ExUnit) and deps[:windows_test_only] == true)
