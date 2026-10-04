@@ -42,20 +42,22 @@ defmodule SymphonyElixir.CLI do
   @spec dispatch_hgs740([String.t()]) :: no_return()
   defp dispatch_hgs740(args) do
     result =
-      cond do
-        "--issue-hgs740-confirmed-recovery" in args ->
-          evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
+      with :ok <- prepare_hgs740_runtime() do
+        cond do
+          "--issue-hgs740-confirmed-recovery" in args ->
+            evaluate_hgs740_issue(args, &ConfirmedRecoveryTransaction.issue/5)
 
-        "--verify-hgs740-issuer-context" in args ->
-          evaluate_hgs740_issuer_context(args, &ConfirmedRecoveryTransaction.verify_issuer_context/2)
+          "--verify-hgs740-issuer-context" in args ->
+            evaluate_hgs740_issuer_context(args, &ConfirmedRecoveryTransaction.verify_issuer_context/2)
 
-        true ->
-          evaluate_hgs740(
-            args,
-            &ConfirmedRecoveryTransaction.verify_startup/2,
-            &ConfirmedRecoveryTransaction.apply/4,
-            &ConfirmedRecoveryTransaction.complete/3
-          )
+          true ->
+            evaluate_hgs740(
+              args,
+              &ConfirmedRecoveryTransaction.verify_startup/2,
+              &ConfirmedRecoveryTransaction.apply/4,
+              &ConfirmedRecoveryTransaction.complete/3
+            )
+        end
       end
 
     case result do
@@ -66,6 +68,19 @@ defmodule SymphonyElixir.CLI do
         IO.puts(:stderr, "HGS-740 recovery guard held closed: #{reason}")
         System.halt(1)
     end
+  end
+
+  @doc false
+  @spec prepare_hgs740_runtime() :: :ok | {:error, String.t()}
+  def prepare_hgs740_runtime do
+    case Application.ensure_all_started(:yaml_elixir) do
+      {:ok, _started} -> :ok
+      _ -> {:error, "hgs740_yaml_runtime_unavailable"}
+    end
+  rescue
+    _ -> {:error, "hgs740_yaml_runtime_unavailable"}
+  catch
+    _, _ -> {:error, "hgs740_yaml_runtime_unavailable"}
   end
 
   @doc false

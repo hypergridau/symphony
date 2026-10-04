@@ -157,6 +157,9 @@ evidence holds closed; the legacy HGS-719 verifier remains strict. This source
 repair does not itself install or complete the live recovery, unpause admission,
 create an epoch, sign a receipt, or start a worker.
 
+The packaged recovery CLI starts the YAML parser required for its workflow,
+while preserving its independent root maintenance path and absent orchestration.
+
 The paired source-only release coordinator binds that native snapshot and the
 protected original epoch-5 manifest to an action-scoped Dahlia human approval
 ledger projection. Native host ports now reuse existing locking, root custody,
