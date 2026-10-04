@@ -40,6 +40,8 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierResultTest do
     verifier = &AuthCacheVerifierResult.verify(expected, "verifier-job-uid", &1, &2)
 
     cases = [
+      {put_in(job, ["spec", "template", "spec", "securityContext", "fsGroupChangePolicy"], "Always"), snapshot},
+      {job, %{snapshot | items: [put_in(pod, ["spec", "securityContext", "fsGroupChangePolicy"], "Always")]}},
       {put_in(job, ["spec", "template", "spec", "containers"], get_in(job, ["spec", "template", "spec", "containers"]) ++ [%{"name" => "sidecar"}]), snapshot},
       {job, %{snapshot | items: [put_in(pod, ["spec", "initContainers"], [%{"name" => "injected"}])]}},
       {job, %{snapshot | items: [put_in(pod, ["spec", "containers", Access.at(0), "image"], "other:image")]}},
