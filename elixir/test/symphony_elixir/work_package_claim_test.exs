@@ -59,7 +59,7 @@ defmodule SymphonyElixir.RKE2Job.PollUnstartedClient do
 end
 
 defmodule SymphonyElixir.WorkPackageClaimTest do
-  use ExUnit.Case, async: false
+  use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.ModelRouter
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}

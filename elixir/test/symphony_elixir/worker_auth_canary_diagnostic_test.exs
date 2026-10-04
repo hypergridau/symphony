@@ -76,15 +76,14 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
     end
 
     assert %{exit_code: 0, result: result} = CLI.run(["--diagnose-auth-canary"], @env, Map.put(deps(), :cmd, command))
-    assert_receive {:command, "/bin/sh", fixed, opts}
-    assert ["-c", wrapper, "auth-canary", "/usr/bin/timeout" | args] = fixed
-    assert wrapper == "exec \"$@\" 2>/dev/null"
+    assert_receive {:command, "/usr/bin/timeout", args, opts}
     assert Enum.take(args, 4) == ["--kill-after=5s", "90s", "/usr/bin/env", "-i"]
     assert "--json" in args and "--ephemeral" in args and "--ignore-user-config" in args and "--ignore-rules" in args
     assert Enum.count(args, &(&1 == "--disable")) == 6
     assert "gpt-6-luna" in args and "model_reasoning_effort=\"high\"" in args
     assert List.last(args) == "Reply with the single word verified. Do not use tools."
     assert opts[:into] == %Sink{} and opts[:stderr_to_stdout]
+    assert opts[:discard_stderr] == true
     assert Enum.sort(Map.keys(result)) == ["canaryExit", "contractVersion", "events", "phase", "status"]
     assert result["contractVersion"] == "symphony-auth-canary-diagnostic.v1"
 
