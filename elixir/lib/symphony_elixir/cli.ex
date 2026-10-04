@@ -161,6 +161,9 @@ defmodule SymphonyElixir.CLI do
       ["--verify-auth-cache"] ->
         WorkerCLI.main(args)
 
+      ["--diagnose-auth-cache"] ->
+        WorkerCLI.main(args)
+
       _ ->
         main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
     end

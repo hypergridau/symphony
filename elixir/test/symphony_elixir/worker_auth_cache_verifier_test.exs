@@ -123,4 +123,85 @@ defmodule SymphonyElixir.WorkerAuthCacheVerifierTest do
 
     assert %{exit_code: 1} = CLI.run(["--verify-auth-cache"], %{"CODEX_HOME" => "/other"}, base)
   end
+
+  test "operator diagnosis identifies the failed check without changing the cleanup result" do
+    caller = self()
+    env = %{"CODEX_HOME" => @home}
+
+    base = %{
+      windows_test_only: true,
+      stat: fn _ -> {:ok, @stat} end,
+      auth_shape: fn -> true end,
+      canary: fn ->
+        send(caller, :canary)
+        0
+      end
+    }
+
+    for {phase, changed, context} <- [
+          {"invalid_context", base, %{}},
+          {"cache_unavailable", %{base | stat: fn _ -> {:error, :enoent} end}, env},
+          {"cache_custody_invalid", %{base | stat: fn _ -> {:ok, %{@stat | mode: 0o644}} end}, env},
+          {"cache_shape_invalid", %{base | auth_shape: fn -> false end}, env}
+        ] do
+      assert %{exit_code: 1, result: diagnostic} = CLI.run(["--diagnose-auth-cache"], context, changed)
+      assert diagnostic == %{"contractVersion" => "symphony-auth-cache-diagnostic.v1", "status" => "failed", "phase" => phase}
+      refute_receive :canary
+
+      assert %{exit_code: 1, result: %{"schemaVersion" => 1, "authCacheStatus" => "unverified", "authCacheBytes" => 0}} =
+               CLI.run(["--verify-auth-cache"], context, changed)
+
+      refute_receive :canary
+    end
+
+    assert %{exit_code: 0, result: %{"status" => "passed", "phase" => "complete"}} = CLI.run(["--diagnose-auth-cache"], env, base)
+    assert_receive :canary
+  end
+
+  test "operator diagnosis maps canary failures and exceptions to secret-free finite phases" do
+    env = %{"CODEX_HOME" => @home}
+    base = %{windows_test_only: true, stat: fn _ -> {:ok, @stat} end, auth_shape: fn -> true end, canary: fn -> 0 end}
+
+    for {phase, canary} <- [
+          {"canary_timeout", fn -> 124 end},
+          {"canary_timeout", fn -> 137 end},
+          {"canary_failed", fn -> 1 end},
+          {"canary_failed", fn -> "synthetic-secret-output" end},
+          {"unexpected_failure", fn -> raise "synthetic-secret-exception" end},
+          {"unexpected_failure", fn -> throw("synthetic-secret-throw") end}
+        ] do
+      assert %{exit_code: 1, result: diagnostic} = CLI.run(["--diagnose-auth-cache"], env, %{base | canary: canary})
+      assert diagnostic == %{"contractVersion" => "symphony-auth-cache-diagnostic.v1", "status" => "failed", "phase" => phase}
+      refute Jason.encode!(diagnostic) =~ "synthetic-secret"
+      refute Map.has_key?(diagnostic, "authCacheStatus")
+    end
+  end
+
+  test "operator diagnosis distinguishes post-canary custody and shape after a refresh" do
+    env = %{"CODEX_HOME" => @home}
+    base = %{windows_test_only: true, stat: fn _ -> {:ok, @stat} end, auth_shape: fn -> true end, canary: fn -> 0 end}
+
+    for {phase, after_stat} <- [
+          {"post_canary_cache_unavailable", {:error, :enoent}},
+          {"post_canary_cache_custody_invalid", {:ok, %{@stat | mode: 0o644}}}
+        ] do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      stat = fn _ ->
+        seen = Agent.get_and_update(counter, fn value -> {value, value + 1} end)
+        if seen == 0, do: {:ok, @stat}, else: after_stat
+      end
+
+      assert %{exit_code: 1, result: %{"phase" => ^phase}} = CLI.run(["--diagnose-auth-cache"], env, %{base | stat: stat})
+      Agent.stop(counter)
+    end
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+    shape = fn -> Agent.get_and_update(counter, fn value -> {value == 0, value + 1} end) end
+
+    assert %{exit_code: 1, result: %{"phase" => "post_canary_cache_shape_invalid"}} =
+             CLI.run(["--diagnose-auth-cache"], env, %{base | auth_shape: shape})
+
+    Agent.stop(counter)
+  end
 end
