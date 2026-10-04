@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Worker.OneShot do
   alias SymphonyElixir.Worker.BoundedOutput
   alias SymphonyElixir.Worker.BrokerClient
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
+  alias SymphonyElixir.Worker.Command
 
   @lease_ttl_seconds 600
   @workspace "/workspace"
@@ -566,7 +567,7 @@ defmodule SymphonyElixir.Worker.OneShot do
     sink = struct(BoundedOutput, limit: limit)
     options = [stderr_to_stdout: true, env: env, into: sink]
 
-    case call(deps, :command, &System.cmd/3, [executable, args, options]) do
+    case call(deps, :command, &system_command/3, [executable, args, options]) do
       {%{__struct__: BoundedOutput, output: output, truncated?: false}, status}
       when is_integer(status) ->
         {:ok, output, status}
@@ -583,6 +584,11 @@ defmodule SymphonyElixir.Worker.OneShot do
   rescue
     _ -> {:error, :command_failed}
   end
+
+  defp system_command("codex", args, options),
+    do: Command.run("codex", args, options)
+
+  defp system_command(executable, args, options), do: System.cmd(executable, args, options)
 
   defp safe_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp safe_reason(reason) when is_binary(reason) and byte_size(reason) <= 128, do: reason

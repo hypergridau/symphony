@@ -28,6 +28,7 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
 
   alias SymphonyElixir.Worker.AuthCacheVerifier.OutputSink
   alias SymphonyElixir.Worker.CanaryEventSink
+  alias SymphonyElixir.Worker.Command
 
   @codex_home "/var/lib/frigga-codex-home"
   @auth_file Path.join(@codex_home, "auth.json")
@@ -206,17 +207,16 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   end
 
   defp oauth_canary do
-    case System.cmd("/usr/bin/timeout", canary_args([]), stderr_to_stdout: true, into: %OutputSink{}) do
+    case Command.run("/usr/bin/timeout", canary_args([]), stderr_to_stdout: true, into: %OutputSink{}) do
       {_discarded, status} -> status
     end
   end
 
   defp oauth_canary_events(deps) do
-    cmd = Map.get(deps, :cmd, &System.cmd/3)
+    cmd = Map.get(deps, :cmd, &Command.run/3)
 
-    # The fixed shell wrapper discards stderr before executing the fixed argv.
-    # No caller-provided shell text, paths, flags or model selection is accepted.
-    cmd.("/bin/sh", ["-c", "exec \"$@\" 2>/dev/null", "auth-canary", "/usr/bin/timeout" | canary_args(["--json"])],
+    cmd.("/usr/bin/timeout", canary_args(["--json"]),
+      discard_stderr: true,
       stderr_to_stdout: true,
       into: %CanaryEventSink{}
     )
