@@ -98,7 +98,8 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert AbortPrepareCaller.production_context_allowed?(secure)
 
     for root <- [nil, context.root, workspace, context.result_root <> "-other"] do
-      refute AbortPrepareCaller.production_context_allowed?(put_in(secure, [:adapter_context, :abort_result_journal_root], root))
+      changed_root = put_in(secure, [:adapter_context, :abort_result_journal_root], root)
+      refute AbortPrepareCaller.production_context_allowed?(changed_root)
     end
   end
 
