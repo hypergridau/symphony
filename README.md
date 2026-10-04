@@ -147,6 +147,16 @@ release observation, sign, publish files, release the provider or relax startup.
 This supplies native-verified bytes for the separate Dahlia release-only contract;
 owner authorization, fresh attestation and receipt publication remain separate gates.
 
+Canonical `ConfirmedRecoveryCore.complete/3` also recognizes an already committed
+HGS-740 release-only bundle. Under the existing paused, quiescent pool lock it
+reads the fixed provider confirmation endpoint, checks the original signatures
+and human decisions at the durable confirmation time, and appends a root-private
+completion witness before committing the terminal marker. Startup verifies that
+retained witness without network access or renewed authority. Partial release
+evidence holds closed; the legacy HGS-719 verifier remains strict. This source
+repair does not itself install or complete the live recovery, unpause admission,
+create an epoch, sign a receipt, or start a worker.
+
 The paired source-only release coordinator binds that native snapshot and the
 protected original epoch-5 manifest to an action-scoped Dahlia human approval
 ledger projection. Native host ports now reuse existing locking, root custody,

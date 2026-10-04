@@ -43,6 +43,44 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransportTest 
     assert {:error, :hgs740_provider_identity_unavailable} = Runtime.provider(%{}, %{})
   end
 
+  test "historical confirmation transport grants no preparation or confirmation admission" do
+    plug = {__MODULE__, make_ref()}
+    context = %{historical_readback: true, runner_token: "synthetic-runner", admin_token: "synthetic-admin", test_plug: plug}
+
+    Req.Test.expect(plug, fn conn ->
+      assert conn.host == "dahlia.hypergrid.au" and conn.scheme == :https
+      assert conn.request_path == "/provider/v1/work-packages/claim-recovery/release-only/confirmation-readback"
+      {:ok, bytes, conn} = Plug.Conn.read_body(conn)
+      assert Jason.decode!(bytes) == %{"bundle" => %{"retained" => true}, "providerApprovalId" => "provider-id"}
+      conn |> Plug.Conn.put_resp_header("cache-control", "no-store") |> Req.Test.json(%{"data" => %{"confirmed" => true}})
+    end)
+
+    assert {:ok, %{"confirmed" => true}} = Transport.confirmed_readback(%{"retained" => true}, "provider-id", context)
+
+    for phase <- [:prepare, :confirm] do
+      assert {:error, :hgs740_release_protocol_not_admitted} = Transport.consume(phase, %{}, "provider-id", context)
+    end
+
+    assert {:error, :hgs740_confirmation_readback_not_admitted} = Transport.confirmed_readback(%{}, "provider-id", %{})
+  end
+
+  test "historical runtime binds current root-private identities without reviving write flags" do
+    marker = %{"issueId" => "f77e349e-21d9-4bdf-bad3-ce08b302e7e8", "pool" => "hypergrid-gitops", "generation" => 2, "status" => "local_applied", "expected" => %{"runnerId" => "runner-synthetic"}}
+
+    read = fn path, _ ->
+      if String.ends_with?(path, ".env"),
+        do: {:ok, "DAHLIA_RUNNER_ID=runner-synthetic\nDAHLIA_WORK_PACKAGE_RUNNER_TOKEN=synthetic-token"},
+        else: {:ok, "synthetic-admin\n"}
+    end
+
+    assert {:ok, identity} = Runtime.confirmation_with_test_reads(marker, read)
+    assert identity.historical_readback == true
+    refute Map.has_key?(identity, :protocol_accepted)
+    refute Map.has_key?(identity, :trust_enrolled)
+    assert {:error, _} = Runtime.confirmation_with_test_reads(put_in(marker["expected"]["runnerId"], "changed"), read)
+    assert {:error, _} = Runtime.confirmation_with_test_reads(Map.put(marker, "generation", 3), read)
+  end
+
   test "runtime reuses fixed bounded private identity inputs and rejects ambiguous or changed bindings" do
     enrollment = %{protocol_accepted: true, trust_enrolled: true}
     snapshot = fn _ -> {:ok, %{marker_bytes: Jason.encode!(%{"expected" => %{"runnerId" => "runner-synthetic"}})}} end

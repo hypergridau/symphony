@@ -20,6 +20,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryIssuerPreflight
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliation, as: Reconciliation
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReconciliationHost, as: EpochHost
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseCompletionHost, as: ReleaseCompletionHost
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseHostPorts, as: ReleasePorts
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseProtocol, as: ReleaseProtocol
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseRuntime, as: ReleaseRuntime
@@ -183,6 +184,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryRootHost do
       no_processes_for_uid: &no_processes_for_uid/1,
       require_paused_gate: &require_paused_gate/0,
       read_public_key: &read_public_key/0,
+      read_confirmed_release: &ReleaseCompletionHost.readback/2,
+      read_release_history: &ReleaseCompletionHost.history/1,
       sign_recovery_payload: &sign_recovery_payload/1,
       read_issuer_bundle: &read_issuer_bundle/2,
       resume_reconciliation: &EpochHost.resume/2,

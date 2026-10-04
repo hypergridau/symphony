@@ -1617,6 +1617,56 @@ There is no production CLI admission. Production protocol acceptance and trusted
 ledger and source enrollment require a separate reviewed admission. Existing
 recovery commands, legacy freshness gates and startup authority remain unchanged.
 
+### HGS-740 committed release completion
+
+The existing `ConfirmedRecoveryCore.complete/3` command selects the release-only
+verifier when its protected attempt, attestation, bundle or completion witness
+exists. Partial or invalid evidence never falls back to HGS-719. The legacy
+envelope and its seven operation files keep their original verification rules.
+
+The new branch reads only the fixed
+`/provider/v1/work-packages/claim-recovery/release-only/confirmation-readback`
+endpoint. `ConfirmedRecoveryReleaseCompletionHost` uses the existing root-private
+`hgs740-approved-release-20261004-v1/release-dispatch-intent.json` as a lookup hint.
+Its ID grants no authority: the returned actual ledger records must match the
+signed original bundle, attempt, binding and protected historical enrollment.
+The existing runner/admin identities grant only this historical readback context;
+the context cannot prepare or confirm a release. Transport has bounded bodies,
+fixed HTTPS origin, no redirect and no automatic retry.
+
+The three original Ed25519 domains are verified at the stored `confirmedAt`,
+including both approved human records, exact actions, expiry and original source
+heads. RootHost still pins the actual native key. Historical review/enrollment
+files come from the existing protected SHA directory and are reread unchanged.
+The stored quiescence projection must match the signed attestation, deterministic
+proof digest, actual confirmation, released states and floor 3. It is never
+represented as a separately signed legacy proof. Current generation 2 is required
+for first completion; offline startup checks the saved confirmation and the
+existing historical local lineage after a successor is admitted.
+
+`release-completion-witness.json` is an unsigned root-private, exclusively created
+record containing the original marker bytes and authenticated provider readback.
+Its digest is anchored by the existing terminal marker. This protects evidence
+from non-root writers and detects damage; it does not defend against a hostile
+root rewriting both files. A crash after witness creation preserves its bytes:
+completion requires a fresh readback whose bound fields are unchanged, allowing
+only `observedAt` to differ. A changed or unavailable readback holds closed.
+The retained witness itself must still be within the 60-second observation
+window, which is checked again immediately before terminal commitment. A crash
+retry after that window remains held with its evidence preserved; it cannot
+silently replace the witness or anchor completion to a stale observation.
+Terminal startup/replay performs no HTTP, credential read, signing or expiry
+renewal. The original marker identity and all frozen release artifacts remain
+bound, while the existing current-postimage, no-Job/no-Pod, paused/quiescent and
+directory-custody guards run before terminal commitment. No replacement owner
+review or reconciliation epoch is prepared by this repair.
+
+Local synthetic qualification exercises canonical completion and offline startup
+with actual fixture state transitions and all three ephemeral Ed25519 domains.
+Production installation and the exact paused live claim remain separate evidence.
+Core changes are confined to a dispatch composition; one bounded integration
+test uses the existing large transaction harness to avoid duplicating its VFS.
+
 ### HGS-740 append-only observation reconciliation
 
 The `app: nil` recovery escript starts Req alone after its native observer checks
