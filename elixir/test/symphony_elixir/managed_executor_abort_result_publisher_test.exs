@@ -8,7 +8,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     if match?({:win32, _}, :os.type()), do: Process.put(:abort_result_journal_windows_test_only, true)
 
     root = Path.join(File.cwd!(), ".tmp-abort-publisher-#{System.unique_integer([:positive])}")
-    :ok = File.mkdir_p(root)
+    :ok = File.mkdir(root)
     if match?({:unix, _}, :os.type()), do: :ok = File.chmod(root, 0o700)
     on_exit(fn -> File.rm_rf(root) end)
     %{root: root}
@@ -23,6 +23,9 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     context = context(root, assignment)
     assert {:ok, ^reference} = AbortResultPublisher.reference_for_assignment(assignment)
 
+    assert {:error, :abort_result_journal_missing} =
+             AbortResultPublisher.verify_retained_abort_result(allocation, assignment, result, key, context)
+
     assert {:ok, ^reference} =
              AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, context)
 
@@ -31,6 +34,7 @@ defmodule SymphonyElixir.ManagedExecutorAbortResultPublisherTest do
     binding = binding(assignment, allocation)
 
     assert {:ok, ^expected_bytes} = AbortResultJournal.load(root, reference, binding, expected_digest)
+    assert :ok = AbortResultPublisher.verify_retained_abort_result(allocation, assignment, result, key, context)
 
     assert {:ok, ^reference} =
              AbortResultPublisher.publish_or_reconcile_abort_result(allocation, assignment, result, key, context)

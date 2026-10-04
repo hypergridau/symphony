@@ -32,7 +32,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
   use ExUnit.Case, async: false
 
   alias SymphonyElixir.ManagedAssignmentBundle
-  alias SymphonyElixir.ManagedExecutor.AbortResultPublisher
+  alias SymphonyElixir.ManagedExecutor.{AbortResultPublisher, Record}
   alias SymphonyElixir.RKE2Job.{AbortPrepareCaller, AbortPrepareJournal, ManagedExecutorAdapter}
   alias SymphonyElixir.RKE2JobFakeClient
   alias SymphonyElixir.WorkPackageClaim.HostWitness
@@ -41,7 +41,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     if match?({:win32, _}, :os.type()), do: Process.put(:abort_prepare_journal_windows_test_only, true)
 
     root = Path.join(System.tmp_dir!(), "symphony-abort-prepare-#{System.unique_integer([:positive])}")
-    :ok = File.mkdir_p(root)
+    :ok = File.mkdir(root)
     if match?({:unix, _}, :os.type()), do: :ok = File.chmod(root, 0o700)
     on_exit(fn -> File.rm_rf(root) end)
 
@@ -61,18 +61,25 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
         }
       end)
 
-    %{root: root, client: client}
+    result_root = Path.join(File.cwd!(), ".tmp-abort-prepare-results-#{System.unique_integer([:positive])}")
+    :ok = File.mkdir(result_root)
+    if match?({:unix, _}, :os.type()), do: :ok = File.chmod(result_root, 0o700)
+    if match?({:win32, _}, :os.type()), do: Process.put(:abort_result_journal_windows_test_only, true)
+    on_exit(fn -> File.rm_rf(result_root) end)
+
+    %{root: root, result_root: result_root, client: client}
   end
 
   test "production policy rejects injectable transport and witness seams", context do
     previous =
-      Enum.map([:abort_prepare_journal_root, :abort_prepare_workspace_root], fn key ->
+      Enum.map([:abort_prepare_journal_root, :abort_prepare_workspace_root, :abort_result_journal_root], fn key ->
         {key, Application.get_env(:symphony_elixir, key)}
       end)
 
     workspace = Path.join(System.tmp_dir!(), "trusted-worker-workspaces")
     Application.put_env(:symphony_elixir, :abort_prepare_journal_root, context.root)
     Application.put_env(:symphony_elixir, :abort_prepare_workspace_root, workspace)
+    Application.put_env(:symphony_elixir, :abort_result_journal_root, context.result_root)
 
     on_exit(fn ->
       Enum.each(previous, fn
@@ -81,7 +88,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       end)
     end)
 
-    base = %{journal_root: context.root, workspace_root: workspace, witness_input: %{}}
+    base = %{journal_root: context.root, workspace_root: workspace, witness_input: %{}, adapter_context: %{abort_result_journal_root: context.result_root}}
     secure = Map.put(base, :host_witness, HostWitness)
     refute AbortPrepareCaller.production_context_allowed?(Map.put(secure, :post_fun, fn _, _ -> :ok end))
     injected_witness = %{secure | witness_input: %{host_witness_fun: fn _ -> :ok end}}
@@ -89,6 +96,11 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     refute AbortPrepareCaller.production_context_allowed?(injected_witness)
     refute AbortPrepareCaller.production_context_allowed?(override_module)
     assert AbortPrepareCaller.production_context_allowed?(secure)
+
+    for root <- [nil, context.root, workspace, context.result_root <> "-other"] do
+      changed_root = put_in(secure, [:adapter_context, :abort_result_journal_root], root)
+      refute AbortPrepareCaller.production_context_allowed?(changed_root)
+    end
   end
 
   test "invalid entrypoints, incomplete claims and a missing journal fail closed", context do
@@ -377,6 +389,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     caller = caller_context(context, adapter, witness_input, post_fun)
     assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    retain_result(caller, allocation, assignment)
     changed = put_in(prepared.prepare_ack["prepareId"], "11111111-2222-4333-8444-555555555555")
 
     changed_prepared = %{
@@ -892,7 +905,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert {:held, :abort_prepare_journal_record_too_large} = AbortPrepareJournal.record(context.root, claim, oversized)
 
     without_intent = Path.join(System.tmp_dir!(), "symphony-abort-prepare-no-intent-#{System.unique_integer([:positive])}")
-    :ok = File.mkdir_p(without_intent)
+    :ok = File.mkdir(without_intent)
     if match?({:unix, _}, :os.type()), do: :ok = File.chmod(without_intent, 0o700)
 
     assert {:held, :abort_prepare_root_intent_missing} =
@@ -1036,6 +1049,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     caller = caller_context(context, adapter, witness_input, post_fun)
     assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    retain_result(caller, allocation, assignment)
     assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
     assert length(Agent.get(context.client, & &1.deletes)) == 1
 
@@ -1045,6 +1059,178 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
              AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
 
     assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "a reference alone cannot authorize deletion without the retained typed result", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    {:ok, reference} = AbortResultPublisher.reference_for_assignment(assignment)
+    caller = Map.put(caller, :root_abort_result_reference, reference)
+    Process.put(:abort_root_input_publish_fun, fn _ -> flunk("publisher called before result durability") end)
+
+    assert {:held, :abort_result_journal_missing} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert File.ls!(context.result_root) == []
+    assert Agent.get(context.client, & &1.deletes) == []
+
+    for result <- [nil, %{}, Map.put(caller.pre_execution_result, :abort_reason, :activation_unavailable)] do
+      assert {:held, :pre_execution_result_invalid} =
+               AbortPrepareCaller.confirm(
+                 allocation,
+                 assignment,
+                 key(assignment),
+                 prepared,
+                 Map.put(caller, :pre_execution_result, result)
+               )
+    end
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    assert File.ls!(context.result_root) == []
+    assert {:ok, record} = AbortPrepareJournal.load(context.root, claim_for_test())
+    assert record.prepare_id == prepared.prepare_ack["prepareId"]
+  end
+
+  test "missing roots and conflicting selectors hold before deletion", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+
+    for root <- [nil, "relative", context.result_root <> "-missing", context.root, caller.workspace_root] do
+      changed = put_in(caller, [:adapter_context, :abort_result_journal_root], root)
+      assert {:held, _} = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
+    end
+
+    changed = Map.put(caller, :root_abort_result_reference, "managed-abort-result:v1:other")
+
+    assert {:held, :root_abort_result_reference_mismatch} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "corrupt, conflicting and changed result evidence is preserved with zero deletes", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    path = result_path(caller, assignment)
+    original = File.read!(path)
+    payload = Jason.decode!(original)
+    wire = payload["result_base64"] |> Base.decode64!() |> Jason.decode!()
+    changed_wire = wire |> Map.put("projectionId", "other-projection") |> Jason.encode!()
+
+    conflicts = [
+      "{partial",
+      String.replace_prefix(original, "{", "{\"schema_version\":1,"),
+      Jason.encode!(Map.put(payload, "generation", payload["generation"] + 1)),
+      Jason.encode!(Map.put(payload, "allocation_id", "other-allocation")),
+      Jason.encode!(Map.put(payload, "assignment_digest", String.duplicate("f", 64))),
+      Jason.encode!(Map.put(payload, "issue_uuid", "11111111-2222-4333-8444-555555555598")),
+      Jason.encode!(Map.put(payload, "reference", "managed-abort-result:v1:other")),
+      Jason.encode!(%{payload | "result_base64" => Base.encode64(changed_wire), "sha256" => sha256(changed_wire)})
+    ]
+
+    for bytes <- conflicts do
+      :ok = File.write(path, bytes)
+
+      assert {:held, :abort_result_journal_invalid} =
+               AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+      assert File.read!(path) == bytes
+      assert Agent.get(context.client, & &1.deletes) == []
+    end
+
+    :ok = File.write(path, original)
+    changed = Map.put(caller, :pre_execution_result, blocked_result(assignment, :credential_lease_expired))
+
+    assert {:held, :abort_result_journal_invalid} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
+
+    assert File.read!(path) == original
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  @tag skip: match?({:win32, _}, :os.type())
+  test "private result custody is required before deletion", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    path = result_path(caller, assignment)
+
+    :ok = File.chmod(path, 0o644)
+
+    assert {:held, :abort_result_journal_read_unavailable} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    :ok = File.chmod(path, 0o600)
+
+    :ok = File.chmod(context.result_root, 0o755)
+
+    assert {:held, :invalid_abort_result_journal_root} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    :ok = File.chmod(context.result_root, 0o700)
+
+    link = context.result_root <> "-link"
+    :ok = File.ln_s(context.result_root, link)
+    on_exit(fn -> File.rm(link) end)
+    changed = put_in(caller, [:adapter_context, :abort_result_journal_root], link)
+
+    assert {:held, :invalid_abort_result_journal_root} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
+  test "restart retains result and prepare identity and replays failed post-delete publication once", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    path = result_path(caller, assignment)
+    original = File.read!(path)
+    original_prepare = AbortPrepareJournal.load(context.root, claim_for_test())
+    parent = self()
+
+    failed_publisher = fn request ->
+      send(parent, {:publication, request})
+      assert length(Agent.get(context.client, & &1.deletes)) == 1
+      {:held, :root_abort_input_publication_unavailable}
+    end
+
+    assert {^prepared, {:held, :root_abort_input_publication_unavailable}} =
+             confirm_after_restart(allocation, assignment, caller, failed_publisher)
+
+    assert_receive {:publication, request}
+    assert {:ok, record} = original_prepare
+    uid = get_in(record.observation, ["job", "uid"])
+    checkpoint = AbortPrepareJournal.load_confirmed_delete(context.root, record.claim, record, uid)
+    assert {:ok, _} = checkpoint
+    assert File.read!(path) == original
+    assert AbortPrepareJournal.load(context.root, claim_for_test()) == original_prepare
+
+    denied_publisher = fn _ -> flunk("publication with unavailable result evidence") end
+    :ok = File.write(path, "{partial")
+
+    assert {^prepared, {:held, :abort_result_journal_invalid}} =
+             confirm_after_restart(allocation, assignment, caller, denied_publisher)
+
+    assert File.read!(path) == "{partial"
+    :ok = File.write(path, original)
+    saved = path <> ".saved"
+    :ok = File.rename(path, saved)
+
+    assert {^prepared, {:held, :abort_result_journal_missing}} =
+             confirm_after_restart(allocation, assignment, caller, denied_publisher)
+
+    :ok = File.rename(saved, path)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+    assert AbortPrepareJournal.load_confirmed_delete(context.root, record.claim, record, uid) == checkpoint
+
+    publisher = fn replay ->
+      send(parent, {:publication, replay})
+      :ok
+    end
+
+    assert {^prepared, :ok} = confirm_after_restart(allocation, assignment, caller, publisher)
+    assert_receive {:publication, ^request}
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+    assert AbortPrepareJournal.load_confirmed_delete(context.root, record.claim, record, uid) == checkpoint
+    assert File.read!(path) == original
   end
 
   test "confirmation holds before mutation when the root receipt disappears", context do
@@ -1086,6 +1272,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
   end
 
   test "a committed delete with a lost response has no replay checkpoint", context do
+    Process.put(:abort_root_input_publish_fun, fn _ -> flunk("publication after uncertain delete") end)
     assignment = assignment()
     adapter = adapter_context(context, assignment)
 
@@ -1114,6 +1301,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     caller = caller_context(context, adapter, witness_input, post_fun)
     assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    retain_result(caller, allocation, assignment)
     Agent.update(context.client, &Map.put(&1, :raise_after_suspended_delete, true))
 
     assert {:held, :suspended_abort_delete_uncertain} =
@@ -1162,6 +1350,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     caller = caller_context(context, adapter, witness_input, post_fun)
     assert {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    retain_result(caller, allocation, assignment)
 
     late_pod = %{
       "apiVersion" => "v1",
@@ -1260,7 +1449,8 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
   defp caller_context(context, adapter, witness_input, post_fun) do
     %{
-      adapter_context: adapter,
+      adapter_context: Map.put(adapter, :abort_result_journal_root, context.result_root),
+      pre_execution_result: blocked_result(assignment()),
       witness_input: witness_input,
       reservation: reservation(),
       provider_context: %{base_url: "https://dahlia.example", runner_token: "synthetic-token"},
@@ -1270,6 +1460,73 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       root_abort_input_publisher: SymphonyElixir.AbortPrepareTestRootInputPublisher
     }
   end
+
+  defp blocked_result(assignment, reason \\ :credential_lease_denied) do
+    %{
+      assignment_digest: assignment.sha256,
+      abort_reason: reason,
+      outcome: :blocked,
+      summary: Record.pre_execution_summary(reason),
+      evidence_ref: "managed-executor:#{assignment.sha256}:#{reason}"
+    }
+  end
+
+  defp retain_result(caller, allocation, assignment) do
+    assert {:ok, _reference} =
+             AbortResultPublisher.publish_or_reconcile_abort_result(
+               allocation,
+               assignment,
+               caller.pre_execution_result,
+               assignment.sha256 <> ":abort-result",
+               caller.adapter_context
+             )
+  end
+
+  defp result_path(caller, assignment) do
+    {:ok, reference} = AbortResultPublisher.reference_for_assignment(assignment)
+    Path.join(caller.adapter_context.abort_result_journal_root, sha256(reference) <> ".abort-result.json")
+  end
+
+  defp prepared_fixture(context) do
+    assignment = assignment()
+    adapter = adapter_context(context, assignment)
+    {:ok, allocation} = ManagedExecutorAdapter.allocate_or_reconcile(assignment, allocation_key(assignment), adapter)
+    witness = witness_input(fn _ -> {:ok, receipt(true, String.duplicate("8", 64))} end)
+
+    post = fn _url, options ->
+      request = Jason.decode!(Keyword.fetch!(options, :body))
+
+      data = %{
+        "prepareId" => request["prepareId"],
+        "projectionId" => "projection-one",
+        "reservationId" => "reservation-one",
+        "preparedAt" => "2026-09-27T12:00:00.000Z",
+        "replayed" => false
+      }
+
+      {:ok, %Req.Response{status: 200, body: %{"data" => data}}}
+    end
+
+    caller = caller_context(context, adapter, witness, post)
+    {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+    {assignment, allocation, caller, prepared}
+  end
+
+  defp confirm_after_restart(allocation, assignment, caller, publisher) do
+    Task.async(fn ->
+      if match?({:win32, _}, :os.type()) do
+        Process.put(:abort_prepare_journal_windows_test_only, true)
+        Process.put(:abort_result_journal_windows_test_only, true)
+      end
+
+      Process.put(:abort_root_input_publish_fun, publisher)
+      {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
+      {prepared, AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)}
+    end)
+    |> Task.await()
+  end
+
+  defp sha256(bytes), do: :crypto.hash(:sha256, bytes) |> Base.encode16(case: :lower)
 
   defp claim_for_test do
     input = witness_input(fn _request -> {:error, :unused} end)
@@ -1292,7 +1549,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
   defp witness_input(witness) do
     %{
       pool_key: "midgard",
-      issue_id: "issue-1",
+      issue_id: "11111111-2222-4333-8444-555555555599",
       runner_id: "runner-17",
       managed_project_profile_id: "profile-one",
       repository_ref: "hypergridau/symphony",
@@ -1306,7 +1563,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       reservation_id: "reservation-one",
       workspace_id: "workspace-one",
       company_id: "company-one",
-      issue_id: "issue-1",
+      issue_id: "11111111-2222-4333-8444-555555555599",
       runner_id: "runner-17",
       managed_project_profile_id: "profile-one",
       repository_ref: "hypergridau/symphony",
@@ -1315,7 +1572,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       session_id: "session-one",
       process_id: "process-one",
       responsible_delegation_id: "delegation-one",
-      execution_fence_token: "issue-1:4",
+      execution_fence_token: "11111111-2222-4333-8444-555555555599:4",
       runtime_lease_id: "session-one",
       reservation_nonce: "secret-nonce"
     }
@@ -1342,7 +1599,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
         reservation_id: "reservation-one",
         workspace_id: "workspace-one",
         company_id: "company-one",
-        issue_id: "issue-1",
+        issue_id: "11111111-2222-4333-8444-555555555599",
         runner_id: "runner-17",
         generation: 4,
         repository_ref: "hypergridau/symphony",
@@ -1350,7 +1607,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
         session_id: "session-one",
         process_id: "process-one",
         responsible_delegation_id: "delegation-one",
-        execution_fence_token: "issue-1:4",
+        execution_fence_token: "11111111-2222-4333-8444-555555555599:4",
         runtime_lease_id: "session-one",
         scope_keys: ["repo:hypergridau/symphony"],
         nonce_sha256: :crypto.hash(:sha256, "secret-nonce") |> Base.encode16(case: :lower)
@@ -1376,7 +1633,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
         branch: "codex/hgs733-host-abort-prepare",
         seat: "runner-17",
         lease: %{
-          issue_id: "issue-1",
+          issue_id: "11111111-2222-4333-8444-555555555599",
           repository: "hypergridau/symphony",
           generation: 4,
           session_id: "session-one",
