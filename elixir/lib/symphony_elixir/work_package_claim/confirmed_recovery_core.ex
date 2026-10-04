@@ -29,6 +29,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
     Journal
   }
 
+  alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseCompletion
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryUnsubmittedPredecessor
 
   @issue_id "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
@@ -617,6 +618,20 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp verify_provider_final_proof(marker, runtime, require_current_journal?) do
+    ports = %{
+      read: &read_trusted_evidence(&1, runtime),
+      create: &create_release_artifact(&1, &2, runtime),
+      inputs: &signed_input_directory(&1, runtime),
+      journal: &provider_journal_sha256/3
+    }
+
+    case ConfirmedRecoveryReleaseCompletion.verify(marker, runtime, require_current_journal?, ports) do
+      :legacy -> verify_legacy_provider_final_proof(marker, runtime, require_current_journal?)
+      result -> result
+    end
+  end
+
+  defp verify_legacy_provider_final_proof(marker, runtime, require_current_journal?) do
     path = Path.join(runtime.host_ops.paths.provider_receipt_root, marker["issueId"] <> ".json")
 
     with {:ok, bytes} <- read_root_file(path, 1_048_576, runtime),
@@ -798,7 +813,8 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore do
   end
 
   defp complete_marker(marker, path, provider_proof, provider_payload, k8s_readback, runtime) do
-    with {:ok, completion_postimages} <- state_hashes(runtime, marker["stateOwnership"]),
+    with :ok <- ConfirmedRecoveryReleaseCompletion.require_fresh_commit(provider_proof, host0(runtime, :now_ms)),
+         {:ok, completion_postimages} <- state_hashes(runtime, marker["stateOwnership"]),
          completed =
            marker
            |> Map.put("status", "complete")

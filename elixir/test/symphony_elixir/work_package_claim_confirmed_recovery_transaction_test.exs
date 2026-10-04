@@ -1,3 +1,5 @@
+Code.require_file("../support/confirmed_release_fixture.exs", __DIR__)
+
 defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   use ExUnit.Case, async: true
 
@@ -9,6 +11,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.ResponsibilityGraph
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: GraphPersistence
+  alias SymphonyElixir.Test.ConfirmedReleaseFixture
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryContext
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryCore, as: Transaction
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryEvidence, as: Evidence
@@ -20,6 +23,48 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransactionTest do
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryTransaction, as: Facade
   alias SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWAL
   alias SymphonyElixir.WorkPackageClaim.Journal
+
+  test "canonical completion consumes only the existing confirmed release and startup uses retained evidence" do
+    {fixture, enrollment, release_ports, state} = release_fixture()
+
+    Agent.update(state, fn s ->
+      decision = s.decision |> Map.put("approverRef", "synthetic@owner.test") |> Map.put("decisionActorRef", "synthetic@owner.test")
+      %{s | decision: decision}
+    end)
+
+    enrollment = %{enrollment | owner_principal: "synthetic@owner.test"}
+    assert {:ok, :created, bundle} = Release.run("approval-local", enrollment, release_ports)
+    evidence = ConfirmedReleaseFixture.provider_evidence(bundle, enrollment.native_public_key, Agent.get(state, & &1.decision), Agent.get(state, & &1.now))
+    calls = :atomics.new(1, [])
+    ops = fixture.context.host_ops |> Map.put(:read_public_key, fn -> {:ok, enrollment.native_public_key} end)
+    ops = ops |> Map.put(:now_ms, fn -> Agent.get(state, & &1.now) + 1_000 end)
+
+    ops =
+      ops
+      |> Map.put(:read_confirmed_release, fn _, _ ->
+        :atomics.add_get(calls, 1, 1)
+        {:ok, evidence.readback}
+      end)
+
+    ops = ops |> Map.put(:read_release_history, fn _ -> {:ok, evidence.history} end)
+    ops = ops |> Map.put(:observe_kubernetes_for_test, fn _, cluster -> {:ok, synthetic_kubernetes_observation(cluster)} end)
+    context = %{fixture.context | host_ops: ops}
+    before = Agent.get(fixture.vfs, & &1.files)
+    assert :ok = Transaction.complete_with_test_context(context)
+    after_files = Agent.get(fixture.vfs, & &1.files)
+    marker = Jason.decode!(after_files[fixture.marker_path])
+    assert marker["status"] == "complete" and marker["providerReceipt"] == evidence.readback["confirmation"]["receipt"]
+    assert :atomics.get(calls, 1) == 1
+    for {path, bytes} <- before, path != fixture.marker_path, do: assert(after_files[path] == bytes)
+    offline = %{context | host_ops: Map.put(ops, :read_confirmed_release, fn _, _ -> flunk("startup must not request credentials or HTTP") end)}
+    assert :ok = Transaction.verify_startup_with_test_context(offline)
+    assert :ok = Transaction.complete_with_test_context(offline)
+    assert Agent.get(state, & &1.signatures) == 3
+    witness_path = Path.join(Path.dirname(fixture.marker_path), "release-completion-witness.json")
+    assert marker["providerFinalProofSHA256"] == sha256(after_files[witness_path])
+    Agent.update(fixture.vfs, fn s -> %{s | files: Map.put(s.files, witness_path, after_files[witness_path] <> " ")} end)
+    assert {:error, _} = Transaction.verify_startup_with_test_context(offline)
+  end
 
   test "release protocol binds a real native snapshot and never recollects or resigns retained authority" do
     {fixture, enrollment, ports, state} = release_fixture()

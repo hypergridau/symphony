@@ -25,8 +25,15 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport do
       else: {:error, :hgs740_release_protocol_not_admitted}
   end
 
-  defp request(method, path, body, context) do
-    with true <- context[:protocol_accepted] == true and context[:trust_enrolled] == true,
+  @spec confirmed_readback(map(), String.t(), map()) :: {:ok, map()} | {:error, atom()}
+  def confirmed_readback(bundle, id, context) do
+    if context[:historical_readback] == true,
+      do: request(:post, @prefix <> "/release-only/confirmation-readback", %{"bundle" => bundle, "providerApprovalId" => id}, context, :historical),
+      else: {:error, :hgs740_confirmation_readback_not_admitted}
+  end
+
+  defp request(method, path, body, context, mode \\ :write) do
+    with true <- admitted?(context, mode),
          true <- valid_secret?(context[:runner_token]) and valid_secret?(context[:admin_token]),
          raw = if(is_nil(body), do: nil, else: Evidence.canonical_json(body)),
          true <- is_nil(raw) or byte_size(raw) <= 1_048_576,
@@ -43,6 +50,9 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport do
   rescue
     _ -> {:error, :hgs740_provider_transport_held_closed}
   end
+
+  defp admitted?(context, :historical), do: context[:historical_readback] == true
+  defp admitted?(context, :write), do: context[:protocol_accepted] == true and context[:trust_enrolled] == true
 
   defp options(method, path, body, context) do
     options = [

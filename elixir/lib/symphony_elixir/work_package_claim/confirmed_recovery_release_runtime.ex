@@ -12,10 +12,34 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseRuntime do
     provider(context, enrollment, &Core.release_only_snapshot/1, &Custody.read_private/2)
   end
 
+  @spec confirmation(map()) :: {:ok, map()} | {:error, atom()}
+  def confirmation(marker), do: confirmation(marker, &Custody.read_private/2)
+
   if Mix.env() == :test do
     @doc false
     @spec with_test_reads(map(), map(), function(), function()) :: {:ok, map()} | {:error, atom()}
     def with_test_reads(context, enrollment, snapshot, read), do: provider(context, enrollment, snapshot, read)
+
+    @doc false
+    @spec confirmation_with_test_reads(map(), function()) :: {:ok, map()} | {:error, atom()}
+    def confirmation_with_test_reads(marker, read), do: confirmation(marker, read)
+  end
+
+  defp confirmation(marker, read) do
+    with true <- marker["issueId"] == "f77e349e-21d9-4bdf-bad3-ce08b302e7e8" and marker["generation"] === 2,
+         true <- marker["pool"] == "hypergrid-gitops" and marker["status"] == "local_applied",
+         {:ok, _paths} <- Host.fixed_runtime_paths(marker["pool"]),
+         {:ok, env} <- read.(@root <> "/managed-pools-hgs382/" <> marker["pool"] <> ".env", 16_384),
+         {:ok, values} <- identities(env),
+         true <- values["DAHLIA_RUNNER_ID"] == marker["expected"]["runnerId"],
+         runner when is_binary(runner) <- values["DAHLIA_WORK_PACKAGE_RUNNER_TOKEN"],
+         {:ok, admin} <- read.(@root <> "/claim-recovery-hgs485/provider-admin.token", 4096) do
+      {:ok, %{historical_readback: true, runner_token: runner, admin_token: String.trim(admin)}}
+    else
+      _ -> {:error, :hgs740_provider_identity_unavailable}
+    end
+  rescue
+    _ -> {:error, :hgs740_provider_identity_unavailable}
   end
 
   defp provider(context, enrollment, snapshot_read, private_read) do
