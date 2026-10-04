@@ -164,6 +164,9 @@ defmodule SymphonyElixir.CLI do
       ["--diagnose-auth-cache"] ->
         WorkerCLI.main(args)
 
+      ["--diagnose-auth-canary"] ->
+        WorkerCLI.main(args)
+
       _ ->
         main(args, fn -> Application.ensure_all_started(:symphony_elixir) end)
     end

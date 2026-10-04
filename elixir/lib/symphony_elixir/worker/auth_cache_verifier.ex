@@ -27,11 +27,13 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   import Bitwise, only: [band: 2]
 
   alias SymphonyElixir.Worker.AuthCacheVerifier.OutputSink
+  alias SymphonyElixir.Worker.CanaryEventSink
 
   @codex_home "/var/lib/frigga-codex-home"
   @auth_file Path.join(@codex_home, "auth.json")
   @max_auth_bytes 10_000_000
   @path "/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin"
+  @failed_event_fields [:turn_failed, :error_seen, :item_error_seen, :response_invalid, :overflow, :malformed]
 
   @type outcome :: %{exit_code: 0 | 1, result: map()}
 
@@ -63,20 +65,77 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
     }
   end
 
+  @doc "Fixed operator canary with finite event metadata; never a verifier or cleanup result."
+  @spec diagnose_canary(map(), map()) :: outcome()
+  def diagnose_canary(env, deps \\ %{}) do
+    {phase, canary_exit, events} = canary_diagnosis(env, deps)
+    canary_diagnostic(phase, canary_exit, events)
+  rescue
+    _ -> canary_diagnostic("unexpected_failure", "unknown", CanaryEventSink.summary(%CanaryEventSink{}))
+  catch
+    _, _ -> canary_diagnostic("unexpected_failure", "unknown", CanaryEventSink.summary(%CanaryEventSink{}))
+  end
+
+  defp canary_diagnosis(env, deps) when is_map(env) and is_map(deps) do
+    case preflight(env, deps) do
+      :ok ->
+        canary = Map.get(deps, :canary_events, fn -> oauth_canary_events(deps) end)
+        {%CanaryEventSink{} = sink, code} = canary.()
+        events = CanaryEventSink.summary(CanaryEventSink.finish(sink))
+        phase = event_canary_phase(code, events, deps)
+        {phase, canary_exit(code), events}
+
+      {:error, phase} ->
+        {phase, "not_started", CanaryEventSink.summary(%CanaryEventSink{})}
+    end
+  end
+
+  defp canary_diagnosis(_env, _deps),
+    do: {"invalid_context", "not_started", CanaryEventSink.summary(%CanaryEventSink{})}
+
+  defp event_canary_phase(0, events, deps) do
+    if events.turn_completed and events.response_verified and
+         not Enum.any?(@failed_event_fields, &Map.fetch!(events, &1)) do
+      case postflight(deps) do
+        {:ok, _bytes} -> "complete"
+        {:error, phase} -> phase
+      end
+    else
+      "canary_response_unverified"
+    end
+  end
+
+  defp event_canary_phase(code, _events, _deps) do
+    {:error, phase} = canary_result(code)
+    phase
+  end
+
+  defp canary_exit(0), do: "completed"
+  defp canary_exit(code) when code in [124, 137], do: "timeout"
+  defp canary_exit(_code), do: "failed"
+
+  defp canary_diagnostic(phase, canary_exit, events) do
+    passed = phase == "complete"
+
+    %{
+      exit_code: if(passed, do: 0, else: 1),
+      result: %{
+        "contractVersion" => "symphony-auth-canary-diagnostic.v1",
+        "status" => if(passed, do: "passed", else: "failed"),
+        "phase" => phase,
+        "canaryExit" => canary_exit,
+        "events" => events
+      }
+    }
+  end
+
   defp verify(env, deps) when is_map(env) and is_map(deps) do
-    stat = Map.get(deps, :stat, &File.lstat/1)
-    read_auth = Map.get(deps, :read_auth, &File.read/1)
-    auth_shape = Map.get(deps, :auth_shape, fn -> oauth_cache_shape?(read_auth) end)
     canary = Map.get(deps, :canary, &oauth_canary/0)
 
-    with :ok <- check(supported_host?(deps), "unsupported_host"),
-         :ok <- check(env["CODEX_HOME"] == @codex_home, "invalid_context"),
-         {:ok, _before} <- private_cache(stat, "cache_unavailable", "cache_custody_invalid"),
-         :ok <- check(auth_shape.(), "cache_shape_invalid"),
+    with :ok <- preflight(env, deps),
          :ok <- canary_result(canary.()),
-         {:ok, after_stat} <- private_cache(stat, "post_canary_cache_unavailable", "post_canary_cache_custody_invalid"),
-         :ok <- check(auth_shape.(), "post_canary_cache_shape_invalid") do
-      {:ok, after_stat.size}
+         {:ok, bytes} <- postflight(deps) do
+      {:ok, bytes}
     else
       {:error, phase} -> {:error, phase}
     end
@@ -87,6 +146,27 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   end
 
   defp verify(_env, _deps), do: {:error, "invalid_context"}
+
+  defp preflight(env, deps) do
+    stat = Map.get(deps, :stat, &File.lstat/1)
+    read_auth = Map.get(deps, :read_auth, &File.read/1)
+    auth_shape = Map.get(deps, :auth_shape, fn -> oauth_cache_shape?(read_auth) end)
+
+    with :ok <- check(supported_host?(deps), "unsupported_host"),
+         :ok <- check(env["CODEX_HOME"] == @codex_home, "invalid_context"),
+         {:ok, _before} <- private_cache(stat, "cache_unavailable", "cache_custody_invalid"),
+         do: check(auth_shape.(), "cache_shape_invalid")
+  end
+
+  defp postflight(deps) do
+    stat = Map.get(deps, :stat, &File.lstat/1)
+    read_auth = Map.get(deps, :read_auth, &File.read/1)
+    auth_shape = Map.get(deps, :auth_shape, fn -> oauth_cache_shape?(read_auth) end)
+
+    with {:ok, after_stat} <- private_cache(stat, "post_canary_cache_unavailable", "post_canary_cache_custody_invalid"),
+         :ok <- check(auth_shape.(), "post_canary_cache_shape_invalid"),
+         do: {:ok, after_stat.size}
+  end
 
   defp check(true, _phase), do: :ok
   defp check(_other, phase), do: {:error, phase}
@@ -126,7 +206,24 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   end
 
   defp oauth_canary do
-    args = [
+    case System.cmd("/usr/bin/timeout", canary_args([]), stderr_to_stdout: true, into: %OutputSink{}) do
+      {_discarded, status} -> status
+    end
+  end
+
+  defp oauth_canary_events(deps) do
+    cmd = Map.get(deps, :cmd, &System.cmd/3)
+
+    # The fixed shell wrapper discards stderr before executing the fixed argv.
+    # No caller-provided shell text, paths, flags or model selection is accepted.
+    cmd.("/bin/sh", ["-c", "exec \"$@\" 2>/dev/null", "auth-canary", "/usr/bin/timeout" | canary_args(["--json"])],
+      stderr_to_stdout: true,
+      into: %CanaryEventSink{}
+    )
+  end
+
+  defp canary_args(extra) do
+    [
       "--kill-after=5s",
       "90s",
       "/usr/bin/env",
@@ -135,37 +232,33 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
       "HOME=/tmp",
       "CODEX_HOME=" <> @codex_home,
       "codex",
-      "exec",
-      "--disable",
-      "shell_tool",
-      "--disable",
-      "unified_exec",
-      "--disable",
-      "browser_use",
-      "--disable",
-      "computer_use",
-      "--disable",
-      "apps",
-      "--disable",
-      "code_mode_host",
-      "--ignore-user-config",
-      "--ignore-rules",
-      "--skip-git-repo-check",
-      "--ephemeral",
-      "--sandbox",
-      "read-only",
-      "--model",
-      "gpt-6-luna",
-      "--config",
-      "model_reasoning_effort=\"high\"",
-      "Reply with the single word verified. Do not use tools."
-    ]
-
-    case System.cmd("/usr/bin/timeout", args,
-           stderr_to_stdout: true,
-           into: %OutputSink{}
-         ) do
-      {_discarded, status} -> status
-    end
+      "exec"
+    ] ++
+      extra ++
+      [
+        "--disable",
+        "shell_tool",
+        "--disable",
+        "unified_exec",
+        "--disable",
+        "browser_use",
+        "--disable",
+        "computer_use",
+        "--disable",
+        "apps",
+        "--disable",
+        "code_mode_host",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "--ephemeral",
+        "--sandbox",
+        "read-only",
+        "--model",
+        "gpt-6-luna",
+        "--config",
+        "model_reasoning_effort=\"high\"",
+        "Reply with the single word verified. Do not use tools."
+      ]
   end
 end

@@ -31,6 +31,9 @@ defmodule SymphonyElixir.Worker.CLI do
   def run(["--diagnose-auth-cache"], env, deps) when is_map(env) and is_map(deps),
     do: AuthCacheVerifier.diagnose(env, deps)
 
+  def run(["--diagnose-auth-canary"], env, deps) when is_map(env) and is_map(deps),
+    do: AuthCacheVerifier.diagnose_canary(env, deps)
+
   def run(args, env, deps) when is_list(args) and is_map(env) and is_map(deps) do
     with [@assignment_arg, assignment_json] <- args,
          {:ok, decoded} <- decode_assignment(assignment_json, env),
