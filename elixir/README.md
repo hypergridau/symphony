@@ -493,6 +493,16 @@ the lease to be bound.
 Missing or conflicting records hold cleanup. A configured host context alone
 does not prove this source is installed or that a Job has run.
 
+Before any destructive confirmation, `AbortPrepareCaller.confirm/5` requires
+`pre_execution_result` from the actual retained typed failure and reads back its
+exact canonical `AbortResultPublisher` bytes from `AbortResultJournal` using the
+root-validated claim, assignment, generation and allocation. The trusted producer
+must publish those bytes first; a reference alone or a missing, corrupt, conflicting
+or insecure journal holds with no deletion. The adapter context's
+`abort_result_journal_root` must match the fixed application configuration of the
+same name in production and be disjoint from the prepare journal and workspaces.
+The caller does not infer a failure reason or route activation errors to abort.
+
 After `AbortPrepareCaller.confirm/5` has verified the durable confirmed-delete
 checkpoint, it sends only `schemaVersion`, `operation`, `claimSHA256`,
 `assignmentDigest`, `allocationId`, and the retained blocked `resultReference`
@@ -504,9 +514,13 @@ context, or filesystem path crosses this socket. The missing service, an
 uncertain response, or an acknowledgement for another claim leaves abort
 cleanup held; this client contract alone does not qualify publication.
 The result publisher derives the canonical reference from the signed assignment
-digest. Selecting that reference does not prove a result was recorded: the root
-service must verify the retained journal and matching bytes. Any supplied
+digest. Selecting that reference does not prove a result was recorded. The caller
+verifies its exact bytes before deletion, and the root service independently
+verifies them afterward together with confirmed-delete evidence. Any supplied
 `root_abort_result_reference` must equal the canonical reference or cleanup holds.
+Publication failure after confirmed deletion retains that checkpoint and replays
+publication across restart without a second delete. A lost delete response remains
+uncertain; Job absence alone cannot create a confirmed-delete checkpoint.
 
 The host Kubernetes context accepts the controller's exact `:allocation` and
 `:abort_unstarted` idempotency keys for allocation and both abort phases. An

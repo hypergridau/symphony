@@ -34,6 +34,10 @@ and post-cleanup release when that optional mount is selected. No production gua
 The source-only managed executor can release a pre-checkout allocation after a confirmed
 credential denial, expiry, or invalid response, but only through Dahlia's signed abort
 proof and exact provider release acknowledgement. Uncertain credential outcomes stay held.
+The trusted pre-execution abort caller requires exact durable typed blocked-result
+bytes before deleting an unstarted allocation, then preserves its confirmed-delete
+checkpoint for root publication replay. This source safety guard does not establish
+autonomous failure routing or live lifecycle acceptance.
 
 An enforced managed pool consumes an Ed25519-signed, digest-pinned,
 operator-issued delegation manifest; an empty manifest is signed too.

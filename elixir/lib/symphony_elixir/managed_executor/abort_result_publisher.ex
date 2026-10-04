@@ -30,15 +30,8 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
   @spec publish_or_reconcile_abort_result(map(), map(), map(), String.t(), term()) ::
           {:ok, String.t()} | {:error, atom()}
   def publish_or_reconcile_abort_result(allocation, assignment, result, idempotency_key, context) do
-    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
-         :ok <- Record.validate_allocation(allocation),
-         :ok <- validate_idempotency_key(idempotency_key, assignment),
-         :ok <- validate_result(result, assignment),
-         {:ok, claim} <- claim_binding(context, assignment),
-         {:ok, root} <- journal_root(context),
-         binding = binding(assignment, allocation),
-         reference = result_reference(idempotency_key),
-         {:ok, result_bytes} <- Jason.encode(blocked_result(claim, assignment, allocation, result, reference)),
+    with {:ok, root, reference, binding, result_bytes} <-
+           publication(allocation, assignment, result, idempotency_key, context),
          {:ok, %{reference: ^reference}} <- AbortResultJournal.record(root, reference, binding, result_bytes) do
       {:ok, reference}
     else
@@ -48,6 +41,37 @@ defmodule SymphonyElixir.ManagedExecutor.AbortResultPublisher do
     end
   rescue
     _ -> {:error, :abort_result_publication_failed}
+  end
+
+  @doc "Verifies the exact canonical typed result already retained before destructive confirmation."
+  @spec verify_retained_abort_result(map(), map(), map(), String.t(), term()) :: :ok | {:error, atom()}
+  def verify_retained_abort_result(allocation, assignment, result, idempotency_key, context) do
+    with {:ok, root, reference, binding, result_bytes} <-
+           publication(allocation, assignment, result, idempotency_key, context),
+         digest = :crypto.hash(:sha256, result_bytes) |> Base.encode16(case: :lower),
+         {:ok, ^result_bytes} <- AbortResultJournal.load(root, reference, binding, digest) do
+      :ok
+    else
+      :missing -> {:error, :abort_result_journal_missing}
+      {:held, reason} -> {:error, reason}
+      {:error, reason} when is_atom(reason) -> {:error, reason}
+      _ -> {:error, :abort_result_journal_readback_failed}
+    end
+  rescue
+    _ -> {:error, :abort_result_journal_readback_failed}
+  end
+
+  defp publication(allocation, assignment, result, idempotency_key, context) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         :ok <- Record.validate_allocation(allocation),
+         :ok <- validate_idempotency_key(idempotency_key, assignment),
+         :ok <- validate_result(result, assignment),
+         {:ok, claim} <- claim_binding(context, assignment),
+         {:ok, root} <- journal_root(context),
+         reference = result_reference(idempotency_key),
+         {:ok, result_bytes} <- Jason.encode(blocked_result(claim, assignment, allocation, result, reference)) do
+      {:ok, root, reference, binding(assignment, allocation), result_bytes}
+    end
   end
 
   defp validate_idempotency_key(key, assignment) do

@@ -2,6 +2,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   @moduledoc """
   Coordinates the trusted host's durable root-witness and Dahlia prepare steps
   before passing the saved observation and journal guard to the RKE2 adapter.
+  Confirmation first reads back the exact canonical blocked result from the
+  fixed private journal against the retained typed failure and validated claim.
   After confirmed deletion, it asks the fixed root input-publisher socket to
   publish the claim-bound HGS-733 inputs using selectors only.
   """
@@ -70,9 +72,9 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
          {:ok, claim} <- claim(caller_context),
          :ok <- validate_claim_assignment(claim, assignment, caller_context),
          {:ok, record} <- AbortPrepareJournal.load(caller_context.journal_root, claim),
-         true <- record.assignment_digest == assignment.sha256,
-         true <- record.allocation_id == allocation.id,
+         :ok <- bind_record(record, allocation, assignment, caller_context, claim),
          :ok <- revalidate_root_intent(record, caller_context, claim),
+         :ok <- verify_retained_abort_result(allocation, assignment, caller_context),
          true <- is_map(Map.get(prepared, :prepare_ack)) do
       context =
         caller_context.adapter_context
@@ -167,13 +169,24 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
 
   defp trusted_root_configuration?(context) do
     context.journal_root == Application.get_env(:symphony_elixir, :abort_prepare_journal_root) and
-      context.workspace_root == Application.get_env(:symphony_elixir, :abort_prepare_workspace_root)
+      context.workspace_root == Application.get_env(:symphony_elixir, :abort_prepare_workspace_root) and
+      get_in(context, [:adapter_context, :abort_result_journal_root]) ==
+        Application.get_env(:symphony_elixir, :abort_result_journal_root)
   end
 
   defp valid_host_roots?(context) do
     is_binary(context.journal_root) and Path.type(context.journal_root) == :absolute and
       is_binary(context.workspace_root) and Path.type(context.workspace_root) == :absolute and
-      not inside_workspace?(context.journal_root, context.workspace_root)
+      not inside_workspace?(context.journal_root, context.workspace_root) and valid_result_root?(context)
+  end
+
+  defp valid_result_root?(context) do
+    root = get_in(context, [:adapter_context, :abort_result_journal_root])
+
+    is_binary(root) and Path.type(root) == :absolute and
+      Enum.all?([context.journal_root, context.workspace_root], fn other ->
+        not inside_workspace?(root, other) and not inside_workspace?(other, root)
+      end)
   end
 
   defp no_production_test_seams?(context) do
@@ -398,6 +411,25 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     _ -> {:held, :root_abort_input_publication_unavailable}
   catch
     _kind, _reason -> {:held, :root_abort_input_publication_unavailable}
+  end
+
+  defp verify_retained_abort_result(allocation, assignment, context) do
+    with true <- valid_result_root?(context),
+         {:ok, _reference} <- canonical_result_reference(context, assignment),
+         :ok <-
+           AbortResultPublisher.verify_retained_abort_result(
+             allocation,
+             assignment,
+             Map.get(context, :pre_execution_result),
+             assignment.sha256 <> ":abort-result",
+             context.adapter_context
+           ) do
+      :ok
+    else
+      false -> {:held, :invalid_abort_result_journal_root}
+      {:held, _reason} = held -> held
+      {:error, reason} -> {:held, reason}
+    end
   end
 
   defp canonical_result_reference(context, assignment) do
