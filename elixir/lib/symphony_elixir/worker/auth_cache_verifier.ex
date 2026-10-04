@@ -37,7 +37,6 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   @failed_event_fields [
     :turn_failed,
     :error_seen,
-    :item_error_seen,
     :model_rerouted,
     :other_item_error_seen,
     :response_invalid,
@@ -104,7 +103,7 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
     do: {"invalid_context", "not_started", CanaryEventSink.summary(%CanaryEventSink{})}
 
   defp event_canary_phase(0, events, deps) do
-    if events.turn_completed and events.response_verified and
+    if events.turn_completed and events.response_verified and item_errors_acceptable?(events) and
          not Enum.any?(@failed_event_fields, &Map.fetch!(events, &1)) do
       case postflight(deps) do
         {:ok, _bytes} -> "complete"
@@ -120,6 +119,10 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
     phase
   end
 
+  defp item_errors_acceptable?(%{item_error_seen: false, code_mode_disabled: false}), do: true
+  defp item_errors_acceptable?(%{item_error_seen: true, code_mode_disabled: true}), do: true
+  defp item_errors_acceptable?(_events), do: false
+
   defp canary_exit(0), do: "completed"
   defp canary_exit(code) when code in [124, 137], do: "timeout"
   defp canary_exit(_code), do: "failed"
@@ -130,7 +133,7 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
     %{
       exit_code: if(passed, do: 0, else: 1),
       result: %{
-        "contractVersion" => "symphony-auth-canary-diagnostic.v2",
+        "contractVersion" => "symphony-auth-canary-diagnostic.v3",
         "status" => if(passed, do: "passed", else: "failed"),
         "phase" => phase,
         "canaryExit" => canary_exit,

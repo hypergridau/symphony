@@ -2,6 +2,9 @@ defmodule SymphonyElixir.WorkerCanaryEventSinkTest do
   use ExUnit.Case, async: true
   alias SymphonyElixir.Worker.CanaryEventSink, as: Sink
 
+  @disabled_notice "Code Mode is unavailable because code-mode host is disabled. " <>
+                     "Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`."
+
   test "collects fragmented JSON and CRLF without retaining IDs, messages or usage" do
     lines = [
       %{"type" => "thread.started", "thread_id" => "synthetic-secret-id"},
@@ -29,6 +32,7 @@ defmodule SymphonyElixir.WorkerCanaryEventSinkTest do
                :item_error_seen,
                :model_rerouted,
                :other_item_error_seen,
+               :code_mode_disabled,
                :response_verified,
                :response_invalid,
                :overflow,
@@ -39,6 +43,45 @@ defmodule SymphonyElixir.WorkerCanaryEventSinkTest do
     assert inspect(sink) == "#CanaryEventSink<redacted>"
     {acc, collector} = Collectable.into(%Sink{})
     assert collector.(acc, :halt) == :ok
+  end
+
+  test "only the exact completed disabled Code Mode notice has the known notice classification" do
+    item = %{"type" => "error", "message" => @disabled_notice, "id" => "synthetic-secret-id"}
+    data = Jason.encode!(%{"type" => "item.completed", "item" => item}) <> "\r\n"
+    sink = Enum.into(for(<<byte <- data>>, do: <<byte>>), %Sink{})
+    assert sink.item_error_seen and sink.code_mode_disabled
+    refute sink.model_rerouted or sink.other_item_error_seen
+    assert sink.buffer == <<>>
+    refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
+    refute Jason.encode!(Sink.summary(sink)) =~ "Code Mode"
+
+    for changed <- [
+          %{item | "message" => @disabled_notice <> "\n"},
+          %{item | "message" => " " <> @disabled_notice},
+          %{item | "message" => @disabled_notice <> "synthetic-secret"},
+          %{item | "message" => String.downcase(@disabled_notice)},
+          Map.delete(item, "id"),
+          %{item | "id" => nil},
+          %{item | "id" => ""},
+          Map.put(item, "recipient", "code_mode_host")
+        ] do
+      event = Jason.encode!(%{"type" => "item.completed", "item" => changed}) <> "\n"
+      rejected = Enum.into([event], %Sink{})
+      assert rejected.item_error_seen and rejected.other_item_error_seen
+      refute rejected.code_mode_disabled
+      both = Sink.feed(sink, event <> data)
+      assert both.code_mode_disabled and both.other_item_error_seen
+    end
+  end
+
+  test "the exact notice in another event or item type cannot classify an error notice" do
+    for event <- [
+          %{"type" => "item.updated", "item" => %{"type" => "error", "message" => @disabled_notice, "id" => "item_0"}},
+          %{"type" => "item.completed", "item" => %{"type" => "agent_message", "text" => @disabled_notice, "id" => "item_0"}}
+        ] do
+      sink = Enum.into([Jason.encode!(event) <> "\n"], %Sink{})
+      refute sink.code_mode_disabled or sink.item_error_seen
+    end
   end
 
   test "fragmented exact model reroute prefix retains only sticky classification flags" do

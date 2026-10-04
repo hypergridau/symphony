@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.Worker.CanaryEventSink do
   @moduledoc false
   @max_line_bytes 8192
+  @code_mode_disabled_warning "Code Mode is unavailable because code-mode host is disabled. " <>
+                                "Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`."
   @events %{
     "thread.started" => :thread_started,
     "turn.started" => :turn_started,
@@ -20,6 +22,7 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
             item_error_seen: false,
             model_rerouted: false,
             other_item_error_seen: false,
+            code_mode_disabled: false,
             response_verified: false,
             response_invalid: false,
             overflow: false,
@@ -59,6 +62,7 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
       item_error_seen: state.item_error_seen,
       model_rerouted: state.model_rerouted,
       other_item_error_seen: state.other_item_error_seen,
+      code_mode_disabled: state.code_mode_disabled,
       response_verified: state.response_verified,
       response_invalid: state.response_invalid,
       overflow: state.overflow,
@@ -114,6 +118,10 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
         else
           %{state | response_invalid: true}
         end
+
+      %{"item" => %{"type" => "error", "message" => @code_mode_disabled_warning, "id" => id} = item}
+      when is_binary(id) and byte_size(id) > 0 and map_size(item) == 3 ->
+        %{state | item_error_seen: true, code_mode_disabled: true}
 
       %{"item" => %{"type" => "error", "message" => "model rerouted: " <> _details}} ->
         %{state | item_error_seen: true, model_rerouted: true}

@@ -5,6 +5,8 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
 
   @env %{"CODEX_HOME" => "/var/lib/frigga-codex-home"}
   @stat %{type: :regular, size: 4034, mode: 0o600}
+  @disabled_notice "Code Mode is unavailable because code-mode host is disabled. " <>
+                     "Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`."
 
   defp deps do
     %{windows_test_only: true, stat: fn _ -> {:ok, @stat} end, auth_shape: fn -> true end}
@@ -53,6 +55,7 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
           %{verified() | item_error_seen: true},
           %{verified() | model_rerouted: true},
           %{verified() | other_item_error_seen: true},
+          %{verified() | code_mode_disabled: true},
           %{verified() | response_invalid: true},
           %{verified() | overflow: true},
           %{verified() | malformed: true}
@@ -87,11 +90,58 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
     assert opts[:into] == %Sink{} and opts[:stderr_to_stdout]
     assert opts[:discard_stderr] == true
     assert Enum.sort(Map.keys(result)) == ["canaryExit", "contractVersion", "events", "phase", "status"]
-    assert result["contractVersion"] == "symphony-auth-canary-diagnostic.v2"
+    assert result["contractVersion"] == "symphony-auth-canary-diagnostic.v3"
 
     for key <- ["authCacheStatus", "authCacheBytes", "schemaVersion", "acceptedHead", "cleanupReceipt"] do
       refute Map.has_key?(result, key)
     end
+  end
+
+  test "the fixed disabled-host notice still requires complete success and private postflight checks" do
+    event = %{"type" => "item.completed", "item" => %{"type" => "error", "message" => @disabled_notice, "id" => "item_0"}}
+    sink = Sink.feed(verified(), Jason.encode!(event) <> "\n")
+    caller = self()
+
+    stat = fn _ ->
+      send(caller, :stat)
+      {:ok, @stat}
+    end
+
+    base = Map.put(%{deps() | stat: stat}, :canary_events, fn -> {sink, 0} end)
+    assert %{exit_code: 0, result: %{"phase" => "complete", "events" => events}} = CLI.run(["--diagnose-auth-canary"], @env, base)
+    assert events.item_error_seen and events.code_mode_disabled
+    refute events.model_rerouted or events.other_item_error_seen
+    assert_receive :stat
+    assert_receive :stat
+    refute_receive :stat
+
+    for changed <- [
+          %{sink | response_verified: false},
+          %{sink | turn_completed: false},
+          %{sink | turn_failed: true},
+          %{sink | error_seen: true},
+          %{sink | model_rerouted: true},
+          %{sink | other_item_error_seen: true},
+          %{sink | malformed: true},
+          %{sink | overflow: true},
+          %{sink | response_invalid: true}
+        ] do
+      rejected = Map.put(deps(), :canary_events, fn -> {changed, 0} end)
+      assert %{exit_code: 1, result: %{"phase" => "canary_response_unverified"}} = CLI.run(["--diagnose-auth-canary"], @env, rejected)
+    end
+
+    {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+    private = fn _ ->
+      Agent.get_and_update(counter, fn n ->
+        {{:ok, %{@stat | mode: if(n == 0, do: 0o600, else: 0o660)}}, n + 1}
+      end)
+    end
+
+    assert %{exit_code: 1, result: %{"phase" => "post_canary_cache_custody_invalid"}} =
+             CLI.run(["--diagnose-auth-canary"], @env, %{base | stat: private})
+
+    Agent.stop(counter)
   end
 
   test "a completed verified turn cannot override either completed error item classification" do
