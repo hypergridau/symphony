@@ -79,7 +79,6 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
       {:ok, after_stat.size}
     else
       {:error, phase} -> {:error, phase}
-      _ -> {:error, "unexpected_failure"}
     end
   rescue
     _ -> {:error, "unexpected_failure"}
