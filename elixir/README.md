@@ -1619,6 +1619,11 @@ recovery commands, legacy freshness gates and startup authority remain unchanged
 
 ### HGS-740 committed release completion
 
+The packaged `app: nil` recovery CLI initializes only `yaml_elixir` before
+reading nonempty workflow front matter. A bootstrap failure holds closed with a
+fixed, redacted error. This starts no Symphony application, orchestrator, worker
+or HTTP application; the existing transport owns its later Req initialization.
+
 The existing `ConfirmedRecoveryCore.complete/3` command selects the release-only
 verifier when its protected attempt, attestation, bundle or completion witness
 exists. Partial or invalid evidence never falls back to HGS-719. The legacy
