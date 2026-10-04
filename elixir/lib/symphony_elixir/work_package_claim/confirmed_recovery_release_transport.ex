@@ -6,6 +6,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport do
   @origin "https://dahlia.hypergrid.au"
   @prefix "/provider/v1/work-packages/claim-recovery"
   @max_bytes 262_144
+  @test_runtime Mix.env() == :test
 
   @spec approval(map(), String.t(), map()) :: {:ok, map()} | {:error, atom()}
   def approval(binding, id, context),
@@ -38,6 +39,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport do
          raw = if(is_nil(body), do: nil, else: Evidence.canonical_json(body)),
          true <- is_nil(raw) or byte_size(raw) <= 1_048_576,
          options = options(method, path, raw, context),
+         {:ok, _started} <- Application.ensure_all_started(:req),
          {:ok, %Req.Response{status: 200, body: bytes, headers: headers}} <- Req.request(options),
          true <- is_binary(bytes) and byte_size(bytes) <= @max_bytes,
          true <- headers["cache-control"] == ["no-store"],
@@ -68,7 +70,7 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryReleaseTransport do
       connect_options: [timeout: 5_000]
     ]
 
-    if Mix.env() == :test and context[:test_plug], do: Keyword.put(options, :plug, {Req.Test, context.test_plug}), else: options
+    if @test_runtime and context[:test_plug], do: Keyword.put(options, :plug, {Req.Test, context.test_plug}), else: options
   end
 
   defp bounded_body({:data, bytes}, {request, response}) do

@@ -1619,6 +1619,12 @@ recovery commands, legacy freshness gates and startup authority remain unchanged
 
 ### HGS-740 committed release completion
 
+The packaged maintenance process does not start Mix or orchestration. An admitted
+provider request initializes only Req and its declared dependencies; test adapter
+selection is fixed at compilation. Missing authority, invalid credentials or an
+oversized request fail before HTTP startup. A cold-process regression verifies
+confirmed readback with no Mix state, Symphony application or worker process.
+
 The packaged `app: nil` recovery CLI initializes only `yaml_elixir` before
 reading nonempty workflow front matter. A bootstrap failure holds closed with a
 fixed, redacted error. This starts no Symphony application, orchestrator, worker
