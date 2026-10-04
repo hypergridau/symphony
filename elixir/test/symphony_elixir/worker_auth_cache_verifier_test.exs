@@ -98,6 +98,7 @@ defmodule SymphonyElixir.WorkerAuthCacheVerifierTest do
           {:error, :enoent},
           {:ok, %{@stat | type: :symlink}},
           {:ok, %{@stat | mode: 0o644}},
+          {:ok, %{@stat | mode: 0o660}},
           {:ok, %{@stat | size: 0}},
           {:ok, %{@stat | size: 10_000_001}}
         ] do

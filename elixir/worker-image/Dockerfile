@@ -19,7 +19,7 @@ ENV HOME=/tmp \
     NPM_CONFIG_CACHE=/tmp/npm-cache \
     PATH=/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ca-certificates git libstdc++6 passwd \
+ && apt-get install -y --no-install-recommends acl ca-certificates git libstdc++6 passwd \
  && rm -rf /var/lib/apt/lists/* \
  && /usr/sbin/groupadd --gid 10001 symphony \
  && /usr/sbin/useradd --uid 10001 --gid 10001 --home-dir /tmp --no-create-home --shell /usr/sbin/nologin symphony \

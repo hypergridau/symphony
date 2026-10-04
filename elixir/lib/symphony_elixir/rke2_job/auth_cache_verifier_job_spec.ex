@@ -72,6 +72,7 @@ defmodule SymphonyElixir.RKE2Job.AuthCacheVerifierJobSpec do
                  "runAsUser" => 10_001,
                  "runAsGroup" => 10_001,
                  "fsGroup" => 10_001,
+                 "fsGroupChangePolicy" => "OnRootMismatch",
                  "seccompProfile" => %{"type" => "RuntimeDefault"}
                },
                "containers" => [

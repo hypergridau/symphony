@@ -35,6 +35,7 @@ defmodule SymphonyElixir.RKE2JobAuthCacheVerifierJobSpecTest do
     pod_spec = get_in(job, ["spec", "template", "spec"])
     assert pod_spec["automountServiceAccountToken"] == false
     assert pod_spec["serviceAccountName"] == "default"
+    assert pod_spec["securityContext"]["fsGroupChangePolicy"] == "OnRootMismatch"
     assert pod_spec["imagePullSecrets"] == [%{"name" => "ghcr-pull-secret"}]
     refute Map.has_key?(get_in(job, ["spec", "template", "metadata", "labels"]), "app.kubernetes.io/managed-by")
 

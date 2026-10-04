@@ -65,6 +65,19 @@ defmodule SymphonyElixir.RKE2JobProviderTest do
     refute inspect(job) =~ "GITHUB_TOKEN"
   end
 
+  test "rejects changed volume permission policies on an otherwise owned Job", %{client: client} do
+    assert {:ok, job} = JobSpec.compile(assignment(), config())
+    assert {:ok, observed} = Provider.ensure(assignment(), opts(client))
+    assert JobSpec.owned_job?(observed, job)
+    assert get_in(job, ["spec", "template", "spec", "securityContext", "fsGroupChangePolicy"]) == "OnRootMismatch"
+
+    for policy <- ["Always", nil] do
+      altered = put_in(observed, ["spec", "template", "spec", "securityContext", "fsGroupChangePolicy"], policy)
+      refute JobSpec.owned_job?(altered, job)
+      refute JobSpec.owned_job_for_cleanup?(altered, job)
+    end
+  end
+
   test "mounts only the host-selected OAuth slot bound to this signed assignment" do
     assignment = assignment()
 
