@@ -13,10 +13,10 @@ defmodule SymphonyElixir.Worker.OneShot do
   @codex_home "/var/lib/frigga-codex-home"
   @max_addition_bytes 512 * 1024
   @hgs736_issue_uuid "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
-  @hgs736_generation 1
+  @hgs736_generation 3
   @hgs736_constraint_prefix "qualification/hgs-736/"
   @hgs736_no_checkout_constraint "qualification/hgs-736/started-no-checkout/" <>
-                                   @hgs736_issue_uuid <> "/generation-1"
+                                   @hgs736_issue_uuid <> "/generation-3"
 
   @type result :: {:ok, map()} | {:held, String.t(), map()} | {:error, String.t(), map()}
 
