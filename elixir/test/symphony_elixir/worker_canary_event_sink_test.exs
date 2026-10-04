@@ -18,9 +18,63 @@ defmodule SymphonyElixir.WorkerCanaryEventSinkTest do
     assert sink.last_event == :turn_completed
     refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
     assert Sink.summary(Map.put(sink, :unexpected_payload, "synthetic-secret")) == Sink.summary(sink)
+
+    assert Enum.sort(Map.keys(Sink.summary(sink))) ==
+             Enum.sort([
+               :thread_started,
+               :turn_started,
+               :turn_completed,
+               :turn_failed,
+               :error_seen,
+               :item_error_seen,
+               :model_rerouted,
+               :other_item_error_seen,
+               :response_verified,
+               :response_invalid,
+               :overflow,
+               :malformed,
+               :last_event
+             ])
+
     assert inspect(sink) == "#CanaryEventSink<redacted>"
     {acc, collector} = Collectable.into(%Sink{})
     assert collector.(acc, :halt) == :ok
+  end
+
+  test "fragmented exact model reroute prefix retains only sticky classification flags" do
+    event = %{
+      "type" => "item.completed",
+      "item" => %{"type" => "error", "message" => "model rerouted: synthetic-secret-models", "id" => "synthetic-secret-id"}
+    }
+
+    data = Jason.encode!(event) <> "\r\n"
+    sink = Enum.into(for(<<byte <- data>>, do: <<byte>>), %Sink{})
+    assert sink.item_error_seen and sink.model_rerouted
+    refute sink.other_item_error_seen
+    assert sink.buffer == <<>>
+    refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
+
+    warning = Jason.encode!(%{"type" => "item.completed", "item" => %{"type" => "error"}}) <> "\n"
+    sink = Sink.feed(sink, warning <> data)
+    assert sink.item_error_seen and sink.model_rerouted and sink.other_item_error_seen
+    refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
+  end
+
+  test "unrecognized error messages remain failed without inferring a model reroute" do
+    for message <- [nil, 1, %{}, "", "model rerouted:", "Model rerouted: synthetic-secret", " model rerouted: synthetic-secret", "synthetic-secret-warning"] do
+      event = %{"type" => "item.completed", "item" => %{"type" => "error", "message" => message}}
+      sink = Enum.into([Jason.encode!(event) <> "\n"], %Sink{})
+      assert sink.item_error_seen and sink.other_item_error_seen
+      refute sink.model_rerouted
+      refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
+    end
+  end
+
+  test "updated error items do not classify completed model reroutes" do
+    event = %{"type" => "item.updated", "item" => %{"type" => "error", "message" => "model rerouted: synthetic-secret"}}
+    sink = Enum.into([Jason.encode!(event) <> "\n"], %Sink{})
+    refute sink.item_error_seen or sink.model_rerouted or sink.other_item_error_seen
+    refute Jason.encode!(Sink.summary(sink)) =~ "synthetic-secret"
   end
 
   test "updated messages cannot count as a verified response and failures stay sticky" do

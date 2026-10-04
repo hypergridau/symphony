@@ -34,7 +34,16 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
   @auth_file Path.join(@codex_home, "auth.json")
   @max_auth_bytes 10_000_000
   @path "/opt/codex/node_modules/.bin:/usr/local/bin:/usr/bin:/bin"
-  @failed_event_fields [:turn_failed, :error_seen, :item_error_seen, :response_invalid, :overflow, :malformed]
+  @failed_event_fields [
+    :turn_failed,
+    :error_seen,
+    :item_error_seen,
+    :model_rerouted,
+    :other_item_error_seen,
+    :response_invalid,
+    :overflow,
+    :malformed
+  ]
 
   @type outcome :: %{exit_code: 0 | 1, result: map()}
 
@@ -121,7 +130,7 @@ defmodule SymphonyElixir.Worker.AuthCacheVerifier do
     %{
       exit_code: if(passed, do: 0, else: 1),
       result: %{
-        "contractVersion" => "symphony-auth-canary-diagnostic.v1",
+        "contractVersion" => "symphony-auth-canary-diagnostic.v2",
         "status" => if(passed, do: "passed", else: "failed"),
         "phase" => phase,
         "canaryExit" => canary_exit,

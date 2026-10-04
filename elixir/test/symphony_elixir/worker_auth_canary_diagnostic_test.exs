@@ -51,6 +51,8 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
           %{verified() | turn_failed: true},
           %{verified() | error_seen: true},
           %{verified() | item_error_seen: true},
+          %{verified() | model_rerouted: true},
+          %{verified() | other_item_error_seen: true},
           %{verified() | response_invalid: true},
           %{verified() | overflow: true},
           %{verified() | malformed: true}
@@ -85,10 +87,33 @@ defmodule SymphonyElixir.WorkerAuthCanaryDiagnosticTest do
     assert opts[:into] == %Sink{} and opts[:stderr_to_stdout]
     assert opts[:discard_stderr] == true
     assert Enum.sort(Map.keys(result)) == ["canaryExit", "contractVersion", "events", "phase", "status"]
-    assert result["contractVersion"] == "symphony-auth-canary-diagnostic.v1"
+    assert result["contractVersion"] == "symphony-auth-canary-diagnostic.v2"
 
     for key <- ["authCacheStatus", "authCacheBytes", "schemaVersion", "acceptedHead", "cleanupReceipt"] do
       refute Map.has_key?(result, key)
+    end
+  end
+
+  test "a completed verified turn cannot override either completed error item classification" do
+    for message <- ["model rerouted: synthetic-secret", "synthetic-secret-warning", nil] do
+      event = %{"type" => "item.completed", "item" => %{"type" => "error", "message" => message}}
+      sink = Sink.feed(verified(), Jason.encode!(event) <> "\n")
+      caller = self()
+
+      stat = fn _ ->
+        send(caller, :stat)
+        {:ok, @stat}
+      end
+
+      base = %{deps() | stat: stat}
+      outcome = CLI.run(["--diagnose-auth-canary"], @env, Map.put(base, :canary_events, fn -> {sink, 0} end))
+      assert %{exit_code: 1, result: %{"phase" => "canary_response_unverified", "events" => events}} = outcome
+      assert events.item_error_seen
+      assert events.model_rerouted == (message == "model rerouted: synthetic-secret")
+      assert events.other_item_error_seen == (message != "model rerouted: synthetic-secret")
+      assert_receive :stat
+      refute_receive :stat
+      refute Jason.encode!(outcome.result) =~ "synthetic-secret"
     end
   end
 

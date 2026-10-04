@@ -18,6 +18,8 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
             turn_failed: false,
             error_seen: false,
             item_error_seen: false,
+            model_rerouted: false,
+            other_item_error_seen: false,
             response_verified: false,
             response_invalid: false,
             overflow: false,
@@ -55,6 +57,8 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
       turn_failed: state.turn_failed,
       error_seen: state.error_seen,
       item_error_seen: state.item_error_seen,
+      model_rerouted: state.model_rerouted,
+      other_item_error_seen: state.other_item_error_seen,
       response_verified: state.response_verified,
       response_invalid: state.response_invalid,
       overflow: state.overflow,
@@ -111,8 +115,11 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
           %{state | response_invalid: true}
         end
 
+      %{"item" => %{"type" => "error", "message" => "model rerouted: " <> _details}} ->
+        %{state | item_error_seen: true, model_rerouted: true}
+
       %{"item" => %{"type" => "error"}} ->
-        %{state | item_error_seen: true}
+        %{state | item_error_seen: true, other_item_error_seen: true}
 
       _ ->
         state
