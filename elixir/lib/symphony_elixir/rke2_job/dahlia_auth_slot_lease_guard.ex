@@ -15,6 +15,10 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
 
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
+  @hgs733_issue_uuid "b60d9711-d8ed-4a69-8910-570d0b4bbe7a"
+  @hgs733_namespace_prefix "qualification/hgs-733"
+  @hgs733_constraint_prefix "qualification/hgs-733/pre-start-auth-denial/"
+  @hgs733_reason_code "hgs733_pre_start_denial_qualification"
 
   @doc "Reserves one catalogued slot and returns the exact trusted Job configuration."
   @spec prepare_slot(map(), String.t(), map(), term()) :: {:ok, map()} | {:held, atom()}
@@ -126,12 +130,8 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @spec authorize_pre_spawn(map(), map(), map(), term()) ::
           :ok | {:denied, :codex_auth_slot_denied} | {:held, atom()}
   def authorize_pre_spawn(slot, assignment, allocation, context) do
-    with :ok <- matching_assignment?(slot, assignment, context),
-         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
-         true <- claim_uid == slot.claim_uid,
-         {:ok, response} <- pre_spawn_authorization_response(context, slot, allocation) do
-      response
-    else
+    case pre_spawn_slot_ready(slot, assignment, context) do
+      :ok -> authorize_pre_spawn_qualification(slot, assignment, allocation, context)
       _ -> {:held, :codex_auth_slot_authorization_unverified}
     end
   rescue
@@ -384,6 +384,78 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     end
   rescue
     _error -> {:error, :unverified}
+  end
+
+  defp pre_spawn_qualification(%{environment: %{constraints: constraints}} = assignment) when is_list(constraints) do
+    constraints
+    |> Enum.filter(&hgs733_constraint?/1)
+    |> classify_pre_spawn_constraints(constraints, assignment)
+  end
+
+  defp pre_spawn_qualification(%{environment: _environment}), do: :invalid
+
+  defp pre_spawn_qualification(_assignment), do: :ordinary
+
+  defp pre_spawn_slot_ready(slot, assignment, context) do
+    with :ok <- matching_assignment?(slot, assignment, context),
+         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
+         true <- claim_uid == slot.claim_uid do
+      :ok
+    end
+  end
+
+  defp authorize_pre_spawn_qualification(slot, assignment, allocation, context) do
+    case pre_spawn_qualification(assignment) do
+      :ordinary -> authorize_pre_spawn_slot(context, slot, allocation)
+      :hgs733 -> authorize_qualified_pre_spawn_slot(context, slot, allocation)
+      :invalid -> {:held, :codex_auth_slot_authorization_unverified}
+    end
+  end
+
+  defp authorize_pre_spawn_slot(context, slot, allocation) do
+    case pre_spawn_authorization_response(context, slot, allocation) do
+      {:ok, response} -> response
+      _ -> {:held, :codex_auth_slot_authorization_unverified}
+    end
+  end
+
+  defp authorize_qualified_pre_spawn_slot(context, slot, allocation) do
+    case quarantine_qualified_slot(context, slot) do
+      :ok -> authorize_pre_spawn_slot(context, slot, allocation)
+      _ -> {:held, :codex_auth_slot_authorization_unverified}
+    end
+  end
+
+  defp hgs733_constraint?(constraint) do
+    is_binary(constraint) and String.starts_with?(constraint, @hgs733_namespace_prefix)
+  end
+
+  defp classify_pre_spawn_constraints([], _constraints, _assignment), do: :ordinary
+
+  defp classify_pre_spawn_constraints([constraint], constraints, assignment)
+       when constraints == [constraint] do
+    qualify_hgs733_constraint(constraint, assignment)
+  end
+
+  defp classify_pre_spawn_constraints(_hgs733_constraints, _constraints, _assignment), do: :invalid
+
+  defp qualify_hgs733_constraint(
+         constraint,
+         %{lease: %{issue_id: @hgs733_issue_uuid, generation: generation}}
+       )
+       when is_integer(generation) and generation > 0 do
+    if constraint == @hgs733_constraint_prefix <> @hgs733_issue_uuid <> "/generation-#{generation}",
+      do: :hgs733,
+      else: :invalid
+  end
+
+  defp qualify_hgs733_constraint(_constraint, _assignment), do: :invalid
+
+  defp quarantine_qualified_slot(context, slot) do
+    case post(context, "/" <> slot.lease_id <> "/quarantine", %{reasonCode: @hgs733_reason_code}) do
+      {:ok, %{"quarantined" => true}} -> :ok
+      _ -> {:error, :quarantine_unverified}
+    end
   end
 
   defp pre_spawn_authorization_response(context, slot, allocation) do

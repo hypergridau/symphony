@@ -1565,6 +1565,8 @@ RKE2Job.ManagedExecutorAdapter.prepare_abort_unstarted_owned/4 returns a credent
 
 The caller stores the root receipt sequence and hash with the intent. It replays that exact intent on provider retries and immediately before confirmation, requiring the same receipt. Confirmation derives the claim from current witness inputs, pins the concrete `JournalPrepareAckGuard`, and uses the journaled observation. The pool is part of the journal identity. Production use requires configured host journal/workspace roots and rejects test-only provider transport and witness injection.
 
+The HGS-733 pre-start denial qualifier is accepted only when the complete signed environment constraint list is exactly one `qualification/hgs-733/pre-start-auth-denial/<issue-uuid>/generation-<n>` value matching the exact issue UUID and positive assignment generation. After the normal host path binds the lease to the suspended Job UID, the guard uses Dahlia's existing lease-quarantine endpoint and then performs its ordinary authorize request; only Dahlia's exact `codex_auth_slot_denied` response enters the existing durable abort path. Any other HGS-733 namespace value, extra constraint, identity mismatch or uncertain quarantine remains held before authorization.
+
 ### Uncertain root spawn intent
 
 After `WorkPackageClaim.begin_spawn/2` writes `spawn_started`, a lost root witness
