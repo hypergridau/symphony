@@ -284,13 +284,27 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
 
   defp confirm_with_checkpoint(client, context, expected, uid, observation, claim, opts) do
     case Keyword.get(opts, :confirmed_delete_journal) do
-      %{journal_root: root, claim: journal_claim, record: record} ->
+      %{
+        journal_root: root,
+        claim: journal_claim,
+        record: record,
+        disposal_receipt_sha256: disposal_receipt_sha256
+      } ->
         case AbortPrepareJournal.load_confirmed_delete(root, journal_claim, record, uid) do
-          {:ok, _checkpoint} ->
+          {:ok, %{"disposal_receipt_sha256" => ^disposal_receipt_sha256}} ->
             verify_confirmed_delete_replay(client, context, expected, uid, claim)
 
+          {:ok, _checkpoint} ->
+            {:held, :abort_prepare_confirmed_delete_checkpoint_conflict}
+
           :missing ->
-            checkpoint_context = %{journal_root: root, claim: journal_claim, record: record}
+            checkpoint_context = %{
+              journal_root: root,
+              claim: journal_claim,
+              record: record,
+              disposal_receipt_sha256: disposal_receipt_sha256
+            }
+
             verify_and_delete(client, context, expected, uid, observation, claim, checkpoint_context)
 
           {:held, _reason} = held ->
@@ -336,8 +350,25 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
 
   defp record_confirmed_delete(nil, _uid, _pod_evidence), do: :ok
 
-  defp record_confirmed_delete(%{journal_root: root, claim: claim, record: record}, uid, pod_evidence),
-    do: AbortPrepareJournal.record_confirmed_delete(root, claim, record, uid, pod_evidence)
+  defp record_confirmed_delete(
+         %{
+           journal_root: root,
+           claim: claim,
+           record: record,
+           disposal_receipt_sha256: disposal_receipt_sha256
+         },
+         uid,
+         pod_evidence
+       ),
+       do:
+         AbortPrepareJournal.record_confirmed_delete(
+           root,
+           claim,
+           record,
+           uid,
+           pod_evidence,
+           disposal_receipt_sha256
+         )
 
   defp delete_and_confirm(client, context, expected, uid, observation, claim) do
     namespace = get_in(expected, ["metadata", "namespace"])

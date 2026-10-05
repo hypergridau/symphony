@@ -76,13 +76,16 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
          :ok <- revalidate_root_intent(record, caller_context, claim),
          :ok <- verify_retained_abort_result(allocation, assignment, caller_context),
          true <- is_map(Map.get(prepared, :prepare_ack)),
-         {:ok, _disposal_receipt} <-
+         {:ok, disposal_receipt_sha256} <-
            verify_and_record_disposal(claim, record, allocation, assignment, caller_context) do
       context =
         caller_context.adapter_context
         |> Map.put(:prepare_ack_guard, JournalPrepareAckGuard)
         |> Map.put(:prepare_ack_guard_context, %{journal_root: caller_context.journal_root, claim: claim})
-        |> Map.put(:confirmed_delete_journal, confirmed_delete_journal(caller_context, claim, record))
+        |> Map.put(
+          :confirmed_delete_journal,
+          confirmed_delete_journal(caller_context, claim, record, disposal_receipt_sha256)
+        )
 
       with :ok <-
              ManagedExecutorAdapter.confirm_abort_unstarted_owned(
@@ -435,13 +438,47 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   end
 
   defp verify_and_record_disposal(claim, record, allocation, assignment, context) do
+    case disposal_request(claim, record, allocation, assignment, context) do
+      {:ok, request, expected} ->
+        uid = get_in(record.observation, ["job", "uid"])
+
+        case AbortPrepareJournal.load_confirmed_delete(context.journal_root, claim, record, uid) do
+          {:ok, checkpoint} ->
+            AbortPrepareJournal.load_confirmed_disposal_proof(
+              context.journal_root,
+              claim,
+              record,
+              request,
+              expected,
+              checkpoint
+            )
+
+          :missing ->
+            verify_new_disposal(claim, record, request, expected, context)
+
+          {:held, _reason} = held ->
+            held
+        end
+
+      {:held, _reason} = held ->
+        held
+
+      _ ->
+        {:held, :root_abort_input_disposal_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp verify_new_disposal(claim, record, request, expected, context) do
     publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
 
     with true <-
            is_atom(publisher) and Code.ensure_loaded?(publisher) and
              (function_exported?(publisher, :verify_disposal, 1) or
                 (@test_environment and function_exported?(publisher, :verify_disposal, 2))),
-         {:ok, request, expected} <- disposal_request(claim, record, allocation, assignment, context),
          {:ok, response} <- call_disposal_verifier(publisher, request, expected),
          :ok <- RootAbortInputPublisher.validate_disposal_response(response, request),
          true <- disposal_response_matches?(response, record, expected),
@@ -489,8 +526,13 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     )
   end
 
-  defp confirmed_delete_journal(context, claim, record),
-    do: %{journal_root: context.journal_root, claim: claim, record: record}
+  defp confirmed_delete_journal(context, claim, record, disposal_receipt_sha256),
+    do: %{
+      journal_root: context.journal_root,
+      claim: claim,
+      record: record,
+      disposal_receipt_sha256: disposal_receipt_sha256
+    }
 
   defp call_disposal_verifier(publisher, request, expected) do
     if @test_environment and function_exported?(publisher, :verify_disposal, 2),

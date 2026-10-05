@@ -6,8 +6,10 @@ defmodule SymphonyElixir.RKE2Job.PreSpawnAbortControllerTest do
   alias SymphonyElixir.{ExecutionFence, ManagedAssignmentBundle, Orchestrator, ResponsibilityGraph, WorkPackageClaim}
   alias SymphonyElixir.ExecutionFence.Persistence
   alias SymphonyElixir.GlobalPause
+  alias SymphonyElixir.ManagedExecutor.AbortResultPublisher
   alias SymphonyElixir.ManagedExecutor.ClaimBinding
   alias SymphonyElixir.ManagedExecutor.Record
+  alias SymphonyElixir.RKE2Job.AbortPrepareJournal
   alias SymphonyElixir.RKE2Job.{HostAllocationContext, JobSpec, PreSpawnAbortController, SuspendedController}
   alias SymphonyElixir.RKE2Job.ManagedExecutorAdapter
   alias SymphonyElixir.Tracker.Issue
@@ -94,6 +96,15 @@ defmodule SymphonyElixir.RKE2Job.PreSpawnAbortControllerTest do
 
     def verify_bound(_slot, _assignment, _allocation, _context) do
       send(:persistent_term.get({__MODULE__, :owner}), :slot_binding_verified)
+      :ok
+    end
+
+    def release(slot, assignment, allocation, guard_context) do
+      assertion = :persistent_term.get({__MODULE__, :release_assertion})
+      :ok = assertion.(slot, assignment, allocation, guard_context)
+      owner = :persistent_term.get({__MODULE__, :owner})
+      send(owner, {:auth_slot_released, slot.lease_id, assignment.sha256, allocation.id})
+      Process.put(:abort_lifecycle_events, Process.get(:abort_lifecycle_events, []) ++ [:auth_slot_release])
       :ok
     end
   end
@@ -323,9 +334,49 @@ defmodule SymphonyElixir.RKE2Job.PreSpawnAbortControllerTest do
         client_context_provider: FakeClientContext,
         client_context_provider_context: %{agent: client_agent},
         auth_slot_lease_guard: FakeSlotGuard,
-        auth_slot_lease_guard_context: nil,
+        auth_slot_lease_guard_context: %{},
         abort_result_journal_root: fixture.result_root
       })
+
+    :persistent_term.put(
+      {FakeSlotGuard, :release_assertion},
+      fn slot, assignment, allocation, guard_context ->
+        assert slot.lease_id == config(assignment).auth_slot.lease_id
+        assert guard_context.result_journal_root == fixture.result_root
+
+        {:ok, result_reference} = AbortResultPublisher.reference_for_assignment(assignment)
+
+        result_path =
+          Path.join(
+            fixture.result_root,
+            (:crypto.hash(:sha256, result_reference) |> Base.encode16(case: :lower)) <> ".abort-result.json"
+          )
+
+        result_record = Jason.decode!(File.read!(result_path))
+        assert result_record["assignment_digest"] == assignment.sha256
+        assert result_record["allocation_id"] == allocation.id
+
+        [checkpoint_path] = Path.wildcard(Path.join(host.abort_journal_root, "*.confirmed-delete.json"))
+        checkpoint = Jason.decode!(File.read!(checkpoint_path))
+        [deleted_uid] = Agent.get(client_agent, & &1.deletes)
+        assert checkpoint["job_uid"] == deleted_uid
+        assert checkpoint["allocation_id"] == allocation.id
+        assert checkpoint["assignment_digest"] == assignment.sha256
+        assert Regex.match?(~r/\A[a-f0-9]{64}\z/, checkpoint["disposal_receipt_sha256"])
+        {:ok, claim_hash} = AbortPrepareJournal.identity_key(checkpoint["claim"])
+
+        proof_path =
+          Path.join(
+            host.abort_journal_root,
+            claim_hash <> ".disposal-" <> checkpoint["disposal_receipt_sha256"] <> ".json"
+          )
+
+        assert File.regular?(proof_path)
+        :ok
+      end
+    )
+
+    on_exit(fn -> :persistent_term.erase({FakeSlotGuard, :release_assertion}) end)
 
     post_fun = fn _url, options ->
       request = Jason.decode!(Keyword.fetch!(options, :body))
@@ -368,6 +419,10 @@ defmodule SymphonyElixir.RKE2Job.PreSpawnAbortControllerTest do
     assert :ok = cleanup_result
 
     assert_receive :abort_job_read
+    assert_receive {:auth_slot_released, lease_id, assignment_digest, released_allocation_id}
+    assert lease_id == config(fixture.assignment).auth_slot.lease_id
+    assert assignment_digest == fixture.assignment.sha256
+    assert released_allocation_id == fixture.allocation_id
     assert_receive {:provider_prepare, _prepare_id, allocation_id}
     assert allocation_id == fixture.allocation_id
     assert_receive {:root_prepare_intent, _prepare_id, request_hash}
@@ -380,8 +435,12 @@ defmodule SymphonyElixir.RKE2Job.PreSpawnAbortControllerTest do
     events = Process.get(:abort_lifecycle_events)
     disposal_index = Enum.find_index(events, &(&1 == :root_disposal_verification))
     delete_index = Enum.find_index(events, &(&1 == :worker_delete))
+    release_index = Enum.find_index(events, &(&1 == :auth_slot_release))
+    publication_index = Enum.find_index(events, &(&1 == :root_abort_inputs))
     assert is_integer(disposal_index) and is_integer(delete_index)
     assert disposal_index < delete_index
+    assert is_integer(release_index) and is_integer(publication_index)
+    assert delete_index < release_index and release_index < publication_index
     assert Agent.get(client_agent, &map_size(&1.jobs)) == 0
     assert :ok = PreSpawnAbortController.unused_worker(released_input, fixture.assignment, reservation, true)
   end
