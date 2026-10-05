@@ -289,8 +289,11 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       qualification_assignment(valid, @hgs733_issue_uuid, 2),
       qualification_assignment(valid, "11111111-2222-4333-8444-555555555598", 3),
       qualification_assignment(valid <> "-extra", @hgs733_issue_uuid, 3),
+      qualification_assignment("qualification/hgs-733/", @hgs733_issue_uuid, 3),
+      qualification_assignment("qualification/hgs-733/pre-start-auth-denial", @hgs733_issue_uuid, 3),
       qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, valid]),
-      qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, "qualification/hgs-736/other"])
+      qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, "qualification/hgs-736/other"]),
+      qualification_assignment(valid, @hgs733_issue_uuid, 3, ["repository", valid])
     ]
 
     for assignment <- invalid_assignments do
@@ -301,6 +304,18 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
                DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
 
       refute_receive :unexpected_hgs733_provider_request
+    end
+  end
+
+  test "ordinary pre-spawn authorization maps provider failures to a held result" do
+    for response <- [
+          {:error, :timeout},
+          {:ok, %Req.Response{status: 503, body: %{"error" => %{"code" => "unavailable"}}}}
+        ] do
+      context = pre_spawn_context(fn _url, _opts -> response end)
+
+      assert {:held, :codex_auth_slot_authorization_unverified} =
+               DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
     end
   end
 

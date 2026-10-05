@@ -16,6 +16,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
   @hgs733_issue_uuid "b60d9711-d8ed-4a69-8910-570d0b4bbe7a"
+  @hgs733_namespace_prefix "qualification/hgs-733/"
   @hgs733_constraint_prefix "qualification/hgs-733/pre-start-auth-denial/"
   @hgs733_reason_code "hgs733_pre_start_denial_qualification"
 
@@ -134,7 +135,11 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
          true <- claim_uid == slot.claim_uid do
       case pre_spawn_qualification(assignment) do
         :ordinary ->
-          with {:ok, response} <- pre_spawn_authorization_response(context, slot, allocation), do: response
+          with {:ok, response} <- pre_spawn_authorization_response(context, slot, allocation) do
+            response
+          else
+            _ -> {:held, :codex_auth_slot_authorization_unverified}
+          end
 
         :hgs733 ->
           with :ok <- quarantine_qualified_slot(context, slot),
@@ -403,14 +408,13 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   end
 
   defp pre_spawn_qualification(%{environment: %{constraints: constraints}} = assignment) when is_list(constraints) do
-    task_constraints = Enum.filter(constraints, &(is_binary(&1) and String.starts_with?(&1, "qualification/")))
-    hgs733_constraints = Enum.filter(task_constraints, &String.starts_with?(&1, @hgs733_constraint_prefix))
+    hgs733_constraints = Enum.filter(constraints, &(is_binary(&1) and String.starts_with?(&1, @hgs733_namespace_prefix)))
 
     case hgs733_constraints do
       [] ->
         :ordinary
 
-      [constraint] when length(task_constraints) == 1 ->
+      [constraint] when constraints == [constraint] ->
         case Map.get(assignment, :lease) do
           %{issue_id: @hgs733_issue_uuid, generation: generation} when is_integer(generation) and generation > 0 ->
             if constraint == @hgs733_constraint_prefix <> @hgs733_issue_uuid <> "/generation-#{generation}",
