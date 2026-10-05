@@ -4,6 +4,8 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
   alias SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard
 
   @digest String.duplicate("a", 64)
+  @hgs733_issue_uuid "b60d9711-d8ed-4a69-8910-570d0b4bbe7a"
+  @hgs733_reason_code "hgs733_pre_start_denial_qualification"
   @lease_id "12345678-1234-4123-8123-123456789abc"
   @pvc_uid "pvc-uid-one"
   @slot %{
@@ -240,6 +242,101 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
 
     assert {:denied, :codex_auth_slot_denied} =
              DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, denied)
+  end
+
+  test "the exact signed HGS733 constraint quarantines the bound lease before normal authorization" do
+    plug = {__MODULE__, make_ref()}
+    constraint = "qualification/hgs-733/pre-start-auth-denial/#{@hgs733_issue_uuid}/generation-3"
+    assignment = qualification_assignment(constraint, @hgs733_issue_uuid, 3)
+
+    Req.Test.expect(plug, 4, fn conn ->
+      assert conn.method == "POST"
+      assert conn.host == "dahlia.example"
+      assert conn.scheme == :https
+      assert Plug.Conn.get_req_header(conn, "authorization") == ["Bearer host-only-token"]
+
+      if String.ends_with?(conn.request_path, "/quarantine") do
+        assert conn.request_path == "/runner/v1/verified-assignments/reservation-one/codex-auth-slots/#{@lease_id}/quarantine"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body) == %{"reasonCode" => @hgs733_reason_code}
+        conn |> Plug.Conn.put_resp_header("cache-control", "no-store") |> Req.Test.json(%{"data" => %{"quarantined" => true}})
+      else
+        assert conn.request_path == "/runner/v1/verified-assignments/reservation-one/codex-auth-slots/#{@lease_id}/authorize"
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert Jason.decode!(body) == %{"allocationId" => @allocation.id}
+
+        conn
+        |> Plug.Conn.put_resp_header("cache-control", "no-store")
+        |> Plug.Conn.put_resp_header("content-type", "application/json")
+        |> Plug.Conn.send_resp(409, Jason.encode!(slot_denial_body()))
+      end
+    end)
+
+    context =
+      pre_spawn_context(fn url, opts -> Req.post(url, Keyword.put(opts, :plug, {Req.Test, plug})) end)
+
+    assert {:denied, :codex_auth_slot_denied} =
+             DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
+
+    assert {:denied, :codex_auth_slot_denied} =
+             DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
+  end
+
+  test "HGS733 constraint mismatches and malformed variants stop before the provider" do
+    valid = "qualification/hgs-733/pre-start-auth-denial/#{@hgs733_issue_uuid}/generation-3"
+
+    invalid_assignments = [
+      qualification_assignment(valid, @hgs733_issue_uuid, 2),
+      qualification_assignment(valid, "11111111-2222-4333-8444-555555555598", 3),
+      qualification_assignment(valid <> "-extra", @hgs733_issue_uuid, 3),
+      qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, valid]),
+      qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, "qualification/hgs-736/other"])
+    ]
+
+    for assignment <- invalid_assignments do
+      caller = self()
+      context = pre_spawn_context(fn _, _ -> send(caller, :unexpected_hgs733_provider_request) end)
+
+      assert {:held, :codex_auth_slot_authorization_unverified} =
+               DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
+
+      refute_receive :unexpected_hgs733_provider_request
+    end
+  end
+
+  test "an uncertain HGS733 quarantine holds without attempting authorization" do
+    caller = self()
+
+    for outcome <- [:timeout, :unverified_response, :unavailable] do
+      plug = {__MODULE__, make_ref()}
+
+      Req.Test.expect(plug, fn conn ->
+        send(caller, {:hgs733_request, conn.request_path})
+        assert String.ends_with?(conn.request_path, "/quarantine")
+
+        case outcome do
+          :timeout -> Req.Test.transport_error(conn, :timeout)
+          :unverified_response -> Req.Test.json(conn, %{"data" => %{"quarantined" => false}})
+          :unavailable -> Plug.Conn.send_resp(conn, 503, "unavailable")
+        end
+      end)
+
+      assignment =
+        qualification_assignment(
+          "qualification/hgs-733/pre-start-auth-denial/#{@hgs733_issue_uuid}/generation-3",
+          @hgs733_issue_uuid,
+          3
+        )
+
+      context = pre_spawn_context(fn url, opts -> Req.post(url, Keyword.put(opts, :plug, {Req.Test, plug})) end)
+
+      assert {:held, :codex_auth_slot_authorization_unverified} =
+               DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
+
+      assert_receive {:hgs733_request, path}
+      assert String.ends_with?(path, "/quarantine")
+      refute_receive {:hgs733_request, _}
+    end
   end
 
   test "pre-spawn authorization holds malformed conflicts and unavailable responses" do
@@ -526,6 +623,13 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       pvc_namespace: "frigga",
       pvc_read_fun: &read_pvc/3
     }
+  end
+
+  defp qualification_assignment(constraint, issue_uuid, generation, constraints \\ nil) do
+    Map.merge(@assignment, %{
+      environment: %{constraints: constraints || [constraint]},
+      lease: %{issue_id: issue_uuid, generation: generation}
+    })
   end
 
   defp slot_denial_body do
