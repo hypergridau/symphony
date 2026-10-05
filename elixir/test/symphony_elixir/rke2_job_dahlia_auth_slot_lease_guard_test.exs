@@ -289,6 +289,7 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       qualification_assignment(valid, @hgs733_issue_uuid, 2),
       qualification_assignment(valid, "11111111-2222-4333-8444-555555555598", 3),
       qualification_assignment(valid <> "-extra", @hgs733_issue_uuid, 3),
+      qualification_assignment("qualification/hgs-733x/pre-start-auth-denial/#{@hgs733_issue_uuid}/generation-3", @hgs733_issue_uuid, 3),
       qualification_assignment("qualification/hgs-733/", @hgs733_issue_uuid, 3),
       qualification_assignment("qualification/hgs-733/pre-start-auth-denial", @hgs733_issue_uuid, 3),
       qualification_assignment(valid, @hgs733_issue_uuid, 3, [valid, valid]),
@@ -317,6 +318,21 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
       assert {:held, :codex_auth_slot_authorization_unverified} =
                DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
     end
+  end
+
+  test "an unrelated qualification namespace keeps ordinary pre-spawn authorization" do
+    caller = self()
+    assignment = Map.merge(@assignment, %{environment: %{constraints: ["qualification/hgs-736/example"]}})
+
+    context =
+      pre_spawn_context(fn url, _opts ->
+        send(caller, {:ordinary_authorize_request, url})
+        {:ok, %Req.Response{status: 200, body: %{"data" => %{"authorized" => true}}}}
+      end)
+
+    assert :ok = DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, assignment, @allocation, context)
+    assert_receive {:ordinary_authorize_request, url}
+    assert String.ends_with?(url, "/#{@lease_id}/authorize")
   end
 
   test "an uncertain HGS733 quarantine holds without attempting authorization" do

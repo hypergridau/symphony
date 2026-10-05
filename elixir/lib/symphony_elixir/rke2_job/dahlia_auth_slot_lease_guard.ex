@@ -16,7 +16,7 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   @connect_timeout_ms 5_000
   @request_timeout_ms 10_000
   @hgs733_issue_uuid "b60d9711-d8ed-4a69-8910-570d0b4bbe7a"
-  @hgs733_namespace_prefix "qualification/hgs-733/"
+  @hgs733_namespace_prefix "qualification/hgs-733"
   @hgs733_constraint_prefix "qualification/hgs-733/pre-start-auth-denial/"
   @hgs733_reason_code "hgs733_pre_start_denial_qualification"
 
