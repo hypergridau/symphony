@@ -56,6 +56,9 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
   alias SymphonyElixir.RKE2JobFakeClient
   alias SymphonyElixir.WorkPackageClaim.HostWitness
 
+  @paired_dahlia_dir System.get_env("HGS733_DAHLIA_SYMPHONY_DIR")
+  @paired_dahlia_skip is_nil(@paired_dahlia_dir)
+
   setup do
     if match?({:win32, _}, :os.type()), do: Process.put(:abort_prepare_journal_windows_test_only, true)
 
@@ -1127,6 +1130,31 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     refute Enum.any?(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
   end
 
+  @tag skip: @paired_dahlia_skip
+  test "confirm validates a caller-produced credential_lease_denied result with Dahlia", context do
+    assert_paired_confirmation(:credential_lease_denied, context)
+  end
+
+  @tag skip: @paired_dahlia_skip
+  test "confirm validates a caller-produced codex_auth_slot_denied result with Dahlia", context do
+    assert_paired_confirmation(:codex_auth_slot_denied, context)
+  end
+
+  @tag skip: @paired_dahlia_skip
+  test "the real Dahlia verifier rejects a tampered caller result before deletion", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    caller = %{caller | pre_execution_result: blocked_result(assignment, :credential_lease_denied)}
+    retain_result(caller, allocation, assignment)
+
+    install_paired_verifier(caller, assignment, prepared, "unsupported_reason")
+
+    assert {:held, :root_abort_input_disposal_unavailable} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Process.get(:paired_dahlia_verifier_output) =~ "blocked result abort reason unsupported"
+    assert Agent.get(context.client, & &1.deletes) == []
+  end
+
   test "disposal proof checkpoints are immutable across post-delete replay", context do
     {assignment, allocation, caller, prepared} = prepared_fixture(context)
     retain_result(caller, allocation, assignment)
@@ -1600,6 +1628,68 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     caller = caller_context(context, adapter, witness, post)
     {:ok, prepared} = AbortPrepareCaller.prepare(allocation, assignment, key(assignment), caller)
     {assignment, allocation, caller, prepared}
+  end
+
+  defp install_paired_verifier(caller, assignment, prepared, tamper) do
+    Process.put(:abort_root_input_disposal_fun, fn request ->
+      payload = paired_verifier_payload(caller, assignment, prepared, request, tamper)
+
+      case run_paired_verifier(payload) do
+        {:ok, response} ->
+          {:ok, response}
+
+        {:denied, output} ->
+          Process.put(:paired_dahlia_verifier_output, output)
+          {:held, :root_abort_input_disposal_unavailable}
+      end
+    end)
+  end
+
+  defp assert_paired_confirmation(reason, context) do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    caller = %{caller | pre_execution_result: blocked_result(assignment, reason)}
+    retain_result(caller, allocation, assignment)
+    install_paired_verifier(caller, assignment, prepared, nil)
+
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  defp paired_verifier_payload(caller, assignment, prepared, request, tamper) do
+    claim = prepared.prepare_ack_guard_context.claim
+    {:ok, record} = AbortPrepareJournal.load(caller.journal_root, claim)
+    result_record = caller |> result_path(assignment) |> File.read!() |> Jason.decode!()
+    result_bytes = Base.decode64!(result_record["result_base64"])
+
+    %{
+      "claim" => claim,
+      "request" => request,
+      "prepareRequestBytes" => Base.encode64(record.request_bytes),
+      "observation" => record.observation,
+      "acknowledgement" => prepared.prepare_ack,
+      "resultBytes" => Base.encode64(result_bytes),
+      "tamper" => tamper
+    }
+  end
+
+  defp run_paired_verifier(payload) do
+    python = System.get_env("HGS733_PYTHON") || System.find_executable("python3") || System.find_executable("python")
+    support = Path.join(File.cwd!(), "test/support/pre_execution_abort_dahlia_bridge.py")
+    fixture_dir = @paired_dahlia_dir
+    payload_path = Path.join(System.tmp_dir!(), "symphony-dahlia-pair-#{System.unique_integer([:positive])}.json")
+    :ok = File.write(payload_path, Jason.encode!(payload))
+
+    try do
+      case System.cmd(python, ["-B", support, fixture_dir, payload_path],
+             stderr_to_stdout: true,
+             env: [{"PYTHONDONTWRITEBYTECODE", "1"}]
+           ) do
+        {output, 0} -> {:ok, Jason.decode!(output)}
+        {output, _status} -> {:denied, output}
+      end
+    after
+      File.rm(payload_path)
+    end
   end
 
   defp confirm_after_restart(allocation, assignment, caller, publisher) do
