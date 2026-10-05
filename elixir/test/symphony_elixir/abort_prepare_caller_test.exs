@@ -73,6 +73,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     Process.put(:abort_root_input_disposal_calls, 0)
     Process.put(:abort_root_input_publish_calls, 0)
     Process.put(:abort_prepare_release_calls, 0)
+    Process.delete(:abort_root_input_disposal_fun)
     Process.delete(:abort_prepare_slot_release_fun)
     Process.delete(:abort_root_input_publish_fun)
 
@@ -1184,6 +1185,10 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     {:ok, result_reference} = AbortResultPublisher.reference_for_assignment(assignment)
     result_journal = Path.join(caller.adapter_context.abort_result_journal_root, sha256(result_reference) <> ".abort-result.json")
     assert decoded["result_sha256"] == Jason.decode!(File.read!(result_journal))["sha256"]
+    {:ok, record} = AbortPrepareJournal.load(context.root, prepared.prepare_ack_guard_context.claim)
+    uid = get_in(record.observation, ["job", "uid"])
+    assert {:ok, delete_checkpoint} = AbortPrepareJournal.load_confirmed_delete(context.root, record.claim, record, uid)
+    assert delete_checkpoint["disposal_receipt_sha256"] == decoded["receipt_sha256"]
     assert Process.get(:abort_root_input_disposal_calls) == 1
 
     Process.sleep(2)
@@ -1193,6 +1198,70 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert File.read!(Path.join(context.root, proof_file)) == proof_bytes
     assert Process.get(:abort_root_input_disposal_calls) == 1
     assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "a saved proof before deletion cannot bypass a fresh rejecting verifier", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    Agent.update(context.client, &Map.put(&1, :delete_error, :temporary_delete_denial))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Process.get(:abort_root_input_disposal_calls) == 1
+    assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
+    assert length(Agent.get(context.client, & &1.deletes)) == 0
+    {:ok, claim} = AbortPrepareJournal.identity_key(prepared.prepare_ack_guard_context.claim)
+    refute File.exists?(Path.join(context.root, claim <> ".confirmed-delete.json"))
+
+    Process.put(:abort_root_input_disposal_fun, fn _request -> {:held, :fresh_disposal_readback_denied} end)
+
+    assert {:held, :fresh_disposal_readback_denied} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Process.get(:abort_root_input_disposal_calls) == 2
+    assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
+    assert length(Agent.get(context.client, & &1.deletes)) == 0
+  end
+
+  test "confirmed deletion binds the fresh receipt among multiple saved proofs", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    Agent.update(context.client, &Map.put(&1, :delete_error, :temporary_delete_denial))
+
+    assert {:held, :suspended_abort_delete_uncertain} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    [first_proof] = Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
+    first_receipt = Jason.decode!(File.read!(Path.join(context.root, first_proof)))["receipt_sha256"]
+
+    Process.put(:abort_root_input_disposal_fun, fn _request ->
+      {:ok, %{"observedAt" => DateTime.add(DateTime.utc_now(), -10, :second) |> DateTime.to_iso8601()}}
+    end)
+
+    Agent.update(context.client, &Map.put(&1, :delete_error, nil))
+
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    proofs = Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
+    assert length(proofs) == 2
+    {:ok, record} = AbortPrepareJournal.load(context.root, prepared.prepare_ack_guard_context.claim)
+    uid = get_in(record.observation, ["job", "uid"])
+    assert {:ok, checkpoint} = AbortPrepareJournal.load_confirmed_delete(context.root, record.claim, record, uid)
+    refute checkpoint["disposal_receipt_sha256"] == first_receipt
+
+    assert Enum.any?(proofs, fn proof ->
+             Jason.decode!(File.read!(Path.join(context.root, proof)))["receipt_sha256"] ==
+               checkpoint["disposal_receipt_sha256"]
+           end)
+
+    calls = Process.get(:abort_root_input_disposal_calls)
+    deletes = Agent.get(context.client, & &1.deletes)
+    Process.put(:abort_root_input_disposal_fun, fn _request -> flunk("replay requested a new disposal readback") end)
+
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert Process.get(:abort_root_input_disposal_calls) == calls
+    assert Agent.get(context.client, & &1.deletes) == deletes
   end
 
   test "release follows confirmed deletion and a publication replay reuses the saved proof without deleting a new owner", context do
@@ -1210,6 +1279,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       assert File.regular?(result_path(caller, assignment))
       {:ok, record} = AbortPrepareJournal.load(context.root, claim)
       assert {:ok, _checkpoint} = AbortPrepareJournal.load_confirmed_delete(context.root, claim, record, uid)
+
       Process.put(:abort_prepare_release_calls, Process.get(:abort_prepare_release_calls, 0) + 1)
       :ok
     end)
@@ -1230,6 +1300,30 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert Process.get(:abort_root_input_publish_calls) == 1
     assert Process.get(:abort_root_input_disposal_calls) == 1
 
+    {:ok, record} = AbortPrepareJournal.load(context.root, claim)
+    {:ok, delete_checkpoint} = AbortPrepareJournal.load_confirmed_delete(context.root, claim, record, uid)
+    {:ok, claim_hash} = AbortPrepareJournal.identity_key(claim)
+    receipt_hash = delete_checkpoint["disposal_receipt_sha256"]
+    proof_path = Path.join(context.root, claim_hash <> ".disposal-" <> receipt_hash <> ".json")
+    proof = Jason.decode!(File.read!(proof_path))
+
+    stale_response =
+      Map.put(
+        proof["response"],
+        "observedAt",
+        DateTime.add(DateTime.utc_now(), -301, :second) |> DateTime.to_iso8601()
+      )
+
+    stale_receipt_hash = sha256(Jason.encode!(stale_response))
+    stale_proof_path = Path.join(context.root, claim_hash <> ".disposal-" <> stale_receipt_hash <> ".json")
+
+    :ok = File.write(stale_proof_path, Jason.encode!(%{proof | "response" => stale_response, "receipt_sha256" => stale_receipt_hash}))
+    :ok = File.chmod(stale_proof_path, 0o600)
+    checkpoint_path = Path.join(context.root, claim_hash <> ".confirmed-delete.json")
+    stale_checkpoint = Map.put(delete_checkpoint, "disposal_receipt_sha256", stale_receipt_hash)
+    :ok = File.write(checkpoint_path, Jason.encode!(stale_checkpoint))
+    :ok = File.chmod(checkpoint_path, 0o600)
+
     replacement = %{"metadata" => %{"uid" => "replacement-owner"}}
     Agent.update(context.client, &put_in(&1, [:jobs, job_key], replacement))
 
@@ -1248,7 +1342,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert Process.get(:abort_root_input_publish_calls) == 2
     assert Process.get(:abort_root_input_disposal_calls) == 1
     assert Agent.get(context.client, & &1.deletes) == [uid]
-    assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
+    assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 2
   end
 
   test "a reference alone cannot authorize deletion without the retained typed result", context do
@@ -1865,7 +1959,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
         nonce_sha256: :crypto.hash(:sha256, "secret-nonce") |> Base.encode16(case: :lower)
       },
       auth_slot_lease_guard: SymphonyElixir.AbortPrepareTestSlotGuard,
-      auth_slot_lease_guard_context: nil,
+      auth_slot_lease_guard_context: %{},
       result_journal_root: context.result_root,
       config: %{
         namespace: "symphony-beta",

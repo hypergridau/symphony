@@ -161,8 +161,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     _ -> {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
   end
 
-  @spec record_confirmed_delete(Path.t(), map(), map(), String.t(), map()) :: :ok | {:held, atom()}
-  def record_confirmed_delete(root, claim, record, uid, pod_evidence) do
+  @spec record_confirmed_delete(Path.t(), map(), map(), String.t(), map(), String.t()) :: :ok | {:held, atom()}
+  def record_confirmed_delete(root, claim, record, uid, pod_evidence, disposal_receipt_sha256) do
     checkpoint = %{
       "schema_version" => @schema_version,
       "claim" => claim,
@@ -172,7 +172,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
       "request_sha256" => record.request_sha256,
       "job_uid" => uid,
       "job_resource_version" => record.observation["job"]["resourceVersion"],
-      "post_delete_pod_snapshot" => pod_evidence
+      "post_delete_pod_snapshot" => pod_evidence,
+      "disposal_receipt_sha256" => disposal_receipt_sha256
     }
 
     with true <- valid_confirmed_delete?(checkpoint, claim, record, uid),
@@ -228,25 +229,19 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     _ -> {:held, :abort_prepare_disposal_proof_unavailable}
   end
 
-  @doc "Loads a previously persisted disposal receipt for the exact claim and result binding."
-  @spec find_disposal_proof(Path.t(), map(), map(), map(), map()) :: {:ok, map()} | :missing | {:held, atom()}
-  def find_disposal_proof(root, claim, record, request, expected) do
+  @doc "Loads the exact disposal receipt bound to a durable confirmed-delete checkpoint."
+  @spec load_confirmed_disposal_proof(Path.t(), map(), map(), map(), map(), map()) ::
+          {:ok, String.t()} | {:held, atom()}
+  def load_confirmed_disposal_proof(root, claim, record, request, expected, confirmed_delete) do
     with true <- Path.type(root) == :absolute and private_root?(root),
-         {:ok, key} <- identity_key(claim),
-         {:ok, entries} <- File.ls(root),
-         {:ok, hashes} <- disposal_receipt_hashes(entries, key <> ".disposal-") do
-      case hashes do
-        [] ->
-          if sync_checkpoint_directory(root) == :ok,
-            do: :missing,
-            else: {:held, :abort_prepare_journal_sync_unavailable}
-
-        [receipt_hash | remaining] ->
-          with {:ok, response} <- load_disposal_proof(root, claim, record, request, expected, receipt_hash),
-               :ok <- verify_disposal_candidates(root, claim, record, request, expected, remaining) do
-            {:ok, response}
-          end
-      end
+         true <- valid_confirmed_delete?(confirmed_delete, claim, record, record.observation["job"]["uid"]),
+         receipt_hash when is_binary(receipt_hash) <- confirmed_delete["disposal_receipt_sha256"],
+         {:ok, path} <- checkpoint_path(root, claim, "disposal-" <> receipt_hash),
+         {:ok, bytes} <- read_regular(path),
+         {:ok, proof} <- Jason.decode(bytes),
+         true <- valid_persisted_disposal_checkpoint?(proof, claim, record, request, expected, receipt_hash),
+         :ok <- sync_checkpoint_directory(Path.dirname(path)) do
+      {:ok, receipt_hash}
     else
       {:held, _reason} = held -> held
       _ -> {:held, :abort_prepare_disposal_proof_unavailable}
@@ -412,6 +407,16 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
 
   defp valid_disposal_proof?(_claim, _record, _request, _expected, _response), do: false
 
+  defp valid_persisted_disposal_proof?(claim, record, request, expected, response)
+       when is_map(claim) and is_map(record) and is_map(request) and is_map(expected) and is_map(response) do
+    RootAbortInputPublisher.validate_disposal_request(request) == :ok and
+      RootAbortInputPublisher.validate_persisted_disposal_response(response, request) == :ok and
+      disposal_selectors_match?(claim, record, request, response) and
+      disposal_record_bindings_match?(record, expected, response)
+  end
+
+  defp valid_persisted_disposal_proof?(_claim, _record, _request, _expected, _response), do: false
+
   defp valid_disposal_contract?(request, response) do
     RootAbortInputPublisher.validate_disposal_request(request) == :ok and
       RootAbortInputPublisher.validate_disposal_response(response, request) == :ok
@@ -444,30 +449,18 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
 
   defp valid_disposal_checkpoint?(_checkpoint, _claim, _record, _request, _expected, _receipt_hash), do: false
 
-  defp disposal_receipt_hashes(entries, prefix) do
-    matches = Enum.filter(entries, &String.starts_with?(&1, prefix))
-
-    Enum.reduce_while(matches, {:ok, []}, fn name, {:ok, hashes} ->
-      hash = String.replace_prefix(name, prefix, "")
-
-      if Regex.match?(~r/\A[a-f0-9]{64}\.json\z/, hash),
-        do: {:cont, {:ok, [String.replace_suffix(hash, ".json", "") | hashes]}},
-        else: {:halt, {:held, :abort_prepare_disposal_proof_unavailable}}
-    end)
-    |> case do
-      {:ok, hashes} -> {:ok, Enum.sort(hashes)}
-      {:held, _reason} = held -> held
-    end
+  defp valid_persisted_disposal_checkpoint?(checkpoint, claim, record, request, expected, receipt_hash)
+       when is_map(checkpoint) do
+    valid_disposal_checkpoint_shape?(checkpoint) and
+      valid_disposal_checkpoint_binding?(checkpoint, claim, record, request, expected) and
+      valid_disposal_receipt?(checkpoint, receipt_hash) and
+      valid_persisted_disposal_proof?(claim, record, request, expected, checkpoint["response"])
+  rescue
+    _ -> false
   end
 
-  defp verify_disposal_candidates(_root, _claim, _record, _request, _expected, []), do: :ok
-
-  defp verify_disposal_candidates(root, claim, record, request, expected, [receipt_hash | rest]) do
-    with {:ok, _response} <- load_disposal_proof(root, claim, record, request, expected, receipt_hash),
-         :ok <- verify_disposal_candidates(root, claim, record, request, expected, rest) do
-      :ok
-    end
-  end
+  defp valid_persisted_disposal_checkpoint?(_checkpoint, _claim, _record, _request, _expected, _receipt_hash),
+    do: false
 
   defp valid_disposal_checkpoint_shape?(checkpoint) do
     Enum.sort(Map.keys(checkpoint)) == Enum.sort(@disposal_checkpoint_fields) and
@@ -496,10 +489,12 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
 
   defp valid_confirmed_delete_shape?(checkpoint) do
     fields =
-      ~w(schema_version claim assignment_digest allocation_id prepare_id request_sha256 job_uid job_resource_version post_delete_pod_snapshot)
+      ~w(schema_version claim assignment_digest allocation_id prepare_id request_sha256 job_uid job_resource_version post_delete_pod_snapshot disposal_receipt_sha256)
 
     Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
       checkpoint["schema_version"] == @schema_version and
+      is_binary(checkpoint["disposal_receipt_sha256"]) and
+      Regex.match?(~r/\A[a-f0-9]{64}\z/, checkpoint["disposal_receipt_sha256"]) and
       valid_pod_evidence?(checkpoint["post_delete_pod_snapshot"])
   end
 

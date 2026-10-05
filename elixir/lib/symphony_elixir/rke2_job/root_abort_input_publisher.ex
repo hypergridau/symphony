@@ -132,6 +132,21 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
 
   def validate_disposal_response(_response, _request), do: {:error, :invalid_root_abort_disposal_acknowledgement}
 
+  @doc false
+  @spec validate_persisted_disposal_response(term(), term()) :: :ok | {:error, atom()}
+  def validate_persisted_disposal_response(response, request) when is_map(response) and is_map(request) do
+    if validate_disposal_request(request) == :ok and disposal_response_shape?(response) and
+         disposal_selectors_match?(response, request) and
+         persisted_disposal_receipt_fields_valid?(response) do
+      :ok
+    else
+      {:error, :invalid_root_abort_disposal_acknowledgement}
+    end
+  end
+
+  def validate_persisted_disposal_response(_response, _request),
+    do: {:error, :invalid_root_abort_disposal_acknowledgement}
+
   defp disposal_response_shape?(response) do
     exact_fields?(response, @disposal_fields) and
       response["status"] == "pre-execution-abort-disposal-verified"
@@ -144,6 +159,11 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   defp disposal_receipt_fields_valid?(response) do
     digest?(response["resultSHA256"]) and valid_prepare_id?(response["prepareId"]) and
       digest?(response["prepareRequestSHA256"]) and fresh_timestamp?(response["observedAt"])
+  end
+
+  defp persisted_disposal_receipt_fields_valid?(response) do
+    digest?(response["resultSHA256"]) and valid_prepare_id?(response["prepareId"]) and
+      digest?(response["prepareRequestSHA256"]) and valid_timestamp?(response["observedAt"])
   end
 
   defp valid_prepare_id?(value), do: is_binary(value) and Regex.match?(@uuid, value)
@@ -212,4 +232,7 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   end
 
   defp fresh_timestamp?(_value), do: false
+
+  defp valid_timestamp?(value) when is_binary(value), do: match?({:ok, _, _}, DateTime.from_iso8601(value))
+  defp valid_timestamp?(_value), do: false
 end
