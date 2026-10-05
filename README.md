@@ -232,6 +232,14 @@ service after confirmed deletion. The result reference is derived from the signe
 assignment; publication requires the matching retained journal and root
 acknowledgement. See [the runtime contract](elixir/README.md).
 
+The host now checks the bound OAuth slot before recording spawn intent. Only
+Dahlia's exact typed `codex_auth_slot_denied` response can retain an `abort_pending`
+claim. The canonical blocked result, unused worker lease release, root disposal
+proof and existing prepare/confirm checkpoints remain durable across restart.
+Cleanup retains the claim until provider release is independently verified.
+These are source and synthetic-test contracts; installed/live qualification is
+separate.
+
 Paused HGS-740 recovery supports a fixed append-only reconciliation observation
 epoch for the exact retained generation-2 failed issuance. Historical inputs
 remain pinned and unchanged; fresh evidence uses the existing signed recovery

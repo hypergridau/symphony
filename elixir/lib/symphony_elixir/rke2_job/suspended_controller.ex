@@ -15,8 +15,7 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.RKE2Job.ManagedExecutorAdapter
   alias SymphonyElixir.WorkPackageClaim
-  alias SymphonyElixir.WorkPackageClaim.Handoff
-  alias SymphonyElixir.WorkPackageClaim.Journal
+  alias SymphonyElixir.WorkPackageClaim.{Dispatch, Handoff, Journal}
 
   @binding_fields [
     :projection_id,
@@ -79,7 +78,9 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
   @spec resume(map(), map(), map()) :: result()
   def resume(assignment, claim_input, context)
       when is_map(assignment) and is_map(claim_input) and is_map(context) do
-    with :ok <- validate_inputs(assignment, claim_input, context),
+    with {:ok, %{dispatch: %{phase: phase}}} <- retained(assignment, claim_input, context),
+         true <- phase in ["allocation_suspended", "spawn_started"],
+         :ok <- validate_inputs(assignment, claim_input, context),
          :ok <- journal_assignment_snapshot(claim_input, assignment),
          {:ok, adapter} <- adapter(context),
          {:ok, dispatch} <- WorkPackageClaim.handoff_allocation(claim_input) do
@@ -101,10 +102,31 @@ defmodule SymphonyElixir.RKE2Job.SuspendedController do
           )
         end
       })
+    else
+      false -> {:held, :pre_spawn_abort_pending}
+      other -> other
     end
   end
 
   def resume(_assignment, _claim_input, _context), do: {:error, :invalid_suspended_controller_input}
+
+  @doc "Reads the exact retained assignment and claim without requiring a new worker lease."
+  @spec retained(map(), map(), map()) :: {:ok, map()} | {:error, term()}
+  def retained(assignment, claim_input, context) do
+    with :ok <- validate_inputs(assignment, claim_input, context),
+         :ok <- journal_assignment_snapshot(claim_input, assignment),
+         {:ok, journal} <- Journal.load(claim_input.journal_path),
+         key = Journal.reservation_key(claim_input.issue_id, claim_input.managed_project_profile_id, claim_input.repository_ref, assignment.lease.generation),
+         %{dispatch: %{authority_digest: digest}} = reservation <- journal.reservations[key],
+         true <- digest == Dispatch.authority_digest(claim_input) do
+      {:ok, reservation}
+    else
+      {:error, _} = error -> error
+      _ -> {:error, :suspended_controller_claim_binding_invalid}
+    end
+  rescue
+    _ -> {:error, :suspended_controller_claim_binding_invalid}
+  end
 
   defp validate_inputs(assignment, claim_input, context) do
     with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),

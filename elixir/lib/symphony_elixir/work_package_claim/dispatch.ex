@@ -1,22 +1,25 @@
 defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   @moduledoc "Durable pre-spawn claim lifecycle; a transport error never changes execution identity."
 
+  alias SymphonyElixir.RKE2Job.PreSpawnAbortSnapshot
   alias SymphonyElixir.WorkPackageClaim.Journal
 
-  @phases ~w(submitted confirmed allocation_pending allocation_suspended recovery_pending spawn_started blocked)
+  @phases ~w(submitted confirmed allocation_pending allocation_suspended abort_pending recovery_pending spawn_started blocked)
   @legacy_keys ~w(phase attempts retry_at_ms authority_digest)
   @keys @legacy_keys ++ ["allocation_id"]
+  @abort_keys @keys ++ ["abort_reason", "abort_config"]
   @max_attempts 6
 
   @spec decode(term()) :: {:ok, map() | nil} | {:error, term()}
   def decode(nil), do: {:ok, nil}
 
   def decode(value) when is_map(value) do
-    if Enum.sort(Map.keys(value)) in [Enum.sort(@legacy_keys), Enum.sort(@keys)] do
+    if Enum.sort(Map.keys(value)) in [Enum.sort(@legacy_keys), Enum.sort(@keys), Enum.sort(@abort_keys)] do
       decoded =
         value
         |> Map.new(fn {key, item} -> {String.to_existing_atom(key), item} end)
         |> Map.put_new(:allocation_id, nil)
+        |> decode_abort_config()
 
       if valid?(decoded), do: {:ok, decoded}, else: {:error, :invalid_dispatch_journal}
     else
@@ -67,6 +70,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   defp retry_allowed(%{phase: "spawn_started"}, _digest), do: {:error, :claim_spawn_already_attempted}
   defp retry_allowed(%{phase: "allocation_pending"}, _digest), do: {:error, :suspended_allocation_controller_required}
   defp retry_allowed(%{phase: "allocation_suspended"}, _digest), do: {:error, :suspended_allocation_controller_required}
+  defp retry_allowed(%{phase: "abort_pending"}, _digest), do: {:error, :pre_spawn_abort_pending}
   defp retry_allowed(%{phase: "recovery_pending"}, _digest), do: {:error, :claim_reconciliation_required}
   defp retry_allowed(%{phase: "blocked"}, _digest), do: {:error, :claim_reconciliation_required}
 
@@ -168,6 +172,54 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   def record_suspended_allocation(_journal, _key, _input, _allocation_id),
     do: {:error, :suspended_allocation_identity_invalid}
+
+  @doc "Fences one explicitly denied, never-started allocation without changing its identity."
+  @spec begin_suspended_abort(map(), String.t(), map(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def begin_suspended_abort(journal, key, input, allocation_id, config) when is_map(config) do
+    case journal.reservations[key] do
+      %{dispatch: %{phase: "allocation_suspended", allocation_id: ^allocation_id} = dispatch} = reservation ->
+        begin_new_suspended_abort(journal, key, reservation, dispatch, input, config)
+
+      %{dispatch: dispatch} ->
+        replay_suspended_abort(journal, dispatch, input, allocation_id, config)
+
+      _ ->
+        {:error, :pre_spawn_abort_not_admissible}
+    end
+  end
+
+  def begin_suspended_abort(_journal, _key, _input, _allocation_id, _reason),
+    do: {:error, :pre_spawn_abort_not_admissible}
+
+  defp begin_new_suspended_abort(journal, key, reservation, dispatch, input, config) do
+    if dispatch.authority_digest == authority_digest(input) do
+      next =
+        dispatch
+        |> Map.put(:phase, "abort_pending")
+        |> Map.put(:abort_reason, "codex_auth_slot_denied")
+        |> Map.put(:abort_config, config)
+
+      Journal.put(journal, key, %{reservation | dispatch: next})
+    else
+      {:error, :claim_authority_changed}
+    end
+  end
+
+  defp replay_suspended_abort(journal, dispatch, input, allocation_id, config) do
+    case dispatch do
+      %{
+        phase: "abort_pending",
+        allocation_id: ^allocation_id,
+        abort_config: ^config,
+        abort_reason: "codex_auth_slot_denied",
+        authority_digest: digest
+      } ->
+        if digest == authority_digest(input), do: {:ok, journal}, else: {:error, :claim_authority_changed}
+
+      _ ->
+        {:error, :pre_spawn_abort_not_admissible}
+    end
+  end
 
   defp record_new_suspended_allocation(journal, key, reservation, dispatch, input, allocation_id) do
     cond do
@@ -324,6 +376,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
       %{dispatch: %{phase: "blocked"}} ->
         {:error, :claim_reconciliation_required}
 
+      %{dispatch: %{phase: "abort_pending"}} ->
+        {:error, :pre_spawn_abort_pending}
+
       _ ->
         {:error, :claim_recovery_journal_missing}
     end
@@ -332,6 +387,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   @spec ready?(map(), non_neg_integer()) :: boolean()
   def ready?(%{dispatch: %{phase: "allocation_pending"}}, _now_ms), do: false
   def ready?(%{dispatch: %{phase: "allocation_suspended"}}, _now_ms), do: false
+  def ready?(%{dispatch: %{phase: "abort_pending"}}, _now_ms), do: false
 
   def ready?(%{dispatch: dispatch}, now_ms), do: dispatch.attempts < @max_attempts and dispatch.retry_at_ms <= now_ms
 
@@ -344,6 +400,9 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
 
   def retry_status(%{dispatch: %{phase: "allocation_suspended"}}, _now_ms),
     do: {:error, :suspended_allocation_controller_required}
+
+  def retry_status(%{dispatch: %{phase: "abort_pending"}}, _now_ms),
+    do: {:error, :pre_spawn_abort_pending}
 
   def retry_status(%{dispatch: %{attempts: attempts}}, _now_ms) when attempts >= @max_attempts,
     do: {:error, :claim_recovery_exhausted}
@@ -370,6 +429,30 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
     end
   end
 
+  defp decode_abort_config(%{abort_config: config} = dispatch) when is_map(config) do
+    fields = ~w(namespace image repository_id auth_slot auth_slot_catalog assignment_binding_digest)
+    slot_fields = ~w(slot_id lease_id claim_name claim_uid assignment_sha256 binding_sha256 seat)
+
+    if Enum.sort(Map.keys(config)) == Enum.sort(fields) and is_map(config["auth_slot"]) and
+         Enum.sort(Map.keys(config["auth_slot"])) == Enum.sort(slot_fields) do
+      decoded = Map.new(config, fn {key, value} -> {String.to_existing_atom(key), value} end)
+      slot = Map.new(decoded.auth_slot, fn {key, value} -> {String.to_existing_atom(key), value} end)
+      %{dispatch | abort_config: %{decoded | auth_slot: slot}}
+    else
+      dispatch
+    end
+  end
+
+  defp decode_abort_config(dispatch), do: dispatch
+
+  defp valid_phase?(
+         "abort_pending",
+         %{allocation_id: allocation_id, abort_reason: "codex_auth_slot_denied", abort_config: config} = value
+       ),
+       do:
+         map_size(value) == 7 and PreSpawnAbortSnapshot.valid?(config) and
+           is_binary(allocation_id) and valid_allocation_id?(allocation_id)
+
   defp valid_phase?("allocation_suspended", %{allocation_id: allocation_id} = value) do
     map_size(value) == 5 and is_binary(allocation_id) and valid_allocation_id?(allocation_id)
   end
@@ -380,7 +463,7 @@ defmodule SymphonyElixir.WorkPackageClaim.Dispatch do
   defp valid_phase?("recovery_pending", %{allocation_id: allocation_id} = value) when is_binary(allocation_id),
     do: map_size(value) == 5 and valid_allocation_id?(allocation_id)
 
-  defp valid_phase?(phase, value) when phase in @phases and phase != "allocation_suspended" do
+  defp valid_phase?(phase, value) when phase in @phases and phase not in ["allocation_suspended", "abort_pending"] do
     (map_size(value) == 4 and not Map.has_key?(value, :allocation_id)) or
       (map_size(value) == 5 and is_nil(Map.get(value, :allocation_id)))
   end

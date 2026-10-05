@@ -57,13 +57,15 @@ defmodule SymphonyElixir.AgentRuntimeSupervisor do
     Supervisor.init(children, strategy: :one_for_all)
   end
 
-  defp install_abort_prepare_roots(%{abort_journal_root: journal_root, workspace_root: workspace_root}) do
+  defp install_abort_prepare_roots(%{abort_journal_root: journal_root, workspace_root: workspace_root, result_journal_root: result_root}) do
     Application.put_env(:symphony_elixir, :abort_prepare_journal_root, journal_root)
     Application.put_env(:symphony_elixir, :abort_prepare_workspace_root, workspace_root)
+    Application.put_env(:symphony_elixir, :abort_result_journal_root, result_root)
   end
 
   defp install_abort_prepare_roots(_) do
     Application.delete_env(:symphony_elixir, :abort_prepare_journal_root)
     Application.delete_env(:symphony_elixir, :abort_prepare_workspace_root)
+    Application.delete_env(:symphony_elixir, :abort_result_journal_root)
   end
 end
