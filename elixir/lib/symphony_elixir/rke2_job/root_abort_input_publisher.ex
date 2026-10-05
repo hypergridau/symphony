@@ -12,9 +12,12 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
 
   @socket_path "/run/dahlia-pre-execution-abort-input-publisher.sock"
   @timeout_ms 5_000
-  @request_fields ~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference)
+  @selector_fields ~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference)
+  @eligibility_fields ~w(status claimSHA256 assignmentDigest allocationId resultReference)
+  @disposal_fields ~w(status claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt)
   @response_fields ~w(status claimSHA256)
   @hex64 ~r/\A[a-f0-9]{64}\z/
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
   @reference ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]{0,511}\z/
 
   @type request :: map()
@@ -36,23 +39,99 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
 
   def publish(_request), do: {:held, :root_abort_input_publication_unavailable}
 
+  @doc "Checks root-side eligibility before any destructive confirmation."
+  @spec verify_eligibility(map()) :: :ok | {:held, atom()}
+  def verify_eligibility(request) when is_map(request) do
+    with :ok <- validate_selector_request(request, "verify_pre_execution_abort_eligibility"),
+         {:ok, response} <- exchange(request),
+         :ok <- validate_eligibility_response(response, request) do
+      :ok
+    else
+      _ -> {:held, :root_abort_input_eligibility_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_eligibility_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_eligibility_unavailable}
+  end
+
+  def verify_eligibility(_request), do: {:held, :root_abort_input_eligibility_unavailable}
+
+  @doc "Obtains a fresh root-side authorization to dispose the exact prepared Job."
+  @spec verify_disposal(map()) :: {:ok, map()} | {:held, atom()}
+  def verify_disposal(request) when is_map(request) do
+    with :ok <- validate_disposal_request(request),
+         {:ok, response} <- exchange(request),
+         :ok <- validate_disposal_response(response, request) do
+      {:ok, response}
+    else
+      _ -> {:held, :root_abort_input_disposal_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  def verify_disposal(_request), do: {:held, :root_abort_input_disposal_unavailable}
+
   @doc false
   @spec validate_request(term()) :: :ok | {:error, atom()}
   def validate_request(request) when is_map(request) do
-    with true <- Enum.sort(Map.keys(request)) == Enum.sort(@request_fields),
-         true <- request["schemaVersion"] === 1,
-         true <- request["operation"] == "publish_pre_execution_abort_inputs",
-         true <- digest?(request["claimSHA256"]),
-         true <- digest?(request["assignmentDigest"]),
-         true <- text?(request["allocationId"], 1024),
-         true <- is_binary(request["resultReference"]) and Regex.match?(@reference, request["resultReference"]) do
-      :ok
-    else
-      _ -> {:error, :invalid_root_abort_input_request}
-    end
+    validate_selector_request(request, "publish_pre_execution_abort_inputs")
   end
 
   def validate_request(_request), do: {:error, :invalid_root_abort_input_request}
+
+  @doc false
+  @spec validate_eligibility_response(term(), term()) :: :ok | {:error, atom()}
+  def validate_eligibility_response(response, request) when is_map(response) and is_map(request) do
+    if exact_fields?(response, @eligibility_fields) and
+         response["status"] == "pre-execution-abort-eligible" and
+         Enum.all?(~w(claimSHA256 assignmentDigest allocationId resultReference), &(response[&1] == request[&1])),
+       do: :ok,
+       else: {:error, :invalid_root_abort_input_eligibility}
+  end
+
+  def validate_eligibility_response(_response, _request), do: {:error, :invalid_root_abort_input_eligibility}
+
+  @doc false
+  @spec validate_disposal_request(term()) :: :ok | {:error, atom()}
+  def validate_disposal_request(request) when is_map(request) do
+    with true <- exact_fields?(request, @selector_fields ++ ~w(resultSHA256 prepareId prepareRequestSHA256 observedAt)),
+         true <- request["schemaVersion"] === 1,
+         true <- request["operation"] == "verify_pre_execution_abort_disposal",
+         true <- digest?(request["claimSHA256"]),
+         true <- digest?(request["assignmentDigest"]),
+         true <- text?(request["allocationId"], 1024),
+         true <- is_binary(request["resultReference"]) and Regex.match?(@reference, request["resultReference"]),
+         true <- digest?(request["resultSHA256"]),
+         true <- is_binary(request["prepareId"]) and Regex.match?(@uuid, request["prepareId"]),
+         true <- digest?(request["prepareRequestSHA256"]),
+         true <- fresh_timestamp?(request["observedAt"]) do
+      :ok
+    else
+      _ -> {:error, :invalid_root_abort_disposal_request}
+    end
+  end
+
+  def validate_disposal_request(_request), do: {:error, :invalid_root_abort_disposal_request}
+
+  @doc false
+  @spec validate_disposal_response(term(), term()) :: :ok | {:error, atom()}
+  def validate_disposal_response(response, request) when is_map(response) and is_map(request) do
+    bound_fields = ~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt)
+
+    if exact_fields?(response, @disposal_fields) and
+         response["status"] == "pre-execution-abort-disposal-verified" and
+         Enum.all?(bound_fields, &(response[&1] == request[&1])) do
+      :ok
+    else
+      {:error, :invalid_root_abort_disposal_acknowledgement}
+    end
+  end
+
+  def validate_disposal_response(_response, _request), do: {:error, :invalid_root_abort_disposal_acknowledgement}
 
   defp exchange(request) do
     options = [:binary, active: false, packet: :line, packet_size: 1_024]
@@ -90,4 +169,33 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
 
   defp digest?(value), do: is_binary(value) and Regex.match?(@hex64, value)
   defp text?(value, limit), do: is_binary(value) and byte_size(value) in 1..limit and String.valid?(value)
+  defp exact_fields?(map, fields), do: Enum.sort(Map.keys(map)) == Enum.sort(fields)
+
+  defp validate_selector_request(request, operation) when is_map(request) do
+    with true <- exact_fields?(request, @selector_fields),
+         true <- request["schemaVersion"] === 1,
+         true <- request["operation"] == operation,
+         true <- digest?(request["claimSHA256"]),
+         true <- digest?(request["assignmentDigest"]),
+         true <- text?(request["allocationId"], 1024),
+         true <- is_binary(request["resultReference"]) and Regex.match?(@reference, request["resultReference"]) do
+      :ok
+    else
+      _ -> {:error, :invalid_root_abort_input_request}
+    end
+  end
+
+  defp validate_selector_request(_request, _operation), do: {:error, :invalid_root_abort_input_request}
+
+  defp fresh_timestamp?(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        delta = DateTime.diff(DateTime.utc_now(), datetime, :second)
+        delta in 0..300
+
+      _ -> false
+    end
+  end
+
+  defp fresh_timestamp?(_value), do: false
 end

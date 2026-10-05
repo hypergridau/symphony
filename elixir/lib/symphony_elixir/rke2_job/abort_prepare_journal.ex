@@ -185,6 +185,44 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     _ -> {:held, :abort_prepare_journal_write_unavailable}
   end
 
+  @doc "Persists an immutable root disposal authorization, keyed by its exact receipt hash."
+  @spec record_disposal_proof(Path.t(), map(), map(), map(), map()) :: {:ok, map()} | {:held, atom()}
+  def record_disposal_proof(root, claim, record, request, response) do
+    with true <- valid_disposal_proof?(claim, record, request, response),
+         {:ok, encoded_response} <- Jason.encode(response),
+         receipt_hash <- sha256(encoded_response),
+         checkpoint = disposal_proof_record(claim, record, request, response, receipt_hash),
+         {:ok, path} <- checkpoint_path(root, claim, "disposal-" <> receipt_hash),
+         {:ok, bytes} <- Jason.encode(checkpoint) do
+      case exclusive_write(path, bytes) do
+        :ok -> load_disposal_proof(root, claim, record, request, receipt_hash)
+        {:error, :eexist} -> load_disposal_proof(root, claim, record, request, receipt_hash)
+        _ -> {:held, :abort_prepare_journal_write_unavailable}
+      end
+    else
+      _ -> {:held, :abort_prepare_disposal_proof_invalid}
+    end
+  rescue
+    _ -> {:held, :abort_prepare_disposal_proof_invalid}
+  end
+
+  @doc "Re-reads the exact immutable disposal proof before the destructive adapter call."
+  @spec load_disposal_proof(Path.t(), map(), map(), map(), String.t()) :: {:ok, map()} | {:held, atom()}
+  def load_disposal_proof(root, claim, record, request, receipt_hash) do
+    with true <- is_binary(receipt_hash) and Regex.match?(~r/\A[a-f0-9]{64}\z/, receipt_hash),
+         {:ok, path} <- checkpoint_path(root, claim, "disposal-" <> receipt_hash),
+         {:ok, bytes} <- read_regular(path),
+         {:ok, decoded} <- Jason.decode(bytes),
+         true <- valid_disposal_checkpoint?(decoded, claim, record, request, receipt_hash),
+         :ok <- sync_checkpoint_directory(Path.dirname(path)) do
+      {:ok, decoded["response"]}
+    else
+      _ -> {:held, :abort_prepare_disposal_proof_unavailable}
+    end
+  rescue
+    _ -> {:held, :abort_prepare_disposal_proof_unavailable}
+  end
+
   defp encode_record(claim, record) do
     if valid_record?(record, claim) do
       Jason.encode(%{
@@ -318,6 +356,62 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
   end
 
   defp valid_confirmed_delete?(_checkpoint, _claim, _record, _uid), do: false
+
+  defp disposal_proof_record(claim, record, request, response, receipt_hash),
+    do: %{
+      "schema_version" => @schema_version,
+      "claim" => claim,
+      "assignment_digest" => record.assignment_digest,
+      "allocation_id" => record.allocation_id,
+      "prepare_id" => record.prepare_id,
+      "prepare_request_sha256" => record.request_sha256,
+      "result_reference" => request["resultReference"],
+      "result_sha256" => request["resultSHA256"],
+      "receipt_sha256" => receipt_hash,
+      "response" => response
+    }
+
+  defp valid_disposal_proof?(claim, record, request, response)
+       when is_map(claim) and is_map(record) and is_map(request) and is_map(response) do
+    SymphonyElixir.RKE2Job.RootAbortInputPublisher.validate_disposal_request(request) == :ok and
+      SymphonyElixir.RKE2Job.RootAbortInputPublisher.validate_disposal_response(response, request) == :ok and
+      response["claimSHA256"] == identity_key!(claim) and
+      response["assignmentDigest"] == record.assignment_digest and
+      response["allocationId"] == record.allocation_id and
+      response["resultReference"] == request["resultReference"] and
+      response["resultSHA256"] == request["resultSHA256"] and
+      response["prepareId"] == record.prepare_id and
+      response["prepareRequestSHA256"] == record.request_sha256 and
+      response["observedAt"] == request["observedAt"]
+  end
+
+  defp valid_disposal_proof?(_claim, _record, _request, _response), do: false
+
+  defp valid_disposal_checkpoint?(checkpoint, claim, record, request, receipt_hash) when is_map(checkpoint) do
+    fields = ~w(schema_version claim assignment_digest allocation_id prepare_id prepare_request_sha256 result_reference result_sha256 receipt_sha256 response)
+
+    Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
+      checkpoint["schema_version"] == @schema_version and
+      checkpoint["claim"] == claim and
+      checkpoint["assignment_digest"] == record.assignment_digest and
+      checkpoint["allocation_id"] == record.allocation_id and
+      checkpoint["prepare_id"] == record.prepare_id and
+      checkpoint["prepare_request_sha256"] == record.request_sha256 and
+      checkpoint["result_reference"] == request["resultReference"] and
+      checkpoint["result_sha256"] == request["resultSHA256"] and
+      checkpoint["receipt_sha256"] == receipt_hash and
+      checkpoint["receipt_sha256"] == sha256(Jason.encode!(checkpoint["response"])) and
+      valid_disposal_proof?(claim, record, request, checkpoint["response"])
+  rescue
+    _ -> false
+  end
+
+  defp valid_disposal_checkpoint?(_checkpoint, _claim, _record, _request, _receipt_hash), do: false
+
+  defp identity_key!(claim) do
+    {:ok, key} = identity_key(claim)
+    key
+  end
 
   defp valid_confirmed_delete_shape?(checkpoint) do
     fields =

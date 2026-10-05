@@ -20,6 +20,24 @@ defmodule SymphonyElixir.AbortPreparePermissiveGuard do
 end
 
 defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
+  def verify_eligibility(request) do
+    case Process.get(:abort_root_input_verify_fun) do
+      fun when is_function(fun, 1) -> fun.(request)
+      _ -> :ok
+    end
+  end
+
+  def verify_disposal(request) do
+    case Process.get(:abort_root_input_disposal_fun) do
+      fun when is_function(fun, 1) -> fun.(request)
+      _ ->
+        {:ok,
+         request
+         |> Map.take(~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt))
+         |> Map.put("status", "pre-execution-abort-disposal-verified")}
+    end
+  end
+
   def publish(request) do
     case Process.get(:abort_root_input_publish_fun) do
       fun when is_function(fun, 1) -> fun.(request)
@@ -1058,6 +1076,65 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     assert {:held, :root_abort_result_reference_mismatch} =
              AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, changed)
 
+    assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "root denial and malformed disposal proof hold before any delete", context do
+    on_exit(fn ->
+      Process.delete(:abort_root_input_verify_fun)
+      Process.delete(:abort_root_input_disposal_fun)
+    end)
+
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+
+    Process.put(:abort_root_input_verify_fun, fn request ->
+      assert request["operation"] == "verify_pre_execution_abort_eligibility"
+      {:held, :root_abort_input_eligibility_unavailable}
+    end)
+
+    assert {:held, :root_abort_input_eligibility_unavailable} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+
+    Process.put(:abort_root_input_verify_fun, fn _request -> :ok end)
+    Process.put(:abort_root_input_disposal_fun, fn request ->
+      {:ok,
+       request
+       |> Map.take(~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt))
+       |> Map.put("status", "pre-execution-abort-disposal-verified")
+       |> Map.put("allocationId", "wrong-allocation")}
+    end)
+
+    assert {:held, :root_abort_input_disposal_unavailable} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Agent.get(context.client, & &1.deletes) == []
+    refute Enum.any?(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
+  end
+
+  test "disposal proof checkpoints are immutable across post-delete replay", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    first = Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
+    assert length(first) == 1
+    [proof_file] = first
+    proof_bytes = File.read!(Path.join(context.root, proof_file))
+    decoded = Jason.decode!(proof_bytes)
+    assert decoded["response"]["status"] == "pre-execution-abort-disposal-verified"
+    assert decoded["receipt_sha256"] == sha256(Jason.encode!(decoded["response"]))
+    {:ok, result_reference} = AbortResultPublisher.reference_for_assignment(assignment)
+    result_journal = Path.join(caller.adapter_context.abort_result_journal_root, sha256(result_reference) <> ".abort-result.json")
+    assert decoded["result_sha256"] == Jason.decode!(File.read!(result_journal))["sha256"]
+
+    Process.sleep(2)
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    second = Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
+    assert length(second) == 2
+    assert File.read!(Path.join(context.root, proof_file)) == proof_bytes
     assert length(Agent.get(context.client, & &1.deletes)) == 1
   end
 

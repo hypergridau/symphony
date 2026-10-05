@@ -28,6 +28,7 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     observedAt suspended executionStarted activePods succeededPods failedPods podListResourceVersion
     ownedPodsAbsent slotClaimPodsAbsent
   )
+  @selector_fields ~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference)
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   @type result :: {:ok, map()} | {:held, term()} | {:error, term()}
@@ -75,7 +76,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
          :ok <- bind_record(record, allocation, assignment, caller_context, claim),
          :ok <- revalidate_root_intent(record, caller_context, claim),
          :ok <- verify_retained_abort_result(allocation, assignment, caller_context),
-         true <- is_map(Map.get(prepared, :prepare_ack)) do
+         true <- is_map(Map.get(prepared, :prepare_ack)),
+         {:ok, _disposal_receipt} <- verify_and_record_disposal(claim, record, allocation, assignment, caller_context) do
       context =
         caller_context.adapter_context
         |> Map.put(:prepare_ack_guard, JournalPrepareAckGuard)
@@ -430,6 +432,81 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
       {:held, _reason} = held -> held
       {:error, reason} -> {:held, reason}
     end
+  end
+
+  defp verify_and_record_disposal(claim, record, allocation, assignment, context) do
+    publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
+
+    with true <- is_atom(publisher) and Code.ensure_loaded?(publisher) and
+                   function_exported?(publisher, :verify_eligibility, 1) and
+                   function_exported?(publisher, :verify_disposal, 1),
+         {:ok, request} <- disposal_request(claim, record, allocation, assignment, context),
+         eligibility_request = request |> Map.take(@selector_fields) |> Map.put("operation", "verify_pre_execution_abort_eligibility"),
+         :ok <- publisher.verify_eligibility(eligibility_request),
+         {:ok, response} <- publisher.verify_disposal(request),
+         :ok <- RootAbortInputPublisher.validate_disposal_response(response, request),
+         {:ok, encoded} <- Jason.encode(response),
+         receipt_sha256 <- sha256(encoded),
+         {:ok, _} <- AbortPrepareJournal.record_disposal_proof(context.journal_root, claim, record, request, response),
+         {:ok, reread} <- AbortPrepareJournal.load_disposal_proof(context.journal_root, claim, record, request, receipt_sha256),
+         true <- reread == response do
+      {:ok, receipt_sha256}
+    else
+      {:held, _reason} = held -> held
+      _ -> {:held, :root_abort_input_disposal_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp disposal_request(claim, record, allocation, assignment, context) do
+    with {:ok, claim_sha256} <- AbortPrepareJournal.identity_key(claim),
+         {:ok, result_reference} <- canonical_result_reference(context, assignment),
+         {:ok, result_sha256} <- retained_result_sha256(allocation, assignment, context, result_reference) do
+      {:ok,
+       %{
+         "schemaVersion" => 1,
+         "operation" => "verify_pre_execution_abort_disposal",
+         "claimSHA256" => claim_sha256,
+         "assignmentDigest" => assignment.sha256,
+         "allocationId" => allocation.id,
+         "resultReference" => result_reference,
+         "resultSHA256" => result_sha256,
+         "prepareId" => record.prepare_id,
+         "prepareRequestSHA256" => record.request_sha256,
+         "observedAt" => DateTime.utc_now() |> DateTime.to_iso8601()
+       }}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp retained_result_sha256(allocation, assignment, context, reference) do
+    claim = Map.get(context.adapter_context, :claim_binding)
+    result = Map.get(context, :pre_execution_result)
+
+    with true <- is_map(claim) and is_map(result),
+         {:ok, bytes} <-
+           Jason.encode(%{
+             "status" => "blocked",
+             "reference" => reference,
+             "projectionId" => claim.projection_id,
+             "reservationId" => claim.reservation_id,
+             "issueId" => claim.issue_id,
+             "runnerId" => claim.runner_id,
+             "generation" => claim.generation,
+             "assignmentDigest" => assignment.sha256,
+             "allocationId" => allocation.id,
+             "abortReason" => Atom.to_string(result.abort_reason)
+           }) do
+      {:ok, sha256(bytes)}
+    else
+      _ -> {:held, :abort_result_journal_readback_failed}
+    end
+  rescue
+    _ -> {:held, :abort_result_journal_readback_failed}
   end
 
   defp canonical_result_reference(context, assignment) do
