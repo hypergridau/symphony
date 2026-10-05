@@ -370,9 +370,6 @@ defmodule SymphonyElixir.RKE2Job.SuspendedAbort do
            disposal_receipt_sha256
          )
 
-  defp record_confirmed_delete(_context, _uid, _pod_evidence),
-    do: {:held, :abort_prepare_confirmed_delete_checkpoint_invalid}
-
   defp delete_and_confirm(client, context, expected, uid, observation, claim) do
     namespace = get_in(expected, ["metadata", "namespace"])
     name = get_in(expected, ["metadata", "name"])
