@@ -28,7 +28,6 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     observedAt suspended executionStarted activePods succeededPods failedPods podListResourceVersion
     ownedPodsAbsent slotClaimPodsAbsent
   )
-  @selector_fields ~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference)
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   @type result :: {:ok, map()} | {:held, term()} | {:error, term()}
@@ -437,18 +436,18 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   defp verify_and_record_disposal(claim, record, allocation, assignment, context) do
     publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
 
-    with true <- is_atom(publisher) and Code.ensure_loaded?(publisher) and
-                   function_exported?(publisher, :verify_eligibility, 1) and
-                   function_exported?(publisher, :verify_disposal, 1),
-         {:ok, request} <- disposal_request(claim, record, allocation, assignment, context),
-         eligibility_request = request |> Map.take(@selector_fields) |> Map.put("operation", "verify_pre_execution_abort_eligibility"),
-         :ok <- publisher.verify_eligibility(eligibility_request),
-         {:ok, response} <- publisher.verify_disposal(request),
+    with true <-
+           is_atom(publisher) and Code.ensure_loaded?(publisher) and
+             (function_exported?(publisher, :verify_disposal, 1) or
+                (@test_environment and function_exported?(publisher, :verify_disposal, 2))),
+         {:ok, request, expected} <- disposal_request(claim, record, allocation, assignment, context),
+         {:ok, response} <- call_disposal_verifier(publisher, request, expected),
          :ok <- RootAbortInputPublisher.validate_disposal_response(response, request),
+         true <- disposal_response_matches?(response, record, expected),
          {:ok, encoded} <- Jason.encode(response),
          receipt_sha256 <- sha256(encoded),
-         {:ok, _} <- AbortPrepareJournal.record_disposal_proof(context.journal_root, claim, record, request, response),
-         {:ok, reread} <- AbortPrepareJournal.load_disposal_proof(context.journal_root, claim, record, request, receipt_sha256),
+         {:ok, _} <- AbortPrepareJournal.record_disposal_proof(context.journal_root, claim, record, request, expected, response),
+         {:ok, reread} <- AbortPrepareJournal.load_disposal_proof(context.journal_root, claim, record, request, expected, receipt_sha256),
          true <- reread == response do
       {:ok, receipt_sha256}
     else
@@ -461,26 +460,41 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
   end
 
+  defp call_disposal_verifier(publisher, request, expected) do
+    if @test_environment and function_exported?(publisher, :verify_disposal, 2),
+      do: publisher.verify_disposal(request, expected),
+      else: publisher.verify_disposal(request)
+  end
+
   defp disposal_request(claim, record, allocation, assignment, context) do
     with {:ok, claim_sha256} <- AbortPrepareJournal.identity_key(claim),
          {:ok, result_reference} <- canonical_result_reference(context, assignment),
          {:ok, result_sha256} <- retained_result_sha256(allocation, assignment, context, result_reference) do
-      {:ok,
-       %{
-         "schemaVersion" => 1,
-         "operation" => "verify_pre_execution_abort_disposal",
-         "claimSHA256" => claim_sha256,
-         "assignmentDigest" => assignment.sha256,
-         "allocationId" => allocation.id,
-         "resultReference" => result_reference,
-         "resultSHA256" => result_sha256,
-         "prepareId" => record.prepare_id,
-         "prepareRequestSHA256" => record.request_sha256,
-         "observedAt" => DateTime.utc_now() |> DateTime.to_iso8601()
-       }}
+      request = %{
+        "schemaVersion" => 1,
+        "operation" => "verify_pre_execution_abort_disposal",
+        "claimSHA256" => claim_sha256,
+        "assignmentDigest" => assignment.sha256,
+        "allocationId" => allocation.id,
+        "resultReference" => result_reference
+      }
+
+      expected = %{
+        "resultSHA256" => result_sha256,
+        "prepareId" => record.prepare_id,
+        "prepareRequestSHA256" => record.request_sha256
+      }
+
+      {:ok, request, expected}
     end
   rescue
     _ -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp disposal_response_matches?(response, record, expected) do
+    response["prepareId"] == record.prepare_id and
+      response["prepareRequestSHA256"] == record.request_sha256 and
+      response["resultSHA256"] == expected["resultSHA256"]
   end
 
   defp retained_result_sha256(allocation, assignment, context, reference) do

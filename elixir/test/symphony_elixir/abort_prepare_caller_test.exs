@@ -20,21 +20,16 @@ defmodule SymphonyElixir.AbortPreparePermissiveGuard do
 end
 
 defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
-  def verify_eligibility(request) do
-    case Process.get(:abort_root_input_verify_fun) do
-      fun when is_function(fun, 1) -> fun.(request)
-      _ -> :ok
-    end
-  end
-
-  def verify_disposal(request) do
+  def verify_disposal(request, expected) do
     case Process.get(:abort_root_input_disposal_fun) do
-      fun when is_function(fun, 1) -> fun.(request)
+      fun when is_function(fun, 1) ->
+        case fun.(request) do
+          {:ok, response} -> {:ok, Map.merge(disposal_response(request, expected), response)}
+          other -> other
+        end
+
       _ ->
-        {:ok,
-         request
-         |> Map.take(~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt))
-         |> Map.put("status", "pre-execution-abort-disposal-verified")}
+        {:ok, disposal_response(request, expected)}
     end
   end
 
@@ -43,6 +38,12 @@ defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
       fun when is_function(fun, 1) -> fun.(request)
       _ -> :ok
     end
+  end
+
+  defp disposal_response(request, expected) do
+    Map.merge(request, expected)
+    |> Map.put("observedAt", DateTime.utc_now() |> DateTime.to_iso8601())
+    |> Map.put("status", "pre-execution-abort-disposal-verified")
   end
 end
 
@@ -1081,29 +1082,25 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
   test "root denial and malformed disposal proof hold before any delete", context do
     on_exit(fn ->
-      Process.delete(:abort_root_input_verify_fun)
       Process.delete(:abort_root_input_disposal_fun)
     end)
 
     {assignment, allocation, caller, prepared} = prepared_fixture(context)
     retain_result(caller, allocation, assignment)
 
-    Process.put(:abort_root_input_verify_fun, fn request ->
-      assert request["operation"] == "verify_pre_execution_abort_eligibility"
-      {:held, :root_abort_input_eligibility_unavailable}
+    Process.put(:abort_root_input_disposal_fun, fn request ->
+      assert request["operation"] == "verify_pre_execution_abort_disposal"
+      {:held, :root_abort_input_disposal_unavailable}
     end)
 
-    assert {:held, :root_abort_input_eligibility_unavailable} =
+    assert {:held, :root_abort_input_disposal_unavailable} =
              AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
 
     assert Agent.get(context.client, & &1.deletes) == []
 
-    Process.put(:abort_root_input_verify_fun, fn _request -> :ok end)
     Process.put(:abort_root_input_disposal_fun, fn request ->
       {:ok,
        request
-       |> Map.take(~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt))
-       |> Map.put("status", "pre-execution-abort-disposal-verified")
        |> Map.put("allocationId", "wrong-allocation")}
     end)
 
@@ -1111,6 +1108,22 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
              AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
 
     assert Agent.get(context.client, & &1.deletes) == []
+
+    for mismatch <- [
+          {"prepareId", "11111111-2222-4333-8444-555555555599"},
+          {"prepareRequestSHA256", String.duplicate("e", 64)},
+          {"resultSHA256", String.duplicate("f", 64)}
+        ] do
+      Process.put(:abort_root_input_disposal_fun, fn request ->
+        {:ok, Map.put(request, elem(mismatch, 0), elem(mismatch, 1))}
+      end)
+
+      assert {:held, :root_abort_input_disposal_unavailable} =
+               AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+      assert Agent.get(context.client, & &1.deletes) == []
+    end
+
     refute Enum.any?(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
   end
 

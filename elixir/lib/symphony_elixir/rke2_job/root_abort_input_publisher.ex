@@ -42,7 +42,7 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   @doc "Checks root-side eligibility before any destructive confirmation."
   @spec verify_eligibility(map()) :: :ok | {:held, atom()}
   def verify_eligibility(request) when is_map(request) do
-    with :ok <- validate_selector_request(request, "verify_pre_execution_abort_eligibility"),
+    with :ok <- validate_eligibility_request(request),
          {:ok, response} <- exchange(request),
          :ok <- validate_eligibility_response(response, request) do
       :ok
@@ -84,6 +84,17 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   def validate_request(_request), do: {:error, :invalid_root_abort_input_request}
 
   @doc false
+  @spec validate_eligibility_request(term()) :: :ok | {:error, atom()}
+  def validate_eligibility_request(request) when is_map(request) do
+    case validate_selector_request(request, "verify_pre_execution_abort_eligibility") do
+      :ok -> :ok
+      _ -> {:error, :invalid_root_abort_eligibility_request}
+    end
+  end
+
+  def validate_eligibility_request(_request), do: {:error, :invalid_root_abort_eligibility_request}
+
+  @doc false
   @spec validate_eligibility_response(term(), term()) :: :ok | {:error, atom()}
   def validate_eligibility_response(response, request) when is_map(response) and is_map(request) do
     if exact_fields?(response, @eligibility_fields) and
@@ -98,19 +109,8 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   @doc false
   @spec validate_disposal_request(term()) :: :ok | {:error, atom()}
   def validate_disposal_request(request) when is_map(request) do
-    with true <- exact_fields?(request, @selector_fields ++ ~w(resultSHA256 prepareId prepareRequestSHA256 observedAt)),
-         true <- request["schemaVersion"] === 1,
-         true <- request["operation"] == "verify_pre_execution_abort_disposal",
-         true <- digest?(request["claimSHA256"]),
-         true <- digest?(request["assignmentDigest"]),
-         true <- text?(request["allocationId"], 1024),
-         true <- is_binary(request["resultReference"]) and Regex.match?(@reference, request["resultReference"]),
-         true <- digest?(request["resultSHA256"]),
-         true <- is_binary(request["prepareId"]) and Regex.match?(@uuid, request["prepareId"]),
-         true <- digest?(request["prepareRequestSHA256"]),
-         true <- fresh_timestamp?(request["observedAt"]) do
-      :ok
-    else
+    case validate_selector_request(request, "verify_pre_execution_abort_disposal") do
+      :ok -> :ok
       _ -> {:error, :invalid_root_abort_disposal_request}
     end
   end
@@ -120,11 +120,15 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   @doc false
   @spec validate_disposal_response(term(), term()) :: :ok | {:error, atom()}
   def validate_disposal_response(response, request) when is_map(response) and is_map(request) do
-    bound_fields = ~w(claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt)
+    selector_fields = ~w(claimSHA256 assignmentDigest allocationId resultReference)
 
     if exact_fields?(response, @disposal_fields) and
          response["status"] == "pre-execution-abort-disposal-verified" and
-         Enum.all?(bound_fields, &(response[&1] == request[&1])) do
+         Enum.all?(selector_fields, &(response[&1] == request[&1])) and
+         digest?(response["resultSHA256"]) and
+         is_binary(response["prepareId"]) and Regex.match?(@uuid, response["prepareId"]) and
+         digest?(response["prepareRequestSHA256"]) and
+         fresh_timestamp?(response["observedAt"]) do
       :ok
     else
       {:error, :invalid_root_abort_disposal_acknowledgement}
@@ -193,7 +197,8 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
         delta = DateTime.diff(DateTime.utc_now(), datetime, :second)
         delta in 0..300
 
-      _ -> false
+      _ ->
+        false
     end
   end
 
