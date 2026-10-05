@@ -13,7 +13,9 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
   @hex64 ~r/\A[a-f0-9]{64}\z/
   @safe_reason ~r/\A[a-z][a-z0-9_]{0,127}\z/
   @safe_id ~r/\A[A-Za-z0-9][A-Za-z0-9._:-]*\z/
-  @result_keys ~w(schema_version status reason assignment_digest issue_uuid generation repository_ref branch_ref checkout_lease_id checkout_revocation broker_lease_id revocation codex_exit_code head_oid branch_head_oid base_oid changed_files pull_request_number pull_request_url)
+  @legacy_result_keys ~w(schema_version status reason assignment_digest issue_uuid generation repository_ref branch_ref checkout_lease_id checkout_revocation broker_lease_id revocation codex_exit_code head_oid branch_head_oid base_oid changed_files pull_request_number pull_request_url)
+  @result_keys @legacy_result_keys ++ ["worker_proof"]
+  @worker_proof_keys ~w(requested_model requested_reasoning completion_observed error_observed model_rerouted event_stream_invalid validation_kind validated_file_count validation_passed)
   @pre_checkout_denials ~w(codex_auth_slot_unavailable workspace_not_empty workspace_unavailable credential_issuance_denied)
   @checkout_failures ~w(credential_checkout_denied repository_checkout_failed)
 
@@ -170,7 +172,7 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
 
   defp parse_message(message, expected) when byte_size(message) <= @max_message_bytes do
     case Jason.decode(message) do
-      {:ok, %{"schema_version" => 1} = result} ->
+      {:ok, %{"schema_version" => version} = result} when version in [1, 2] ->
         digest = get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-sha256"])
         issue = get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-issue-id"])
         generation = get_in(expected, ["metadata", "annotations", "symphony.hypergrid.au/assignment-generation"])
@@ -207,7 +209,7 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
     status = result["status"]
 
     Enum.all?([
-      Enum.sort(Map.keys(result)) == Enum.sort(@result_keys),
+      valid_schema_keys?(result),
       valid_reason?(result["reason"]),
       optional_id?(result["checkout_lease_id"]),
       optional_id?(result["broker_lease_id"]),
@@ -219,27 +221,69 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
       optional_count?(result["changed_files"], 1..20),
       optional_count?(result["codex_exit_code"], 0..255),
       valid_pull_request?(result),
-      valid_status?(status, mode, result)
+      valid_worker_proof?(result) and valid_status?(status, mode, result)
     ])
+  end
+
+  defp valid_schema_keys?(%{"schema_version" => 1} = result),
+    do: Enum.sort(Map.keys(result)) == Enum.sort(@legacy_result_keys)
+
+  defp valid_schema_keys?(%{"schema_version" => 2} = result),
+    do: Enum.sort(Map.keys(result)) == Enum.sort(@result_keys)
+
+  defp valid_schema_keys?(_result), do: false
+
+  defp valid_worker_proof?(%{"schema_version" => 1}), do: true
+
+  defp valid_worker_proof?(%{"schema_version" => 2, "worker_proof" => nil}), do: true
+
+  defp valid_worker_proof?(%{"schema_version" => 2, "worker_proof" => proof}) when is_map(proof) do
+    exact_worker_proof_keys?(proof) and requested_codex_route?(proof) and
+      valid_worker_flags?(proof) and valid_validation_proof?(proof)
+  end
+
+  defp valid_worker_proof?(_result), do: false
+
+  defp exact_worker_proof_keys?(proof),
+    do: Enum.sort(Map.keys(proof)) == Enum.sort(@worker_proof_keys)
+
+  defp requested_codex_route?(proof),
+    do: proof["requested_model"] == "gpt-6-luna" and proof["requested_reasoning"] == "high"
+
+  defp valid_worker_flags?(proof),
+    do:
+      is_boolean(proof["completion_observed"]) and is_boolean(proof["error_observed"]) and
+        is_boolean(proof["model_rerouted"]) and is_boolean(proof["event_stream_invalid"])
+
+  defp valid_validation_proof?(proof) do
+    case {proof["validation_kind"], proof["validated_file_count"], proof["validation_passed"]} do
+      {nil, nil, nil} -> true
+      {"git_diff_check", count, passed} when is_integer(count) and count in 1..20 and is_boolean(passed) -> true
+      _ -> false
+    end
   end
 
   defp valid_status?("preflight_passed", "preflight", result),
     do:
-      Map.take(result, ~w(reason checkout_lease_id broker_lease_id codex_exit_code head_oid branch_head_oid base_oid changed_files checkout_revocation revocation pull_request_number pull_request_url)) ==
-        %{
-          "reason" => "auth_slot_required",
-          "checkout_lease_id" => nil,
-          "broker_lease_id" => nil,
-          "codex_exit_code" => nil,
-          "head_oid" => nil,
-          "branch_head_oid" => nil,
-          "base_oid" => nil,
-          "changed_files" => nil,
-          "checkout_revocation" => "not_started",
-          "revocation" => "not_started",
-          "pull_request_number" => nil,
-          "pull_request_url" => nil
-        }
+      result["worker_proof"] == nil and
+        Map.take(
+          result,
+          ~w(reason checkout_lease_id broker_lease_id codex_exit_code head_oid branch_head_oid base_oid changed_files checkout_revocation revocation pull_request_number pull_request_url)
+        ) ==
+          %{
+            "reason" => "auth_slot_required",
+            "checkout_lease_id" => nil,
+            "broker_lease_id" => nil,
+            "codex_exit_code" => nil,
+            "head_oid" => nil,
+            "branch_head_oid" => nil,
+            "base_oid" => nil,
+            "changed_files" => nil,
+            "checkout_revocation" => "not_started",
+            "revocation" => "not_started",
+            "pull_request_number" => nil,
+            "pull_request_url" => nil
+          }
 
   defp valid_status?("completed", "codex", result),
     do:
@@ -248,7 +292,7 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
         Enum.all?(
           ~w(checkout_lease_id broker_lease_id base_oid branch_head_oid head_oid pull_request_number changed_files),
           &(not is_nil(result[&1]))
-        )
+        ) and (result["schema_version"] == 1 or successful_worker_proof?(result))
 
   defp valid_status?(status, "codex", %{"checkout_lease_id" => nil} = result)
        when status in ["failed", "held"] do
@@ -271,6 +315,15 @@ defmodule SymphonyElixir.RKE2Job.ResultReader do
 
   defp valid_status?(status, "codex", _result) when status in ["failed", "held"], do: true
   defp valid_status?(_status, _mode, _result), do: false
+
+  defp successful_worker_proof?(%{"worker_proof" => proof} = result) when is_map(proof),
+    do:
+      proof["completion_observed"] and not proof["error_observed"] and
+        not proof["model_rerouted"] and not proof["event_stream_invalid"] and
+        proof["validation_kind"] == "git_diff_check" and proof["validation_passed"] and
+        proof["validated_file_count"] == result["changed_files"]
+
+  defp successful_worker_proof?(_result), do: false
 
   defp consistent_outcome?(job, pod_status, exit_code, result) do
     complete = condition?(job, "Complete")

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.Worker.OneShot do
   alias SymphonyElixir.RKE2Job.JobSpec
   alias SymphonyElixir.Worker.BoundedOutput
   alias SymphonyElixir.Worker.BrokerClient
+  alias SymphonyElixir.Worker.CanaryEventSink
   alias SymphonyElixir.Worker.CLI, as: WorkerCLI
   alias SymphonyElixir.Worker.Command
 
@@ -13,6 +14,8 @@ defmodule SymphonyElixir.Worker.OneShot do
   @askpass "/tmp/symphony-git-askpass"
   @codex_home "/var/lib/frigga-codex-home"
   @max_addition_bytes 512 * 1024
+  @codex_requested_model "gpt-6-luna"
+  @codex_requested_reasoning "high"
   @hgs736_issue_uuid "f77e349e-21d9-4bdf-bad3-ce08b302e7e8"
   @hgs736_generation 3
   @hgs736_constraint_prefix "qualification/hgs-736/"
@@ -71,14 +74,37 @@ defmodule SymphonyElixir.Worker.OneShot do
   end
 
   defp run_assignment(bundle, subject, identity, deps) do
-    with {:ok, codex_exit} <- run_codex(bundle, deps),
-         true <- codex_exit == 0,
+    case run_codex(bundle, deps) do
+      {:ok, codex_exit, summary} ->
+        continue_assignment(subject, identity, codex_exit, summary, deps)
+
+      {:error, reason} ->
+        {:error, safe_reason(reason), identity}
+    end
+  end
+
+  defp continue_assignment(subject, identity, codex_exit, summary, deps) do
+    proof = codex_proof(summary)
+    identity = identity |> Map.put(:codex_exit_code, codex_exit) |> Map.put(:worker_proof, proof)
+
+    with true <- codex_exit == 0 and codex_proof_acceptable?(proof),
          {:ok, head, additions} <- inspect_additions(deps),
          true <- additions != [],
-         {:ok, publish_lease} <- issue_lease(subject, :git_checkout_push_pr, "worker-publish", deps) do
-      publish_with_lease(publish_lease, subject, identity, codex_exit, head, additions, deps)
+         {:ok, proof} <- validate_additions(additions, proof, deps) do
+      publish_validated_assignment(subject, identity, codex_exit, head, additions, proof, deps)
     else
       false -> {:error, "codex_failed_or_no_additions", Map.put(identity, :revocation, "confirmed")}
+      {:held, reason} -> {:held, safe_reason(reason), identity}
+      {:error, {:validation_failed, proof}} -> {:error, "source_validation_failed", Map.put(identity, :worker_proof, proof)}
+      {:error, reason} -> {:error, safe_reason(reason), identity}
+    end
+  end
+
+  defp publish_validated_assignment(subject, identity, codex_exit, head, additions, proof, deps) do
+    identity = Map.put(identity, :worker_proof, proof)
+
+    case issue_lease(subject, :git_checkout_push_pr, "worker-publish", deps) do
+      {:ok, publish_lease} -> publish_with_lease(publish_lease, subject, identity, codex_exit, head, additions, deps)
       {:held, reason} -> {:held, safe_reason(reason), identity}
       {:error, reason} -> {:error, safe_reason(reason), identity}
     end
@@ -444,19 +470,86 @@ defmodule SymphonyElixir.Worker.OneShot do
              "--sandbox",
              "workspace-write",
              "--model",
-             "gpt-6-luna",
+             @codex_requested_model,
              "--config",
-             "model_reasoning_effort=high",
+             "model_reasoning_effort=#{@codex_requested_reasoning}",
              "--cd",
              workspace_path(deps),
              prompt
            ],
            [{"CODEX_HOME", @codex_home}],
-           1_048_576
+           %CanaryEventSink{}
          ) do
-      {:ok, _events, status} when is_integer(status) -> {:ok, status}
-      _ -> {:error, :codex_execution_failed}
+      {:ok, %CanaryEventSink{} = sink, status} when is_integer(status) ->
+        {:ok, status, CanaryEventSink.summary(CanaryEventSink.finish(sink))}
+
+      {:ok, events, status} when is_binary(events) and is_integer(status) ->
+        sink = events |> then(&CanaryEventSink.feed(%CanaryEventSink{}, &1)) |> CanaryEventSink.finish()
+        {:ok, status, CanaryEventSink.summary(sink)}
+
+      _ ->
+        {:error, :codex_execution_failed}
     end
+  end
+
+  defp codex_proof(summary) do
+    %{
+      "requested_model" => @codex_requested_model,
+      "requested_reasoning" => @codex_requested_reasoning,
+      "completion_observed" => summary.turn_completed,
+      "error_observed" =>
+        summary.turn_failed or summary.error_seen or summary.other_item_error_seen or
+          (summary.item_error_seen and not summary.code_mode_disabled),
+      "model_rerouted" => summary.model_rerouted,
+      "event_stream_invalid" => summary.malformed or summary.overflow,
+      "validation_kind" => nil,
+      "validated_file_count" => nil,
+      "validation_passed" => nil
+    }
+  end
+
+  defp codex_proof_acceptable?(proof) do
+    proof["completion_observed"] and not proof["error_observed"] and
+      not proof["model_rerouted"] and not proof["event_stream_invalid"]
+  end
+
+  defp validate_additions(additions, proof, deps) do
+    additions
+    |> Enum.with_index(1)
+    |> Enum.reduce_while({:ok, proof}, fn {%{contents: contents}, attempted}, {:ok, current} ->
+      case command_with_input(deps, "git", ["diff", "--no-index", "--check", "--", "/dev/null", "-"], contents, [], 8192) do
+        {:ok, <<>>, 1} ->
+          {:cont, {:ok, validation_proof(current, attempted, nil)}}
+
+        _ ->
+          failed = validation_proof(current, attempted, false)
+          {:halt, {:error, {:validation_failed, failed}}}
+      end
+    end)
+    |> case do
+      {:ok, validated} -> {:ok, validation_proof(validated, length(additions), true)}
+      failure -> failure
+    end
+  end
+
+  defp command_with_input(deps, executable, args, input, env, limit) do
+    options = [stderr_to_stdout: true, env: env, output_limit: limit]
+
+    case call(deps, :command_with_input, &Command.run_with_input/4, [executable, args, input, options]) do
+      {output, status} when is_binary(output) and is_integer(status) -> {:ok, output, status}
+      {:error, _reason} -> {:error, :command_failed}
+      other -> other
+    end
+  rescue
+    _ -> {:error, :command_failed}
+  end
+
+  defp validation_proof(proof, count, passed) do
+    Map.merge(proof, %{
+      "validation_kind" => "git_diff_check",
+      "validated_file_count" => count,
+      "validation_passed" => passed
+    })
   end
 
   defp prompt(bundle) do
@@ -564,8 +657,9 @@ defmodule SymphonyElixir.Worker.OneShot do
   defp workspace_path(deps), do: Map.get(deps, :workspace_path, @workspace)
 
   defp command(deps, executable, args, env, limit) do
-    sink = struct(BoundedOutput, limit: limit)
+    sink = if is_integer(limit), do: struct(BoundedOutput, limit: limit), else: limit
     options = [stderr_to_stdout: true, env: env, into: sink]
+    options = if match?(%CanaryEventSink{}, sink), do: Keyword.put(options, :discard_stderr, true), else: options
 
     case call(deps, :command, &system_command/3, [executable, args, options]) do
       {%{__struct__: BoundedOutput, output: output, truncated?: false}, status}
@@ -574,6 +668,9 @@ defmodule SymphonyElixir.Worker.OneShot do
 
       {%{__struct__: BoundedOutput, truncated?: true}, _status} ->
         {:error, :command_output_limit}
+
+      {%CanaryEventSink{} = output, status} when is_integer(status) ->
+        {:ok, output, status}
 
       {output, status} when is_binary(output) and is_integer(status) ->
         {:ok, output, status}

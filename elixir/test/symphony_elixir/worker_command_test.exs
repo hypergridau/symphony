@@ -3,7 +3,7 @@ defmodule SymphonyElixir.WorkerCommandTest do
   alias SymphonyElixir.Worker.CanaryEventSink
   alias SymphonyElixir.Worker.Command
 
-  @moduletag skip: not match?({:unix, _}, :os.type())
+  @moduletag skip: :os.type() != {:unix, :linux}
 
   test "a piped stdin reader blocks under System.cmd and completes with explicit EOF" do
     script = "cat >/dev/null; printf '%s\\n' READY"
@@ -16,6 +16,41 @@ defmodule SymphonyElixir.WorkerCommandTest do
     prompt = "quotes '\"; $(printf expanded); `printf expanded`\nnext line"
     args = ["-c", "cat >/dev/null; printf '%s' \"$1\"", "fixture", prompt]
     assert {^prompt, 0} = Command.run("/bin/sh", args, stderr_to_stdout: true)
+  end
+
+  test "checks exactly bounded captured stdin without relying on a workspace path" do
+    args = ["diff", "--no-index", "--check", "--", "/dev/null", "-"]
+    assert {"", 1} = Command.run_with_input("git", args, "clean\n", output_limit: 8192)
+    assert {diagnostic, 3} = Command.run_with_input("git", args, "bad \n", output_limit: 8192)
+    assert diagnostic =~ "trailing whitespace"
+    assert {"", 1} = Command.run_with_input("git", args, String.duplicate("line\n", 26_000), output_limit: 8192)
+    assert {:error, :input_limit} = Command.run_with_input("git", args, String.duplicate("x", 524_289), [])
+    assert {:error, :output_limit} = Command.run_with_input("/bin/sh", ["-c", "cat >/dev/null; printf 123456"], "input", output_limit: 5)
+  end
+
+  test "bounds a non-consuming input pipe and kills its descendant process group" do
+    pid_path = Path.join(System.tmp_dir!(), "symphony-command-child-#{System.unique_integer([:positive])}")
+    on_exit(fn -> File.rm(pid_path) end)
+    script = "sleep 30 & child=$!; printf '%s' \"$child\" > \"$1\"; wait \"$child\""
+    input = String.duplicate("x", 524_288)
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :command_timeout} =
+             Command.run_with_input("/bin/sh", ["-c", script, "descendant-test", pid_path], input, timeout_ms: 600)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_500
+    assert {:ok, pid} = File.read(pid_path)
+    assert await_process_stopped(String.trim(pid), System.monotonic_time(:millisecond) + 500)
+  end
+
+  test "uses one deadline when the command trickles output" do
+    script = "while :; do printf x; sleep 0.05; done"
+    started_at = System.monotonic_time(:millisecond)
+
+    assert {:error, :command_timeout} =
+             Command.run_with_input("/bin/sh", ["-c", script], "x", timeout_ms: 600, output_limit: 1_024)
+
+    assert System.monotonic_time(:millisecond) - started_at < 1_500
   end
 
   test "preserves caller options and discards stderr only when requested" do
@@ -41,9 +76,39 @@ defmodule SymphonyElixir.WorkerCommandTest do
     refute Jason.encode!(CanaryEventSink.summary(sink)) =~ "synthetic-secret"
   end
 
+  test "discards non-JSON stderr when the event sink is used" do
+    script = "printf '%s\\n' '{\"type\":\"turn.completed\"}'; printf '%s\\n' synthetic-secret-stderr >&2"
+    options = [stderr_to_stdout: true, discard_stderr: true, into: %CanaryEventSink{}]
+
+    assert {%CanaryEventSink{turn_completed: true, malformed: false}, 0} =
+             Command.run("/bin/sh", ["-c", script], options)
+  end
+
   test "preserves nonzero exit status and fails closed for missing or non-executable targets" do
     assert {"", 37} = Command.run("/bin/sh", ["-c", "exit 37"], stderr_to_stdout: true)
     assert {"", 127} = Command.run("/symphony-synthetic-missing-stdin-test", [], discard_stderr: true)
     assert {"", 126} = Command.run("/dev/null", [], discard_stderr: true)
+  end
+
+  defp await_process_stopped(pid, deadline) do
+    if process_running?(pid) and System.monotonic_time(:millisecond) < deadline do
+      Process.sleep(20)
+      await_process_stopped(pid, deadline)
+    else
+      not process_running?(pid)
+    end
+  end
+
+  defp process_running?(pid) do
+    case File.read("/proc/#{pid}/stat") do
+      {:ok, stat} ->
+        case String.split(stat, ") ", parts: 2) do
+          [_name, details] -> String.first(String.trim_leading(details)) != "Z"
+          _ -> true
+        end
+
+      _ ->
+        false
+    end
   end
 end

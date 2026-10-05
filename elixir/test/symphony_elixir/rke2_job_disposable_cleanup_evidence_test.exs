@@ -444,6 +444,17 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
         branch_head_oid: @head,
         base_oid: @merge,
         changed_files: 1,
+        worker_proof: %{
+          "requested_model" => "gpt-6-luna",
+          "requested_reasoning" => "high",
+          "completion_observed" => true,
+          "error_observed" => false,
+          "model_rerouted" => false,
+          "event_stream_invalid" => false,
+          "validation_kind" => "git_diff_check",
+          "validated_file_count" => 1,
+          "validation_passed" => true
+        },
         pull_request_number: 1,
         pull_request_url: "https://github.com/hypergridau/symphony/pull/1"
       })
@@ -460,6 +471,7 @@ defmodule SymphonyElixir.RKE2JobDisposableCleanupEvidenceTest do
           branch_head_oid: nil,
           base_oid: nil,
           changed_files: nil,
+          worker_proof: nil,
           pull_request_number: nil,
           pull_request_url: nil
         })
