@@ -1416,6 +1416,17 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
           branch_head_oid: String.duplicate("b", 40),
           head_oid: String.duplicate("c", 40),
           changed_files: 1,
+          worker_proof: %{
+            "requested_model" => "gpt-6-luna",
+            "requested_reasoning" => "high",
+            "completion_observed" => true,
+            "error_observed" => false,
+            "model_rerouted" => false,
+            "event_stream_invalid" => false,
+            "validation_kind" => "git_diff_check",
+            "validated_file_count" => 1,
+            "validation_passed" => true
+          },
           pull_request_number: 123,
           pull_request_url: "https://github.com/hypergridau/symphony/pull/123"
         })

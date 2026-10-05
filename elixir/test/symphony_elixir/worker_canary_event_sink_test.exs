@@ -145,6 +145,7 @@ defmodule SymphonyElixir.WorkerCanaryEventSinkTest do
     assert sink.buffer == "tail"
     assert :binary.referenced_byte_size(sink.buffer) == 4
     assert Sink.finish(sink).buffer == <<>>
+    assert Sink.finish(sink).malformed
     refute Jason.encode!(Sink.summary(sink)) =~ "tail"
   end
 

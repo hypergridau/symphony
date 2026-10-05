@@ -96,7 +96,7 @@ defmodule SymphonyElixir.Worker.CLI do
     identity = if is_map(decoded), do: decoded.subject, else: %{}
 
     %{
-      schema_version: 1,
+      schema_version: 2,
       status: status,
       reason: reason,
       assignment_digest: Map.get(identity, :assignmentDigest),
@@ -113,6 +113,7 @@ defmodule SymphonyElixir.Worker.CLI do
       branch_head_oid: nil,
       base_oid: nil,
       changed_files: nil,
+      worker_proof: nil,
       pull_request_number: nil,
       pull_request_url: nil
     }

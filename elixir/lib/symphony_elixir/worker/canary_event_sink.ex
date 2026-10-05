@@ -49,7 +49,7 @@ defmodule SymphonyElixir.Worker.CanaryEventSink do
   end
 
   @spec finish(t()) :: t()
-  def finish(state), do: %{state | buffer: <<>>, dropping_line: false}
+  def finish(state), do: %{state | buffer: <<>>, dropping_line: false, malformed: state.malformed or state.buffer != <<>>}
 
   @spec summary(t()) :: map()
   def summary(state) do

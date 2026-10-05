@@ -77,7 +77,14 @@ defmodule SymphonyElixir.WorkerOneShotTest do
             {"", 0}
 
           {"codex", _args} ->
-            {"{\"type\":\"turn.completed\"}\n", 0}
+            stream =
+              ~s({"type":"item.completed","item":{"type":"error","message":"Code Mode is unavailable because code-mode host is disabled. Code mode will fail closed; enable `features.code_mode_host` and install `codex-code-mode-host`.","id":"item-1"}}) <>
+                "\n" <> ~s({"type":"turn.completed"}) <> "\n"
+
+            {Enum.into([stream], opts[:into]), 0}
+
+          {"git", ["-C", "/workspace", "diff", "--no-index", "--check", "--", "/dev/null", "created.txt"]} ->
+            {"", 1}
 
           {"git", ["-C", "/workspace", "rev-parse", "HEAD"]} ->
             {String.duplicate("a", 40) <> "\n", 0}
@@ -100,6 +107,13 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     assert result.checkout_revocation == "confirmed"
     assert result.broker_lease_id == "publish-lease"
     assert result.changed_files == 1
+    assert result.worker_proof["completion_observed"]
+    assert result.worker_proof["requested_model"] == "gpt-6-luna"
+    assert result.worker_proof["requested_reasoning"] == "high"
+    assert result.worker_proof["validation_kind"] == "git_diff_check"
+    assert result.worker_proof["validated_file_count"] == 1
+    assert result.worker_proof["validation_passed"]
+    refute result.worker_proof["error_observed"]
     assert result.pull_request_url == "https://github.com/hypergridau/symphony/pull/123"
     assert_receive {:revoke, "lease-1"}
     assert_receive {:revoke, "publish-lease"}
@@ -122,6 +136,8 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     prompt = List.last(codex_args)
     refute String.contains?(prompt, token)
     refute String.contains?(prompt, "context_secret_refs")
+
+    assert_receive {:command, "git", ["-C", "/workspace", "diff", "--no-index", "--check", "--", "/dev/null", "created.txt"], _validation_opts}
   end
 
   test "signed HGS-736 assignment revokes the checkout lease before requiring broker denial" do
@@ -616,6 +632,67 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     assert result.broker_lease_id == nil
   end
 
+  test "requires observed completion without errors, reroutes, or malformed Codex events" do
+    streams = [
+      {~s({"type":"thread.started"}) <> "\n", :completion_observed, false},
+      {~s({"type":"item.completed","item":{"type":"error","message":"model rerouted: private"}}) <>
+         "\n" <> ~s({"type":"turn.completed"}) <> "\n", :model_rerouted, true},
+      {~s({"type":"error","message":"private error"}) <> "\n" <> ~s({"type":"turn.completed"}) <> "\n", :error_observed, true},
+      {"not-json\n" <> ~s({"type":"turn.completed"}) <> "\n", :event_stream_invalid, true},
+      {String.duplicate("x", 8193) <> "\n" <> ~s({"type":"turn.completed"}) <> "\n", :event_stream_invalid, true}
+    ]
+
+    for {stream, field, expected} <- streams do
+      assignment = assignment()
+      parent = self()
+      deps = publish_failure_dependencies(assignment, parent, :pr_success)
+
+      deps =
+        deps
+        |> Map.put(:command, fn
+          "codex", _args, _opts -> {stream, 0}
+          executable, args, opts -> publish_failure_command(executable, args, opts)
+        end)
+        |> Map.put(:broker_branch, fn _lease, _base, _ref, _ctx -> flunk("invalid Codex proof reached publication") end)
+
+      assert %{exit_code: 1, result: result} =
+               CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+      assert result.reason == "codex_failed_or_no_additions"
+      assert result.worker_proof[field_name(field)] == expected
+      refute Jason.encode!(result) =~ "private"
+      refute_receive {:commit, _}
+      refute_receive {:pull_request, _}
+    end
+  end
+
+  test "fails closed on whitespace diagnostics and uncertain diff-check outcomes" do
+    for {output, status} <- [{"added.txt:1: trailing whitespace.", 3}, {"", 0}, {"unexpected", 1}] do
+      assignment = assignment()
+      parent = self()
+      deps = publish_failure_dependencies(assignment, parent, :pr_success)
+
+      deps =
+        deps
+        |> Map.put(:command, fn
+          "git", ["-C", "/workspace", "diff", "--no-index", "--check", "--", "/dev/null", "added.txt"], _opts -> {output, status}
+          executable, args, opts -> publish_failure_command(executable, args, opts)
+        end)
+        |> Map.put(:broker_branch, fn _lease, _base, _ref, _ctx -> flunk("failed source validation reached publication") end)
+
+      assert %{exit_code: 1, result: result} =
+               CLI.run(["--assignment-json", Jason.encode!(assignment)], environment(assignment), deps)
+
+      assert result.reason == "source_validation_failed"
+      assert result.worker_proof["validation_kind"] == "git_diff_check"
+      assert result.worker_proof["validated_file_count"] == 1
+      refute result.worker_proof["validation_passed"]
+      refute Jason.encode!(result) =~ "trailing whitespace"
+      refute_receive {:commit, _}
+      refute_receive {:pull_request, _}
+    end
+  end
+
   test "holds a checkout whose local branch setup fails and records uncertain revocation" do
     assignment = assignment()
     parent = self()
@@ -836,7 +913,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
       command: fn
         "git", ["-c", "credential.helper=", "clone" | _args], _opts -> {"", 0}
         "git", ["-C", "/workspace", "switch", "--create", "--", _branch], _opts -> {"", 0}
-        "codex", _args, _opts -> {"{}", 0}
+        "codex", _args, _opts -> {"{\"type\":\"turn.completed\"}\n", 0}
         "git", ["-C", "/workspace", "rev-parse", "HEAD"], _opts -> {String.duplicate("a", 40), 0}
         "git", ["-C", "/workspace", "status", "--porcelain=v1", "-z", "--untracked-files=all"], _opts -> {" M tracked.txt\0", 0}
       end
@@ -869,7 +946,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
       command: fn
         "git", ["-c", "credential.helper=", "clone" | _args], _opts -> {"", 0}
         "git", ["-C", "/workspace", "switch", "--create", "--", _branch], _opts -> {"", 0}
-        "codex", _args, _opts -> {"{}", 0}
+        "codex", _args, _opts -> {"{\"type\":\"turn.completed\"}\n", 0}
         "git", ["-C", "/workspace", "rev-parse", "HEAD"], _opts -> {String.duplicate("a", 40), 0}
         "git", ["-C", "/workspace", "status", "--porcelain=v1", "-z", "--untracked-files=all"], _opts -> {"?? ../outside.txt\0", 0}
       end
@@ -908,9 +985,10 @@ defmodule SymphonyElixir.WorkerOneShotTest do
       command: fn
         "git", ["-c", "credential.helper=", "clone" | _args], _opts -> {"", 0}
         "git", ["-C", ^workspace, "switch", "--create", "--", _branch], _opts -> {"", 0}
-        "codex", _args, _opts -> {"{}", 0}
+        "codex", _args, _opts -> {"{\"type\":\"turn.completed\"}\n", 0}
         "git", ["-C", ^workspace, "rev-parse", "HEAD"], _opts -> {String.duplicate("a", 40), 0}
         "git", ["-C", ^workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all"], _opts -> {"?? nested/added.txt\0", 0}
+        "git", ["-C", ^workspace, "diff", "--no-index", "--check", "--", "/dev/null", "nested/added.txt"], _opts -> {"", 1}
       end
     }
 
@@ -935,7 +1013,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
       Map.put(deps, :command, fn
         "git", ["-c", "credential.helper=", "clone" | _args], _opts -> {"", 0}
         "git", ["-C", ^workspace, "switch", "--create", "--", _branch], _opts -> {"", 0}
-        "codex", _args, _opts -> {"{}", 0}
+        "codex", _args, _opts -> {"{\"type\":\"turn.completed\"}\n", 0}
         "git", ["-C", ^workspace, "rev-parse", "HEAD"], _opts -> {String.duplicate("a", 40), 0}
         "git", ["-C", ^workspace, "status", "--porcelain=v1", "-z", "--untracked-files=all"], _opts -> {"?? nested/missing.txt\0", 0}
       end)
@@ -1044,9 +1122,10 @@ defmodule SymphonyElixir.WorkerOneShotTest do
     case {executable, args} do
       {"git", ["-c", "credential.helper=", "clone", "--branch", "main", "--single-branch", "--no-tags", "--", _, "/workspace"]} -> {"", 0}
       {"git", ["-C", "/workspace", "switch", "--create", "--", "codex/hgs729-canary"]} -> {"", 0}
-      {"codex", _args} -> {"{}", 0}
+      {"codex", _args} -> {"{\"type\":\"turn.completed\"}\n", 0}
       {"git", ["-C", "/workspace", "rev-parse", "HEAD"]} -> {String.duplicate("b", 40) <> "\n", 0}
       {"git", ["-C", "/workspace", "status", "--porcelain=v1", "-z", "--untracked-files=all"]} -> {"?? added.txt\0", 0}
+      {"git", ["-C", "/workspace", "diff", "--no-index", "--check", "--", "/dev/null", "added.txt"]} -> {"", 1}
       _ -> flunk("unexpected worker command: #{inspect({executable, args})}")
     end
   end
@@ -1070,7 +1149,7 @@ defmodule SymphonyElixir.WorkerOneShotTest do
         case {executable, args} do
           {"git", ["-c", "credential.helper=", "clone", "--branch", "main", "--single-branch", "--no-tags", "--", _, "/workspace"]} -> {"", 0}
           {"git", ["-C", "/workspace", "switch", "--create", "--", "codex/hgs729-canary"]} -> {"", 0}
-          {"codex", _args} -> {"{}", 0}
+          {"codex", _args} -> {"{\"type\":\"turn.completed\"}\n", 0}
           {"git", ["-C", "/workspace", "rev-parse", "HEAD"]} -> {String.duplicate("b", 40) <> "\n", 0}
           {"git", ["-C", "/workspace", "status", "--porcelain=v1", "-z", "--untracked-files=all"]} -> {"", 0}
           _ -> flunk("unexpected worker command: #{inspect({executable, args})}")
@@ -1078,6 +1157,11 @@ defmodule SymphonyElixir.WorkerOneShotTest do
       end
     }
   end
+
+  defp field_name(:completion_observed), do: "completion_observed"
+  defp field_name(:model_rerouted), do: "model_rerouted"
+  defp field_name(:error_observed), do: "error_observed"
+  defp field_name(:event_stream_invalid), do: "event_stream_invalid"
 
   defp environment(assignment) do
     %{

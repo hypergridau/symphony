@@ -42,6 +42,17 @@ defmodule SymphonyElixir.RKE2JobResultReaderTest do
         branch_head_oid: String.duplicate("b", 40),
         head_oid: String.duplicate("c", 40),
         changed_files: 2,
+        worker_proof: %{
+          "requested_model" => "gpt-6-luna",
+          "requested_reasoning" => "high",
+          "completion_observed" => true,
+          "error_observed" => false,
+          "model_rerouted" => false,
+          "event_stream_invalid" => false,
+          "validation_kind" => "git_diff_check",
+          "validated_file_count" => 2,
+          "validation_passed" => true
+        },
         pull_request_number: 123,
         pull_request_url: "https://github.com/hypergridau/symphony/pull/123"
       })
@@ -49,6 +60,20 @@ defmodule SymphonyElixir.RKE2JobResultReaderTest do
     completed = put_in(pod, ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"], Jason.encode!(result))
     assert {:ok, observation} = read(assignment, config, job, [completed], uid)
     assert observation.result["pull_request_number"] == 123
+
+    legacy = result |> Map.put(:schema_version, 1) |> Map.delete(:worker_proof)
+    legacy_pod = put_in(pod, ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"], Jason.encode!(legacy))
+    assert {:ok, %{result: %{"schema_version" => 1}}} = read(assignment, config, job, [legacy_pod], uid)
+
+    for invalid_proof <- [
+          %{result.worker_proof | "model_rerouted" => true},
+          %{result.worker_proof | "validation_passed" => false},
+          Map.put(result.worker_proof, "effective_model", "gpt-6-luna"),
+          %{result.worker_proof | "requested_reasoning" => "low"}
+        ] do
+      forged_proof = put_in(completed, ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"], Jason.encode!(%{result | worker_proof: invalid_proof}))
+      assert {:held, :job_result_pod_or_receipt_unverified} = read(assignment, config, job, [forged_proof], uid)
+    end
 
     forged = put_in(completed, ["status", "containerStatuses", Access.at(0), "state", "terminated", "message"], Jason.encode!(%{result | pull_request_url: "https://github.com/other/repo/pull/123"}))
     assert {:held, :job_result_pod_or_receipt_unverified} = read(assignment, config, job, [forged], uid)

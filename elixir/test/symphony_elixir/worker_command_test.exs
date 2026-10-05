@@ -41,6 +41,14 @@ defmodule SymphonyElixir.WorkerCommandTest do
     refute Jason.encode!(CanaryEventSink.summary(sink)) =~ "synthetic-secret"
   end
 
+  test "discards non-JSON stderr when the event sink is used" do
+    script = "printf '%s\\n' '{\"type\":\"turn.completed\"}'; printf '%s\\n' synthetic-secret-stderr >&2"
+    options = [stderr_to_stdout: true, discard_stderr: true, into: %CanaryEventSink{}]
+
+    assert {%CanaryEventSink{turn_completed: true, malformed: false}, 0} =
+             Command.run("/bin/sh", ["-c", script], options)
+  end
+
   test "preserves nonzero exit status and fails closed for missing or non-executable targets" do
     assert {"", 37} = Command.run("/bin/sh", ["-c", "exit 37"], stderr_to_stdout: true)
     assert {"", 127} = Command.run("/symphony-synthetic-missing-stdin-test", [], discard_stderr: true)
