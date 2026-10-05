@@ -369,7 +369,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
     assert Agent.get(context.client, & &1.deletes) == []
   end
 
-  test "suspended slotted abort removes only the exact unstarted Job and retains the slot lease", context do
+  test "suspended slotted abort removes the exact unstarted Job before releasing its slot", context do
     assignment = assignment()
     opts = slot_context(context, assignment)
 
@@ -420,7 +420,7 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
              )
 
     assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
-    refute :release in slot_actions(context)
+    assert :release in slot_actions(context)
 
     assert {:held, :suspended_abort_job_already_absent} =
              ManagedExecutorAdapter.confirm_abort_unstarted_owned(
@@ -431,6 +431,38 @@ defmodule SymphonyElixir.RKE2JobManagedExecutorAdapterTest do
                ack,
                guarded_opts
              )
+  end
+
+  test "suspended abort holds after deletion when auth slot release is unverified", context do
+    assignment = assignment()
+    opts = slot_context(context, assignment)
+
+    assert {:ok, allocation} =
+             ManagedExecutorAdapter.allocate_or_reconcile(assignment, key(assignment, :allocation), opts)
+
+    assert {:ok, observation} =
+             ManagedExecutorAdapter.prepare_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               opts
+             )
+
+    {ack, guarded_opts} = ack_context(assignment, allocation, observation, opts)
+    Agent.update(context.slot_lease, &%{&1 | denied: :release})
+
+    assert {:held, :synthetic_slot_lease_denial} =
+             ManagedExecutorAdapter.confirm_abort_unstarted_owned(
+               allocation,
+               assignment,
+               key(assignment, :abort_unstarted),
+               observation,
+               ack,
+               guarded_opts
+             )
+
+    assert Agent.get(context.client, & &1.deletes) == [elem(allocation_uid(allocation), 1)]
+    assert :release in slot_actions(context)
   end
 
   test "suspended abort requires the current bound slot verification", context do

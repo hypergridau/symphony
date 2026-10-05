@@ -13,6 +13,13 @@ defmodule SymphonyElixir.AbortPrepareTestSlotGuard do
   def reserve(_slot, _assignment, _context), do: :ok
   def bind_uid(_slot, _assignment, _allocation, _context), do: :ok
   def verify_bound(_slot, _assignment, _allocation, _context), do: :ok
+
+  def release(slot, assignment, allocation, context) do
+    case Process.get(:abort_prepare_slot_release_fun) do
+      fun when is_function(fun, 4) -> fun.(slot, assignment, allocation, context)
+      _ -> :ok
+    end
+  end
 end
 
 defmodule SymphonyElixir.AbortPreparePermissiveGuard do
@@ -21,6 +28,8 @@ end
 
 defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
   def verify_disposal(request, expected) do
+    Process.put(:abort_root_input_disposal_calls, Process.get(:abort_root_input_disposal_calls, 0) + 1)
+
     case Process.get(:abort_root_input_disposal_fun) do
       fun when is_function(fun, 1) ->
         case fun.(request) do
@@ -61,6 +70,11 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
   setup do
     if match?({:win32, _}, :os.type()), do: Process.put(:abort_prepare_journal_windows_test_only, true)
+    Process.put(:abort_root_input_disposal_calls, 0)
+    Process.put(:abort_root_input_publish_calls, 0)
+    Process.put(:abort_prepare_release_calls, 0)
+    Process.delete(:abort_prepare_slot_release_fun)
+    Process.delete(:abort_root_input_publish_fun)
 
     root = Path.join(System.tmp_dir!(), "symphony-abort-prepare-#{System.unique_integer([:positive])}")
     :ok = File.mkdir(root)
@@ -1170,13 +1184,71 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
     {:ok, result_reference} = AbortResultPublisher.reference_for_assignment(assignment)
     result_journal = Path.join(caller.adapter_context.abort_result_journal_root, sha256(result_reference) <> ".abort-result.json")
     assert decoded["result_sha256"] == Jason.decode!(File.read!(result_journal))["sha256"]
+    assert Process.get(:abort_root_input_disposal_calls) == 1
 
     Process.sleep(2)
     assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
     second = Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))
-    assert length(second) == 2
+    assert length(second) == 1
     assert File.read!(Path.join(context.root, proof_file)) == proof_bytes
+    assert Process.get(:abort_root_input_disposal_calls) == 1
     assert length(Agent.get(context.client, & &1.deletes)) == 1
+  end
+
+  test "release follows confirmed deletion and a publication replay reuses the saved proof without deleting a new owner", context do
+    {assignment, allocation, caller, prepared} = prepared_fixture(context)
+    retain_result(caller, allocation, assignment)
+    claim = prepared.prepare_ack_guard_context.claim
+    uid = prepared.observation["job"]["uid"]
+    job_key = {"symphony-beta", get_in(prepared.observation, ["compiledIdentity", "name"])}
+
+    Process.put(:abort_prepare_slot_release_fun, fn slot, released_assignment, released_allocation, guard_context ->
+      assert slot.lease_id == caller.adapter_context.config.auth_slot.lease_id
+      assert released_assignment.sha256 == assignment.sha256
+      assert released_allocation.id == allocation.id
+      assert guard_context.result_journal_root == context.result_root
+      assert File.regular?(result_path(caller, assignment))
+      {:ok, record} = AbortPrepareJournal.load(context.root, claim)
+      assert {:ok, _checkpoint} = AbortPrepareJournal.load_confirmed_delete(context.root, claim, record, uid)
+      Process.put(:abort_prepare_release_calls, Process.get(:abort_prepare_release_calls, 0) + 1)
+      :ok
+    end)
+
+    Process.put(:abort_root_input_publish_fun, fn _request ->
+      assert Process.get(:abort_prepare_release_calls) == Process.get(:abort_root_input_publish_calls, 0) + 1
+      Process.put(:abort_root_input_publish_calls, Process.get(:abort_root_input_publish_calls, 0) + 1)
+
+      if Process.get(:abort_root_input_publish_calls) == 1,
+        do: {:held, :root_abort_input_publication_unavailable},
+        else: :ok
+    end)
+
+    assert {:held, :root_abort_input_publication_unavailable} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Process.get(:abort_prepare_release_calls) == 1
+    assert Process.get(:abort_root_input_publish_calls) == 1
+    assert Process.get(:abort_root_input_disposal_calls) == 1
+
+    replacement = %{"metadata" => %{"uid" => "replacement-owner"}}
+    Agent.update(context.client, &put_in(&1, [:jobs, job_key], replacement))
+
+    assert {:held, :suspended_abort_confirmed_delete_replay_mismatch} =
+             AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+
+    assert Process.get(:abort_prepare_release_calls) == 1
+    assert Process.get(:abort_root_input_publish_calls) == 1
+    assert Process.get(:abort_root_input_disposal_calls) == 1
+    assert Agent.get(context.client, & &1.deletes) == [uid]
+
+    Agent.update(context.client, &update_in(&1, [:jobs], fn jobs -> Map.delete(jobs, job_key) end))
+
+    assert :ok = AbortPrepareCaller.confirm(allocation, assignment, key(assignment), prepared, caller)
+    assert Process.get(:abort_prepare_release_calls) == 2
+    assert Process.get(:abort_root_input_publish_calls) == 2
+    assert Process.get(:abort_root_input_disposal_calls) == 1
+    assert Agent.get(context.client, & &1.deletes) == [uid]
+    assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
   end
 
   test "a reference alone cannot authorize deletion without the retained typed result", context do
@@ -1794,6 +1866,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
       },
       auth_slot_lease_guard: SymphonyElixir.AbortPrepareTestSlotGuard,
       auth_slot_lease_guard_context: nil,
+      result_journal_root: context.result_root,
       config: %{
         namespace: "symphony-beta",
         image: "registry.example/symphony-worker@sha256:" <> String.duplicate("a", 64),

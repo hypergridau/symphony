@@ -227,7 +227,17 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
         |> Keyword.put(:prepare_ack_guard_context, Map.get(context, :prepare_ack_guard_context))
         |> Keyword.put(:confirmed_delete_journal, Map.get(context, :confirmed_delete_journal))
 
-      SuspendedAbort.confirm_owned(assignment, allocation.id, uid, observation, prepare_ack, ack_opts)
+      with :ok <-
+             SuspendedAbort.confirm_owned(assignment, allocation.id, uid, observation, prepare_ack, ack_opts),
+           :ok <-
+             auth_slot_guard(
+               context,
+               ports.config,
+               :release,
+               [ports.config[:auth_slot], assignment, allocation]
+             ) do
+        :ok
+      end
     else
       {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}

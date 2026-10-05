@@ -228,6 +228,33 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
     _ -> {:held, :abort_prepare_disposal_proof_unavailable}
   end
 
+  @doc "Loads a previously persisted disposal receipt for the exact claim and result binding."
+  @spec find_disposal_proof(Path.t(), map(), map(), map(), map()) :: {:ok, map()} | :missing | {:held, atom()}
+  def find_disposal_proof(root, claim, record, request, expected) do
+    with true <- Path.type(root) == :absolute and private_root?(root),
+         {:ok, key} <- identity_key(claim),
+         {:ok, entries} <- File.ls(root),
+         {:ok, hashes} <- disposal_receipt_hashes(entries, key <> ".disposal-") do
+      case hashes do
+        [] ->
+          if sync_checkpoint_directory(root) == :ok,
+            do: :missing,
+            else: {:held, :abort_prepare_journal_sync_unavailable}
+
+        [receipt_hash | remaining] ->
+          with {:ok, response} <- load_disposal_proof(root, claim, record, request, expected, receipt_hash),
+               :ok <- verify_disposal_candidates(root, claim, record, request, expected, remaining) do
+            {:ok, response}
+          end
+      end
+    else
+      {:held, _reason} = held -> held
+      _ -> {:held, :abort_prepare_disposal_proof_unavailable}
+    end
+  rescue
+    _ -> {:held, :abort_prepare_disposal_proof_unavailable}
+  end
+
   defp encode_record(claim, record) do
     if valid_record?(record, claim) do
       Jason.encode(%{
@@ -416,6 +443,31 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
   end
 
   defp valid_disposal_checkpoint?(_checkpoint, _claim, _record, _request, _expected, _receipt_hash), do: false
+
+  defp disposal_receipt_hashes(entries, prefix) do
+    matches = Enum.filter(entries, &String.starts_with?(&1, prefix))
+
+    Enum.reduce_while(matches, {:ok, []}, fn name, {:ok, hashes} ->
+      hash = String.replace_prefix(name, prefix, "")
+
+      if Regex.match?(~r/\A[a-f0-9]{64}\.json\z/, hash),
+        do: {:cont, {:ok, [String.replace_suffix(hash, ".json", "") | hashes]}},
+        else: {:halt, {:held, :abort_prepare_disposal_proof_unavailable}}
+    end)
+    |> case do
+      {:ok, hashes} -> {:ok, Enum.sort(hashes)}
+      {:held, _reason} = held -> held
+    end
+  end
+
+  defp verify_disposal_candidates(_root, _claim, _record, _request, _expected, []), do: :ok
+
+  defp verify_disposal_candidates(root, claim, record, request, expected, [receipt_hash | rest]) do
+    with {:ok, _response} <- load_disposal_proof(root, claim, record, request, expected, receipt_hash),
+         :ok <- verify_disposal_candidates(root, claim, record, request, expected, rest) do
+      :ok
+    end
+  end
 
   defp valid_disposal_checkpoint_shape?(checkpoint) do
     Enum.sort(Map.keys(checkpoint)) == Enum.sort(@disposal_checkpoint_fields) and

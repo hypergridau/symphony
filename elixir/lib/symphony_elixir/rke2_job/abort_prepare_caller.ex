@@ -435,13 +435,34 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   end
 
   defp verify_and_record_disposal(claim, record, allocation, assignment, context) do
+    with {:ok, request, expected} <- disposal_request(claim, record, allocation, assignment, context) do
+      case AbortPrepareJournal.find_disposal_proof(context.journal_root, claim, record, request, expected) do
+        {:ok, response} ->
+          disposal_receipt_hash(response, record, request, expected)
+
+        :missing ->
+          verify_new_disposal(claim, record, request, expected, context)
+
+        {:held, _reason} = held ->
+          held
+      end
+    else
+      {:held, _reason} = held -> held
+      _ -> {:held, :root_abort_input_disposal_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
+  catch
+    _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp verify_new_disposal(claim, record, request, expected, context) do
     publisher = Map.get(context, :root_abort_input_publisher, RootAbortInputPublisher)
 
     with true <-
            is_atom(publisher) and Code.ensure_loaded?(publisher) and
              (function_exported?(publisher, :verify_disposal, 1) or
                 (@test_environment and function_exported?(publisher, :verify_disposal, 2))),
-         {:ok, request, expected} <- disposal_request(claim, record, allocation, assignment, context),
          {:ok, response} <- call_disposal_verifier(publisher, request, expected),
          :ok <- RootAbortInputPublisher.validate_disposal_response(response, request),
          true <- disposal_response_matches?(response, record, expected),
@@ -459,6 +480,18 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
     _ -> {:held, :root_abort_input_disposal_unavailable}
   catch
     _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
+  end
+
+  defp disposal_receipt_hash(response, record, request, expected) do
+    with :ok <- RootAbortInputPublisher.validate_disposal_response(response, request),
+         true <- disposal_response_matches?(response, record, expected),
+         {:ok, encoded} <- Jason.encode(response) do
+      {:ok, sha256(encoded)}
+    else
+      _ -> {:held, :root_abort_input_disposal_unavailable}
+    end
+  rescue
+    _ -> {:held, :root_abort_input_disposal_unavailable}
   end
 
   defp persist_and_verify_disposal_proof(context, claim, record, request, expected, response, receipt_sha256) do
