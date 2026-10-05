@@ -514,18 +514,10 @@ defmodule SymphonyElixir.Worker.OneShot do
   end
 
   defp validate_additions(additions, proof, deps) do
-    workspace = workspace_path(deps)
-
     additions
     |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, proof}, fn {%{path: path}, attempted}, {:ok, current} ->
-      case command(
-             deps,
-             "git",
-             ["-C", workspace, "diff", "--no-index", "--check", "--", "/dev/null", path],
-             [],
-             8192
-           ) do
+    |> Enum.reduce_while({:ok, proof}, fn {%{contents: contents}, attempted}, {:ok, current} ->
+      case command_with_input(deps, "git", ["diff", "--no-index", "--check", "--", "/dev/null", "-"], contents, [], 8192) do
         {:ok, <<>>, 1} ->
           {:cont, {:ok, validation_proof(current, attempted, nil)}}
 
@@ -538,6 +530,18 @@ defmodule SymphonyElixir.Worker.OneShot do
       {:ok, validated} -> {:ok, validation_proof(validated, length(additions), true)}
       failure -> failure
     end
+  end
+
+  defp command_with_input(deps, executable, args, input, env, limit) do
+    options = [stderr_to_stdout: true, env: env, output_limit: limit]
+
+    case call(deps, :command_with_input, &Command.run_with_input/4, [executable, args, input, options]) do
+      {output, status} when is_binary(output) and is_integer(status) -> {:ok, output, status}
+      {:error, _reason} -> {:error, :command_failed}
+      other -> other
+    end
+  rescue
+    _ -> {:error, :command_failed}
   end
 
   defp validation_proof(proof, count, passed) do

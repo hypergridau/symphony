@@ -18,6 +18,16 @@ defmodule SymphonyElixir.WorkerCommandTest do
     assert {^prompt, 0} = Command.run("/bin/sh", args, stderr_to_stdout: true)
   end
 
+  test "checks exactly bounded captured stdin without relying on a workspace path" do
+    args = ["diff", "--no-index", "--check", "--", "/dev/null", "-"]
+    assert {"", 1} = Command.run_with_input("git", args, "clean\n", output_limit: 8192)
+    assert {diagnostic, 3} = Command.run_with_input("git", args, "bad \n", output_limit: 8192)
+    assert diagnostic =~ "trailing whitespace"
+    assert {"", 1} = Command.run_with_input("git", args, String.duplicate("line\n", 26_000), output_limit: 8192)
+    assert {:error, :input_limit} = Command.run_with_input("git", args, String.duplicate("x", 524_289), [])
+    assert {:error, :output_limit} = Command.run_with_input("/bin/sh", ["-c", "cat >/dev/null; printf 123456"], "input", output_limit: 5)
+  end
+
   test "preserves caller options and discards stderr only when requested" do
     script = "cat >/dev/null; printf '%s\\n' READY; printf '%s\\n' synthetic-stderr >&2"
     args = ["-c", script]

@@ -24,18 +24,20 @@ item counts as an error.
 
 ## Source validation
 
-Before requesting a publication lease, the worker checks every accepted new
-regular file with the Git command:
+Before requesting a publication lease, the worker checks the exact bounded
+contents snapshot that the publisher will commit. It feeds those captured
+bytes to Git on standard input, so a later workspace-path change cannot alter
+what the check attests:
 
 ```text
-git -C /workspace diff --no-index --check -- /dev/null <path>
+git diff --no-index --check -- /dev/null -
 ```
 
 The pinned Linux worker accepts only exit status `1` with empty combined output,
 which is Git's clean “files differ” result for a new file. A whitespace finding,
-unexpected output, another exit status, a truncated command result or a command
-failure blocks publication. The receipt stores the check kind, number of files
-checked and a pass flag; it does not store filenames or diagnostics.
+unexpected output, another exit status, oversized input or output, a timeout or
+a command failure blocks publication. The receipt stores the check kind, number
+of files checked and a pass flag; it does not store filenames or diagnostics.
 
 ## Receipt compatibility
 
