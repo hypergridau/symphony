@@ -438,29 +438,33 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   end
 
   defp verify_and_record_disposal(claim, record, allocation, assignment, context) do
-    with {:ok, request, expected} <- disposal_request(claim, record, allocation, assignment, context) do
-      uid = get_in(record.observation, ["job", "uid"])
+    case disposal_request(claim, record, allocation, assignment, context) do
+      {:ok, request, expected} ->
+        uid = get_in(record.observation, ["job", "uid"])
 
-      case AbortPrepareJournal.load_confirmed_delete(context.journal_root, claim, record, uid) do
-        {:ok, checkpoint} ->
-          AbortPrepareJournal.load_confirmed_disposal_proof(
-            context.journal_root,
-            claim,
-            record,
-            request,
-            expected,
-            checkpoint
-          )
+        case AbortPrepareJournal.load_confirmed_delete(context.journal_root, claim, record, uid) do
+          {:ok, checkpoint} ->
+            AbortPrepareJournal.load_confirmed_disposal_proof(
+              context.journal_root,
+              claim,
+              record,
+              request,
+              expected,
+              checkpoint
+            )
 
-        :missing ->
-          verify_new_disposal(claim, record, request, expected, context)
+          :missing ->
+            verify_new_disposal(claim, record, request, expected, context)
 
-        {:held, _reason} = held ->
-          held
-      end
-    else
-      {:held, _reason} = held -> held
-      _ -> {:held, :root_abort_input_disposal_unavailable}
+          {:held, _reason} = held ->
+            held
+        end
+
+      {:held, _reason} = held ->
+        held
+
+      _ ->
+        {:held, :root_abort_input_disposal_unavailable}
     end
   rescue
     _ -> {:held, :root_abort_input_disposal_unavailable}

@@ -1210,7 +1210,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     assert Process.get(:abort_root_input_disposal_calls) == 1
     assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
-    assert length(Agent.get(context.client, & &1.deletes)) == 0
+    assert Agent.get(context.client, & &1.deletes) == []
     {:ok, claim} = AbortPrepareJournal.identity_key(prepared.prepare_ack_guard_context.claim)
     refute File.exists?(Path.join(context.root, claim <> ".confirmed-delete.json"))
 
@@ -1221,7 +1221,7 @@ defmodule SymphonyElixir.AbortPrepareCallerTest do
 
     assert Process.get(:abort_root_input_disposal_calls) == 2
     assert length(Enum.filter(File.ls!(context.root), &String.contains?(&1, ".disposal-"))) == 1
-    assert length(Agent.get(context.client, & &1.deletes)) == 0
+    assert Agent.get(context.client, & &1.deletes) == []
   end
 
   test "confirmed deletion binds the fresh receipt among multiple saved proofs", context do
