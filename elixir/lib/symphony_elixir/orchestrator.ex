@@ -41,7 +41,7 @@ defmodule SymphonyElixir.Orchestrator do
   alias SymphonyElixir.ResponsibilityGraph.Persistence, as: ResponsibilityPersistence
   alias SymphonyElixir.ResponsibilityGraph.ReviewCompletion
   alias SymphonyElixir.RKE2Job.{DisposableCleanupEvidence, HostActivationGuard, HostAllocationContext}
-  alias SymphonyElixir.RKE2Job.{MergedResultEvidence, ResultReader, SuspendedController}
+  alias SymphonyElixir.RKE2Job.{MergedResultEvidence, PreSpawnAbortController, ResultReader, SuspendedController}
   alias SymphonyElixir.RKE2Job.{TerminalLease, TerminalOwner}
   alias SymphonyElixir.Tracker.Issue
   alias SymphonyElixir.WorkPackageClaim.{Abandonment, Journal, Unsubmitted}
@@ -752,7 +752,7 @@ defmodule SymphonyElixir.Orchestrator do
     dispatch = Map.get(reservation, :dispatch, %{})
     execution = Map.get(state.execution_fence.executions, issue_id)
 
-    if dispatch[:phase] in ["allocation_suspended", "spawn_started"],
+    if dispatch[:phase] in ["allocation_suspended", "spawn_started", "abort_pending"],
       do: restore_matching_or_historical_retained_claim(state, journal, key, reservation, dispatch, execution),
       else: state
   end
@@ -907,6 +907,13 @@ defmodule SymphonyElixir.Orchestrator do
           state
       end
     else
+      _ -> state
+    end
+  end
+
+  defp reconcile_retained_disposable_terminal(state, %{dispatch: %{phase: "abort_pending"}} = reservation) do
+    case get_in(state.blocked, [reservation.issue_id, :issue]) do
+      %Issue{} = issue -> resume_retained_disposable_activation(state, issue)
       _ -> state
     end
   end
@@ -1279,6 +1286,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_blocked_issue_state(%Issue{} = issue, state, active_states, terminal_states) do
     cond do
+      retained_abort?(state, issue.id) ->
+        reconcile_retained_abort(state, issue)
+
       terminal_issue_state?(issue.state, terminal_states) ->
         if retained_disposable_claim?(state, issue) do
           Logger.info("Blocked issue is terminal with a retained disposable allocation: #{issue_context(issue)}; retaining cleanup authority")
@@ -1319,12 +1329,33 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp reconcile_blocked_issue_state(_issue, state, _active_states, _terminal_states), do: state
 
+  defp reconcile_retained_abort(state, issue) do
+    if Abandonment.check(state.work_package_runtime, state.execution_fence, issue.id) == :authorized do
+      release_issue_claim(state, issue.id)
+    else
+      state |> refresh_blocked_issue_state(issue) |> resume_retained_disposable_activation(issue)
+    end
+  end
+
+  defp retained_abort?(state, issue_id) do
+    runtime = state.work_package_runtime || %{}
+
+    with path when is_binary(path) <- runtime[:journal_path],
+         %{generation: generation, repository: repository} <- state.execution_fence.executions[issue_id],
+         {:ok, journal} <- Journal.load(path),
+         key = Journal.reservation_key(issue_id, runtime.managed_project_profile_id, repository, generation),
+         %{dispatch: %{phase: "abort_pending"}} <- journal.reservations[key] do
+      true
+    else
+      _ -> false
+    end
+  end
+
   defp resume_retained_disposable_activation(state, issue) do
     runtime = state.work_package_runtime || %{}
     execution = Map.get(state.execution_fence.executions, issue.id)
 
-    with %{configured?: true, paused?: false, state: "running"} <- GlobalPause.snapshot(),
-         host when is_map(host) <- Map.get(runtime, :disposable_rke2_host_config),
+    with host when is_map(host) <- Map.get(runtime, :disposable_rke2_host_config),
          path when is_binary(path) <- Map.get(runtime, :journal_path),
          runner_id when is_binary(runner_id) <- Map.get(runtime, :runner_id),
          profile when is_binary(profile) <- Map.get(runtime, :managed_project_profile_id),
@@ -1332,18 +1363,40 @@ defmodule SymphonyElixir.Orchestrator do
          key = Journal.reservation_key(issue.id, profile, repository, generation),
          {:ok, journal} <- Journal.load(path),
          reservation when is_map(reservation) <- Map.get(journal.reservations, key),
-         %{phase: "spawn_started", allocation_id: allocation_id} <- reservation.dispatch,
+         %{phase: phase, allocation_id: allocation_id} when phase in ["allocation_suspended", "spawn_started", "abort_pending"] <- reservation.dispatch,
          true <-
            reservation.issue_id == issue.id and reservation.generation == generation and
              reservation.repository_ref == repository and reservation.runner_id == runner_id,
          {:ok, assignment} <- ManagedAssignmentBundle.from_snapshot(reservation.assignment_snapshot),
          %{environment: %{target_environment: :rke2}} <- assignment,
-         %{status: :active, process_id: process_id, branch: branch, role: :worker} <-
-           Map.get(leases, reservation.session_id),
+         %{process_id: process_id, branch: branch, role: :worker} <- Map.get(leases, reservation.session_id),
          true <- process_id == reservation.process_id and branch == assignment.branch,
-         {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id),
-         {:ok, context} <- HostAllocationContext.reattach_unstarted(assignment, binding, allocation_id, host) do
+         {:ok, binding} <- ClaimBinding.from_journal(reservation, assignment, runner_id) do
       dispatch = %{assignment_bundle: assignment, claim_binding: binding}
+
+      resume_retained_phase(state, issue, reservation, dispatch, host, leases, phase, allocation_id)
+    else
+      _ -> state
+    end
+  end
+
+  defp resume_retained_phase(state, issue, reservation, dispatch, host, _leases, "abort_pending", _allocation_id) do
+    assignment = dispatch.assignment_bundle
+
+    case HostAllocationContext.reattach_abort(assignment, dispatch.claim_binding, reservation.dispatch, host) do
+      {:ok, context} -> continue_pre_spawn_abort(state, issue, assignment, reservation, context, host)
+      {:held, reason} -> block_claim_recovery(state, issue, {:pre_spawn_abort_held, reason})
+    end
+  end
+
+  defp resume_retained_phase(state, issue, reservation, dispatch, host, leases, _phase, allocation_id) do
+    assignment = dispatch.assignment_bundle
+    binding = dispatch.claim_binding
+
+    with %{configured?: true, paused?: false, state: "running"} <- GlobalPause.snapshot(),
+         %{status: :active} <- Map.get(leases, reservation.session_id),
+         {:ok, context} <-
+           HostAllocationContext.reattach_unstarted(assignment, binding, allocation_id, host) do
       activate_disposable_allocation(state, issue, dispatch, context, claim_input(state, issue), allocation_id)
     else
       _ -> state
@@ -1429,12 +1482,20 @@ defmodule SymphonyElixir.Orchestrator do
 
     if retained_disposable_claim?(state, issue) do
       Logger.info("Blocked issue is not visible with a retained disposable allocation: issue_id=#{issue_id}; retaining cleanup authority")
-      state
+
+      if retained_abort?(state, issue_id),
+        do: resume_retained_disposable_activation(state, issue),
+        else: state
     else
       Logger.info("Blocked issue no longer visible during state refresh: issue_id=#{issue_id}; releasing block")
       release_issue_claim(state, issue_id)
     end
   end
+
+  @doc false
+  @spec reconcile_missing_blocked_issue_for_test(term(), String.t()) :: term()
+  def reconcile_missing_blocked_issue_for_test(%State{} = state, issue_id),
+    do: reconcile_missing_blocked_issue(state, issue_id)
 
   defp log_missing_running_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     case Map.get(state.running, issue_id) do
@@ -2708,21 +2769,84 @@ defmodule SymphonyElixir.Orchestrator do
           |> Map.put(:activation_guard, HostActivationGuard)
           |> Map.put(:activation_guard_context, %{claim_input: input, claim_binding: dispatch.claim_binding})
 
-        case SuspendedController.resume(dispatch.assignment_bundle, input, context) do
-          {:ok, _active} ->
-            block_claim_recovery(state, issue, {:disposable_rke2_started_retained, allocation_id})
+        case PreSpawnAbortController.before_resume(dispatch.assignment_bundle, input, context) do
+          {:ok, :ready} ->
+            resume_disposable_allocation(state, issue, dispatch, context, input, allocation_id)
 
-          {:held, reason} ->
-            block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+          {:abort, reservation} ->
+            host = get_in(state.work_package_runtime, [:disposable_rke2_host_config])
+            continue_pre_spawn_abort(state, issue, dispatch.assignment_bundle, reservation, context, host)
 
-          {:error, reason} ->
-            block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+          {_, reason} ->
+            block_claim_recovery(state, issue, {:disposable_rke2_pre_spawn_held, allocation_id, reason})
         end
 
       _ ->
         block_claim_recovery(state, issue, {:disposable_rke2_activation_unavailable, allocation_id})
     end
   end
+
+  defp resume_disposable_allocation(state, issue, dispatch, context, input, allocation_id) do
+    case SuspendedController.resume(dispatch.assignment_bundle, input, context) do
+      {:ok, _active} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_started_retained, allocation_id})
+
+      {:held, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+
+      {:error, reason} ->
+        block_claim_recovery(state, issue, {:disposable_rke2_activation_uncertain, allocation_id, reason})
+    end
+  end
+
+  defp continue_pre_spawn_abort(state, issue, assignment, reservation, context, host) do
+    input = claim_input(state, issue)
+
+    with true <- is_map(host) and is_binary(state.execution_fence_path),
+         {:ok, ownership} <- PreSpawnAbortController.reconcile_ownership(reservation, assignment, input, context),
+         {:ok, reconciled} <- persist_execution_fence(state, ownership) do
+      finish_pre_spawn_abort(reconciled, issue, assignment, reservation, context, host)
+    else
+      {_, reason} -> block_claim_recovery(state, issue, {:pre_spawn_abort_held, reason})
+      _ -> block_claim_recovery(state, issue, {:pre_spawn_abort_held, :host_context_unavailable})
+    end
+  end
+
+  defp finish_pre_spawn_abort(state, issue, assignment, reservation, context, host) do
+    with :ok <- PreSpawnAbortController.unused_worker(claim_input(state, issue), assignment, reservation, false),
+         :ok <- PreSpawnAbortController.publish(reservation, assignment, context),
+         token = %{issue_id: assignment.lease.issue_id, generation: assignment.lease.generation},
+         {:ok, fence, _receipt} <-
+           ExecutionFence.release(state.execution_fence, token, assignment.lease.session_id, :spawn_failed),
+         {:ok, released} <- persist_execution_fence(state, fence) do
+      # Re-read the persisted fence, rather than treating an in-memory release as disposal authority.
+      case verify_pre_spawn_release(released, issue, assignment, reservation) do
+        :ok ->
+          input = claim_input(released, issue)
+          outcome = PreSpawnAbortController.cleanup(reservation, assignment, input, context, host)
+          block_claim_recovery(released, issue, {:codex_auth_slot_denied, :abort_pending, outcome})
+
+        {:held, reason} ->
+          block_claim_recovery(released, issue, {:pre_spawn_abort_held, reason})
+      end
+    else
+      {_, reason} -> block_claim_recovery(state, issue, {:pre_spawn_abort_held, reason})
+    end
+  end
+
+  defp verify_pre_spawn_release(%{execution_fence_path: path} = state, issue, assignment, reservation) when is_binary(path) do
+    with {:ok, fence} <- Persistence.load(path),
+         {:ok, expected} <- Persistence.encode_bytes(state.execution_fence),
+         {:ok, ^expected} <- Persistence.encode_bytes(fence) do
+      input = claim_input(%{state | execution_fence: fence}, issue)
+      PreSpawnAbortController.unused_worker(input, assignment, reservation, true)
+    else
+      _ -> {:held, :pre_spawn_worker_release_unverified}
+    end
+  end
+
+  defp verify_pre_spawn_release(_state, _issue, _assignment, _reservation),
+    do: {:held, :pre_spawn_worker_release_unverified}
 
   defp retain_disposable_claim(state, issue, dispatch, reason) do
     # A signed disposable assignment must never enter the persistent local

@@ -70,6 +70,7 @@ defmodule SymphonyElixir.ManagedExecutor.Adapter do
           | :credential_lease_denied
           | :credential_lease_expired
           | :credential_lease_invalid
+          | :codex_auth_slot_denied
   @type pre_execution_result :: %{
           assignment_digest: String.t(),
           abort_reason: abort_reason(),

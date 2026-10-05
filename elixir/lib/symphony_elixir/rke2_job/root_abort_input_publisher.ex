@@ -14,7 +14,9 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   @timeout_ms 5_000
   @selector_fields ~w(schemaVersion operation claimSHA256 assignmentDigest allocationId resultReference)
   @eligibility_fields ~w(status claimSHA256 assignmentDigest allocationId resultReference)
-  @disposal_fields ~w(status claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt)
+  @disposal_fields ~w(
+    status claimSHA256 assignmentDigest allocationId resultReference resultSHA256 prepareId prepareRequestSHA256 observedAt
+  )
   @response_fields ~w(status claimSHA256)
   @hex64 ~r/\A[a-f0-9]{64}\z/
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
@@ -120,15 +122,8 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
   @doc false
   @spec validate_disposal_response(term(), term()) :: :ok | {:error, atom()}
   def validate_disposal_response(response, request) when is_map(response) and is_map(request) do
-    selector_fields = ~w(claimSHA256 assignmentDigest allocationId resultReference)
-
-    if exact_fields?(response, @disposal_fields) and
-         response["status"] == "pre-execution-abort-disposal-verified" and
-         Enum.all?(selector_fields, &(response[&1] == request[&1])) and
-         digest?(response["resultSHA256"]) and
-         is_binary(response["prepareId"]) and Regex.match?(@uuid, response["prepareId"]) and
-         digest?(response["prepareRequestSHA256"]) and
-         fresh_timestamp?(response["observedAt"]) do
+    if disposal_response_shape?(response) and disposal_selectors_match?(response, request) and
+         disposal_receipt_fields_valid?(response) do
       :ok
     else
       {:error, :invalid_root_abort_disposal_acknowledgement}
@@ -137,8 +132,24 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
 
   def validate_disposal_response(_response, _request), do: {:error, :invalid_root_abort_disposal_acknowledgement}
 
+  defp disposal_response_shape?(response) do
+    exact_fields?(response, @disposal_fields) and
+      response["status"] == "pre-execution-abort-disposal-verified"
+  end
+
+  defp disposal_selectors_match?(response, request) do
+    Enum.all?(~w(claimSHA256 assignmentDigest allocationId resultReference), &(response[&1] == request[&1]))
+  end
+
+  defp disposal_receipt_fields_valid?(response) do
+    digest?(response["resultSHA256"]) and valid_prepare_id?(response["prepareId"]) and
+      digest?(response["prepareRequestSHA256"]) and fresh_timestamp?(response["observedAt"])
+  end
+
+  defp valid_prepare_id?(value), do: is_binary(value) and Regex.match?(@uuid, value)
+
   defp exchange(request) do
-    options = [:binary, active: false, packet: :line, packet_size: 1_024]
+    options = [:binary, active: false, packet: :line, packet_size: 4_096]
 
     case :gen_tcp.connect({:local, String.to_charlist(@socket_path)}, 0, options, @timeout_ms) do
       {:ok, socket} ->
@@ -188,8 +199,6 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisher do
       _ -> {:error, :invalid_root_abort_input_request}
     end
   end
-
-  defp validate_selector_request(_request, _operation), do: {:error, :invalid_root_abort_input_request}
 
   defp fresh_timestamp?(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do

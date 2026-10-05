@@ -74,6 +74,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     :cleanup_pending
   ]
   @abort_reasons [
+    :codex_auth_slot_denied,
     :checkout_preparation_failed,
     :checkout_intent_mismatch,
     :credential_lease_denied,
@@ -285,6 +286,7 @@ defmodule SymphonyElixir.ManagedExecutor.Record do
     do: {:error, :abort_release_ack_invalid}
 
   @spec pre_execution_summary(atom()) :: String.t()
+  def pre_execution_summary(:codex_auth_slot_denied), do: "The bound Codex auth slot was denied before spawn intent."
   def pre_execution_summary(:checkout_preparation_failed), do: "Checkout preparation failed before execution."
   def pre_execution_summary(:checkout_intent_mismatch), do: "Checkout intent or commit did not match the assignment."
   def pre_execution_summary(:credential_lease_denied), do: "The assignment credential lease was denied before execution."

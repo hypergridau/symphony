@@ -1,4 +1,5 @@
 defmodule SymphonyElixir.RKE2Job.SuspendedControllerFakeAdapter do
+  def preflight_owned(_allocation, _assignment, _key, _context), do: :ok
   alias SymphonyElixir.WorkPackageClaim.Journal
 
   def allocate_or_reconcile(assignment, key, context) do

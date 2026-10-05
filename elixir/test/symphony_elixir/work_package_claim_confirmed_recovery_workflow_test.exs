@@ -37,14 +37,18 @@ defmodule SymphonyElixir.WorkPackageClaim.ConfirmedRecoveryWorkflowTest do
     assert_denied(Map.put(files, @root <> @output <> "grid.md", :binary.copy("x", 524_289)))
   end
 
-  test "accepts the 135-file reconciliation export and rejects a 136th entry" do
+  test "accepts the 137-file abort export, preserves predecessors and rejects a 138th entry" do
     {files, _receipt, controls} = fixture()
-    extra = for number <- 1..128, do: entry("scripts/symphony/bounded-#{number}.py", "control")
+    extra = for number <- 1..130, do: entry("scripts/symphony/bounded-#{number}.py", "control")
     complete = %{controls | "files" => controls["files"] ++ extra}
-    assert length(complete["files"]) == 135
+    assert length(complete["files"]) == 137
     assert :ok = verify(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(complete)))
-    predecessor = %{complete | "files" => Enum.take(complete["files"], 130)}
-    assert :ok = verify(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(predecessor)))
+
+    for count <- [130, 135] do
+      predecessor = %{complete | "files" => Enum.take(complete["files"], count)}
+      assert :ok = verify(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(predecessor)))
+    end
+
     oversized = %{complete | "files" => complete["files"] ++ [entry("scripts/symphony/overflow.py", "control")]}
     assert_denied(Map.put(files, @root <> "linux-control-receipt.json", Jason.encode!(oversized)))
   end

@@ -88,7 +88,6 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
          {:ok, _uid} <- allocation_uid(allocation, expected) do
       pre_spawn_auth_slot_guard(context, ports.config, assignment, allocation)
     else
-      {:held, reason} -> {:held, reason}
       {:error, reason} -> {:error, reason}
     end
   end

@@ -8,11 +8,16 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
   """
 
   import Bitwise, only: [band: 2]
+  alias SymphonyElixir.RKE2Job.RootAbortInputPublisher
 
   @schema_version 1
   @max_bytes 16_384
   @record_fields ~w(
     schema_version claim assignment_digest allocation_id prepare_id request_sha256 request_bytes observation
+  )
+  @disposal_checkpoint_fields ~w(
+    schema_version claim assignment_digest allocation_id prepare_id prepare_request_sha256 result_reference
+    result_sha256 receipt_sha256 response
   )
 
   @spec identity_key(map()) :: {:ok, String.t()} | {:error, atom()}
@@ -373,13 +378,27 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
 
   defp valid_disposal_proof?(claim, record, request, expected, response)
        when is_map(claim) and is_map(record) and is_map(request) and is_map(expected) and is_map(response) do
-    Enum.sort(Map.keys(expected)) == Enum.sort(~w(resultSHA256 prepareId prepareRequestSHA256)) and
-      SymphonyElixir.RKE2Job.RootAbortInputPublisher.validate_disposal_request(request) == :ok and
-      SymphonyElixir.RKE2Job.RootAbortInputPublisher.validate_disposal_response(response, request) == :ok and
-      response["claimSHA256"] == identity_key!(claim) and
+    valid_disposal_contract?(request, response) and
+      disposal_selectors_match?(claim, record, request, response) and
+      disposal_record_bindings_match?(record, expected, response)
+  end
+
+  defp valid_disposal_proof?(_claim, _record, _request, _expected, _response), do: false
+
+  defp valid_disposal_contract?(request, response) do
+    RootAbortInputPublisher.validate_disposal_request(request) == :ok and
+      RootAbortInputPublisher.validate_disposal_response(response, request) == :ok
+  end
+
+  defp disposal_selectors_match?(claim, record, request, response) do
+    response["claimSHA256"] == identity_key!(claim) and
       response["assignmentDigest"] == record.assignment_digest and
       response["allocationId"] == record.allocation_id and
-      response["resultReference"] == request["resultReference"] and
+      response["resultReference"] == request["resultReference"]
+  end
+
+  defp disposal_record_bindings_match?(record, expected, response) do
+    Enum.sort(Map.keys(expected)) == Enum.sort(~w(resultSHA256 prepareId prepareRequestSHA256)) and
       response["resultSHA256"] == expected["resultSHA256"] and
       response["prepareId"] == record.prepare_id and
       response["prepareRequestSHA256"] == record.request_sha256 and
@@ -387,28 +406,36 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareJournal do
       expected["prepareRequestSHA256"] == record.request_sha256
   end
 
-  defp valid_disposal_proof?(_claim, _record, _request, _expected, _response), do: false
-
   defp valid_disposal_checkpoint?(checkpoint, claim, record, request, expected, receipt_hash) when is_map(checkpoint) do
-    fields = ~w(schema_version claim assignment_digest allocation_id prepare_id prepare_request_sha256 result_reference result_sha256 receipt_sha256 response)
-
-    Enum.sort(Map.keys(checkpoint)) == Enum.sort(fields) and
-      checkpoint["schema_version"] == @schema_version and
-      checkpoint["claim"] == claim and
-      checkpoint["assignment_digest"] == record.assignment_digest and
-      checkpoint["allocation_id"] == record.allocation_id and
-      checkpoint["prepare_id"] == record.prepare_id and
-      checkpoint["prepare_request_sha256"] == record.request_sha256 and
-      checkpoint["result_reference"] == request["resultReference"] and
-      checkpoint["result_sha256"] == expected["resultSHA256"] and
-      checkpoint["receipt_sha256"] == receipt_hash and
-      checkpoint["receipt_sha256"] == sha256(Jason.encode!(checkpoint["response"])) and
+    valid_disposal_checkpoint_shape?(checkpoint) and
+      valid_disposal_checkpoint_binding?(checkpoint, claim, record, request, expected) and
+      valid_disposal_receipt?(checkpoint, receipt_hash) and
       valid_disposal_proof?(claim, record, request, expected, checkpoint["response"])
   rescue
     _ -> false
   end
 
   defp valid_disposal_checkpoint?(_checkpoint, _claim, _record, _request, _expected, _receipt_hash), do: false
+
+  defp valid_disposal_checkpoint_shape?(checkpoint) do
+    Enum.sort(Map.keys(checkpoint)) == Enum.sort(@disposal_checkpoint_fields) and
+      checkpoint["schema_version"] == @schema_version
+  end
+
+  defp valid_disposal_checkpoint_binding?(checkpoint, claim, record, request, expected) do
+    checkpoint["claim"] == claim and
+      checkpoint["assignment_digest"] == record.assignment_digest and
+      checkpoint["allocation_id"] == record.allocation_id and
+      checkpoint["prepare_id"] == record.prepare_id and
+      checkpoint["prepare_request_sha256"] == record.request_sha256 and
+      checkpoint["result_reference"] == request["resultReference"] and
+      checkpoint["result_sha256"] == expected["resultSHA256"]
+  end
+
+  defp valid_disposal_receipt?(checkpoint, receipt_hash) do
+    checkpoint["receipt_sha256"] == receipt_hash and
+      checkpoint["receipt_sha256"] == sha256(Jason.encode!(checkpoint["response"]))
+  end
 
   defp identity_key!(claim) do
     {:ok, key} = identity_key(claim)

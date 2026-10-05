@@ -11,7 +11,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   alias SymphonyElixir.ManagedAssignmentBundle
   alias SymphonyElixir.PathSafety
   alias SymphonyElixir.RKE2Job.{AuthCacheVerifierObserver, DahliaAssignmentBinding, DahliaAuthSlotLeaseGuard}
-  alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec}
+  alias SymphonyElixir.RKE2Job.{HostClientContext, HTTPClient, JobSpec, PreSpawnAbortSnapshot}
   alias SymphonyElixir.RKE2Job.{JobAllocationRegistration, ManagedExecutorAdapter, ResultJournal}
   alias SymphonyElixir.RKE2Job.SuspendedAbort
 
@@ -164,6 +164,34 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
   def reattach_terminal(_assignment, _binding, _allocation_id, _config),
     do: {:held, :rke2_terminal_allocation_unverified}
 
+  @doc "Rebuilds only the retained abort context, including after checkpointed Job deletion."
+  @spec reattach_abort(map(), map(), map(), map()) :: {:ok, map()} | {:held, term()}
+  def reattach_abort(assignment, binding, %{phase: "abort_pending", abort_reason: "codex_auth_slot_denied", abort_config: saved, allocation_id: id}, config) do
+    with :ok <- ManagedAssignmentBundle.validate_bundle(assignment),
+         true <- assignment.repository_ref == config.repository_ref and binding.repository_ref == config.repository_ref,
+         true <- binding.issue_id == assignment.lease.issue_id and binding.generation == assignment.lease.generation,
+         :ok <- PreSpawnAbortSnapshot.validate(saved, assignment),
+         slot = saved.auth_slot,
+         true <- slot.slot_id == config.slot_id and slot.claim_name == config.claim_name,
+         {:ok, replay_config} <- restore_binding_digest(config, slot),
+         true <- saved == job_config(replay_config, slot),
+         {:ok, expected} <- JobSpec.compile(assignment, saved),
+         {:ok, _uid} <- terminal_allocation_uid(id, expected),
+         provider = Map.get(config, :client_context_fun, &HostClientContext.client_context/4),
+         {:ok, kube_context} <- provider.(assignment, :abort_prepare, assignment.sha256 <> ":abort_unstarted", replay_config),
+         guard = guard_context(replay_config, binding, kube_context),
+         :ok <- slot_guard(replay_config).verify_claim_uid(slot, guard),
+         :ok <- slot_guard(replay_config).verify_bound(slot, assignment, %{id: id, status: :ready}, guard) do
+      {:ok, build_context(replay_config, binding, slot, guard)}
+    else
+      _ -> {:held, :rke2_retained_abort_unverified}
+    end
+  rescue
+    _ -> {:held, :rke2_retained_abort_unverified}
+  end
+
+  def reattach_abort(_assignment, _binding, _dispatch, _config), do: {:held, :rke2_retained_abort_unverified}
+
   defp terminal_allocation_uid("rke2job:v1:" <> encoded, expected) do
     with {:ok, bytes} <- Base.url_decode64(encoded, padding: false),
          {:ok, [1, @namespace, name, uid, digest]} <- Jason.decode(bytes),
@@ -190,6 +218,7 @@ defmodule SymphonyElixir.RKE2Job.HostAllocationContext do
       auth_slot_lease_guard: DahliaAuthSlotLeaseGuard,
       auth_slot_lease_guard_context: guard_context,
       result_journal_root: config.result_journal_root,
+      abort_result_journal_root: config.result_journal_root,
       claim_binding: binding
     }
     |> maybe_test_port(config, :test_pid)

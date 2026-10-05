@@ -401,25 +401,25 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
              retry: false,
              redirect: false
            ) do
-      case response do
-        {:ok, %Req.Response{status: status, body: %{"data" => %{"authorized" => true}}}}
-        when status in 200..299 ->
-          {:ok, :ok}
-
-        {:ok, %Req.Response{status: 409, body: body}} ->
-          if valid_slot_denial?(body),
-            do: {:ok, {:denied, :codex_auth_slot_denied}},
-            else: {:error, :unverified}
-
-        _ ->
-          {:error, :unverified}
-      end
+      authorize_pre_spawn_response(response)
     else
       _ -> {:error, :unverified}
     end
   rescue
     _error -> {:error, :unverified}
   end
+
+  defp authorize_pre_spawn_response({:ok, %Req.Response{status: status, body: %{"data" => %{"authorized" => true}}}})
+       when status in 200..299,
+       do: {:ok, :ok}
+
+  defp authorize_pre_spawn_response({:ok, %Req.Response{status: 409, body: body}}) do
+    if valid_slot_denial?(body),
+      do: {:ok, {:denied, :codex_auth_slot_denied}},
+      else: {:error, :unverified}
+  end
+
+  defp authorize_pre_spawn_response(_response), do: {:error, :unverified}
 
   defp valid_slot_denial?(
          %{
@@ -436,9 +436,9 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
            }
          } = body
        ) do
-    MapSet.new(Map.keys(body)) == MapSet.new(["error", "meta"]) and
-      MapSet.new(Map.keys(body["error"])) == MapSet.new(["code", "category", "message", "details"]) and
-      MapSet.new(Map.keys(body["meta"])) == MapSet.new(["request_id", "release_version", "api_version"]) and
+    MapSet.equal?(MapSet.new(Map.keys(body)), MapSet.new(["error", "meta"])) and
+      MapSet.equal?(MapSet.new(Map.keys(body["error"])), MapSet.new(["code", "category", "message", "details"])) and
+      MapSet.equal?(MapSet.new(Map.keys(body["meta"])), MapSet.new(["request_id", "release_version", "api_version"])) and
       nonempty_text?(message) and is_map(details) and nonempty_text?(request_id) and
       nonempty_text?(release_version) and nonempty_text?(api_version)
   end

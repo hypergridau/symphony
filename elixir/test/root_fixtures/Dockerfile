@@ -11,4 +11,4 @@ RUN apt-get update \
  && MIX_ENV=test mix compile
 
 ENV MIX_ENV=test HGS740_ROOT_FIXTURE=1
-CMD ["mix", "test", "--no-compile", "test/root_fixtures/root_fixture.exs"]
+CMD ["mix", "test", "--no-compile", "test/root_fixtures/root_fixture.exs", "test/root_fixtures/root_abort_input_publisher_fixture.exs"]

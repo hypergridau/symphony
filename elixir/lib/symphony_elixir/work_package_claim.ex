@@ -409,6 +409,13 @@ defmodule SymphonyElixir.WorkPackageClaim do
   @doc "Persists root activation intent for the exact suspended allocation; same-ID replay is idempotent."
   @spec begin_suspended_spawn(input(), String.t()) :: :ok | {:error, term()}
   def begin_suspended_spawn(input, allocation_id) when is_map(input) and is_binary(allocation_id) do
+    Journal.with_lock(input.journal_path, fn -> begin_suspended_spawn_locked(input, allocation_id) end)
+  end
+
+  def begin_suspended_spawn(_input, _allocation_id),
+    do: {:error, :suspended_allocation_identity_invalid}
+
+  defp begin_suspended_spawn_locked(input, allocation_id) do
     now_fun = &DateTime.utc_now/0
 
     with {:ok, authority} <- recovery_authority(input, System.system_time(:millisecond)),
@@ -426,9 +433,6 @@ defmodule SymphonyElixir.WorkPackageClaim do
       error -> error
     end
   end
-
-  def begin_suspended_spawn(_input, _allocation_id),
-    do: {:error, :suspended_allocation_identity_invalid}
 
   @doc "Builds the provider HMAC canonical JSON in wire-field order."
   @spec canonical_json(map()) :: {:ok, String.t()} | {:error, term()}

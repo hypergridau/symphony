@@ -41,7 +41,7 @@ defmodule SymphonyElixir.AbortPrepareTestRootInputPublisher do
   end
 
   defp disposal_response(request, expected) do
-    Map.merge(request, expected)
+    Map.merge(Map.take(request, ~w(claimSHA256 assignmentDigest allocationId resultReference)), expected)
     |> Map.put("observedAt", DateTime.utc_now() |> DateTime.to_iso8601())
     |> Map.put("status", "pre-execution-abort-disposal-verified")
   end

@@ -72,8 +72,7 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisherTest do
     assert :ok = RootAbortInputPublisher.validate_disposal_request(disposal)
     assert :ok = RootAbortInputPublisher.validate_disposal_response(disposal_response, disposal)
 
-    assert {:error, :invalid_root_abort_disposal_acknowledgement} =
-             RootAbortInputPublisher.validate_disposal_response(Map.put(disposal_response, "allocationId", "other"), disposal)
+    assert_disposal_response_invalid(Map.put(disposal_response, "allocationId", "other"), disposal)
   end
 
   test "holds expanded selector requests and malformed or stale disposal responses" do
@@ -98,11 +97,11 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisherTest do
     for changed <- [
           Map.put(base_response, "observedAt", "not-a-timestamp"),
           Map.put(base_response, "observedAt", DateTime.add(DateTime.utc_now(), 301, :second) |> DateTime.to_iso8601()),
-          Map.put(base_response, "observedAt", DateTime.add(DateTime.utc_now(), -301, :second) |> DateTime.to_iso8601()),
+          Map.put(base_response, "observedAt", timestamp_ago(-301)),
           Map.put(base_response, "prepareId", "not-a-uuid"),
           Map.put(base_response, "resultSHA256", "bad")
         ] do
-      assert {:error, :invalid_root_abort_disposal_acknowledgement} = RootAbortInputPublisher.validate_disposal_response(changed, request)
+      assert_disposal_response_invalid(changed, request)
     end
   end
 
@@ -119,5 +118,14 @@ defmodule SymphonyElixir.RKE2Job.RootAbortInputPublisherTest do
 
   defp disposal_request do
     request("verify_pre_execution_abort_disposal")
+  end
+
+  defp assert_disposal_response_invalid(response, request) do
+    assert {:error, :invalid_root_abort_disposal_acknowledgement} =
+             RootAbortInputPublisher.validate_disposal_response(response, request)
+  end
+
+  defp timestamp_ago(seconds) do
+    DateTime.add(DateTime.utc_now(), seconds, :second) |> DateTime.to_iso8601()
   end
 end

@@ -305,8 +305,19 @@ checkpoint, and requires the Job and all owned Pods to remain absent before
 replaying success. If deletion may have committed but the response or
 post-delete evidence was lost before the checkpoint became durable, retry
 remains held because absence alone cannot prove which operation removed the
-Job. The caller is not wired into the
-production managed-executor lifecycle. Linux filesystem crash durability still
+Job. `PreSpawnAbortController` now composes this caller for the host's exact
+pre-intent `codex_auth_slot_denied` failure. An immutable `abort_pending` dispatch
+retains only the credential-free Job config and slot binding. It cannot become
+normal spawn intent. The existing result journal is reread before releasing the
+never-observed worker lease. A selector-only root eligibility check verifies the
+complete no-spawn witness; the root disposal gate independently rereads the
+prepare intent/acknowledgment, result, current held provider state, complete
+revoked/expired credential inventory and host quiescence before deletion. Each
+fresh disposal receipt is retained and reread in the existing prepare journal.
+Restart repairs only the exact unused abort lease after renewed root no-spawn
+verification, and continues cleanup regardless of current native issue
+eligibility or global admission pause. Cleanup remains blocked pending verified
+provider release. Linux filesystem crash durability still
 needs runtime qualification; Windows production use is rejected because the
 journal does not verify Windows ACLs. No OAuth/provider release or signed final
 abort proof is performed by Symphony.

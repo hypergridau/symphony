@@ -124,6 +124,18 @@ defmodule SymphonyElixir.ExecutionFence do
 
   def reconcile_suspended_claim(_state, _reservation), do: {:error, :unstarted_claim_not_reconcilable}
 
+  @doc "Builds a candidate only for an externally reverified exact pre-spawn abort fence."
+  @spec reconcile_aborted_claim(state(), map()) :: {:ok, state()} | {:error, term()}
+  def reconcile_aborted_claim(
+        state,
+        %{dispatch: %{phase: "abort_pending", abort_reason: "codex_auth_slot_denied", allocation_id: id}} = reservation
+      )
+      when is_binary(id) and byte_size(id) > 0 do
+    reconcile_unobserved_claim(state, reservation, ["abort_pending"])
+  end
+
+  def reconcile_aborted_claim(_state, _reservation), do: {:error, :unstarted_claim_not_reconcilable}
+
   @doc "Builds an in-memory candidate for a verified exact disposable Job after activation intent."
   @spec reconcile_disposable_spawn_claim(state(), map()) :: {:ok, state()} | {:error, term()}
   def reconcile_disposable_spawn_claim(state, %{dispatch: %{phase: "spawn_started", allocation_id: id}} = reservation)
@@ -827,7 +839,8 @@ defmodule SymphonyElixir.ExecutionFence do
     with :ok <- validate_state(state),
          {:ok, observations} <- canonical_observations(observations) do
       protected = protected_claim_keys(state, observations, claims)
-      reconcile_session_set(state, observations, now_ms, ttl_ms, protected)
+      ownership_holds = unverified_abort_issues(state, claims)
+      reconcile_session_set(state, observations, now_ms, ttl_ms, protected, ownership_holds)
     end
   end
 
@@ -839,7 +852,7 @@ defmodule SymphonyElixir.ExecutionFence do
       %{issue_id: issue_id, generation: generation, session_id: session_id} = claim, protected ->
         observed = Enum.any?(observations, &(&1.issue_id == issue_id))
 
-        if not observed and match?({:ok, _}, reconcile_unstarted_claim(state, claim)) do
+        if not observed and match?({:ok, _}, reconcile_protected_claim(state, claim)) do
           MapSet.put(protected, {issue_id, generation, session_id})
         else
           protected
@@ -850,10 +863,27 @@ defmodule SymphonyElixir.ExecutionFence do
     end)
   end
 
-  defp reconcile_session_set(state, observations, now_ms, ttl_ms, protected) do
+  defp reconcile_protected_claim(state, %{dispatch: %{phase: "abort_pending"}} = claim),
+    do: reconcile_aborted_claim(state, claim)
+
+  defp reconcile_protected_claim(state, claim), do: reconcile_unstarted_claim(state, claim)
+
+  defp unverified_abort_issues(state, claims) do
+    Enum.reduce(claims, MapSet.new(), fn
+      %{issue_id: issue_id, dispatch: %{phase: "abort_pending"}}, held ->
+        if get_in(state, [:executions, issue_id, :ownership]) == :unknown,
+          do: MapSet.put(held, issue_id),
+          else: held
+
+      _claim, held ->
+        held
+    end)
+  end
+
+  defp reconcile_session_set(state, observations, now_ms, ttl_ms, protected, ownership_holds \\ MapSet.new()) do
     with :ok <- validate_state(state),
          {:ok, observations} <- canonical_observations(observations) do
-      initial = %{state | executions: reset_ownership(state.executions)}
+      initial = %{state | executions: reset_ownership(state.executions, ownership_holds)}
 
       {reconciled_state, summary, seen} =
         Enum.reduce(observations, {initial, empty_summary(), protected}, fn observation, {state_acc, summary_acc, seen_acc} ->
@@ -1611,9 +1641,13 @@ defmodule SymphonyElixir.ExecutionFence do
   defp observation_sort_key(observation),
     do: {observation.issue_id, observation.generation, observation.session_id}
 
-  defp reset_ownership(executions) do
+  defp reset_ownership(executions, ownership_holds) do
     Map.new(executions, fn {issue_id, execution} ->
-      ownership = if termination_unconfirmed?(execution), do: :unknown, else: :reconciled
+      ownership =
+        if termination_unconfirmed?(execution) or MapSet.member?(ownership_holds, issue_id),
+          do: :unknown,
+          else: :reconciled
+
       {issue_id, %{execution | ownership: ownership}}
     end)
   end

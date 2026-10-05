@@ -76,12 +76,13 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
          :ok <- revalidate_root_intent(record, caller_context, claim),
          :ok <- verify_retained_abort_result(allocation, assignment, caller_context),
          true <- is_map(Map.get(prepared, :prepare_ack)),
-         {:ok, _disposal_receipt} <- verify_and_record_disposal(claim, record, allocation, assignment, caller_context) do
+         {:ok, _disposal_receipt} <-
+           verify_and_record_disposal(claim, record, allocation, assignment, caller_context) do
       context =
         caller_context.adapter_context
         |> Map.put(:prepare_ack_guard, JournalPrepareAckGuard)
         |> Map.put(:prepare_ack_guard_context, %{journal_root: caller_context.journal_root, claim: claim})
-        |> Map.put(:confirmed_delete_journal, %{journal_root: caller_context.journal_root, claim: claim, record: record})
+        |> Map.put(:confirmed_delete_journal, confirmed_delete_journal(caller_context, claim, record))
 
       with :ok <-
              ManagedExecutorAdapter.confirm_abort_unstarted_owned(
@@ -446,8 +447,8 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
          true <- disposal_response_matches?(response, record, expected),
          {:ok, encoded} <- Jason.encode(response),
          receipt_sha256 <- sha256(encoded),
-         {:ok, _} <- AbortPrepareJournal.record_disposal_proof(context.journal_root, claim, record, request, expected, response),
-         {:ok, reread} <- AbortPrepareJournal.load_disposal_proof(context.journal_root, claim, record, request, expected, receipt_sha256),
+         {:ok, reread} <-
+           persist_and_verify_disposal_proof(context, claim, record, request, expected, response, receipt_sha256),
          true <- reread == response do
       {:ok, receipt_sha256}
     else
@@ -459,6 +460,37 @@ defmodule SymphonyElixir.RKE2Job.AbortPrepareCaller do
   catch
     _kind, _reason -> {:held, :root_abort_input_disposal_unavailable}
   end
+
+  defp persist_and_verify_disposal_proof(context, claim, record, request, expected, response, receipt_sha256) do
+    case AbortPrepareJournal.record_disposal_proof(
+           context.journal_root,
+           claim,
+           record,
+           request,
+           expected,
+           response
+         ) do
+      {:ok, _proof} ->
+        load_disposal_proof(context, claim, record, request, expected, receipt_sha256)
+
+      {:held, _reason} = held ->
+        held
+    end
+  end
+
+  defp load_disposal_proof(context, claim, record, request, expected, receipt_sha256) do
+    AbortPrepareJournal.load_disposal_proof(
+      context.journal_root,
+      claim,
+      record,
+      request,
+      expected,
+      receipt_sha256
+    )
+  end
+
+  defp confirmed_delete_journal(context, claim, record),
+    do: %{journal_root: context.journal_root, claim: claim, record: record}
 
   defp call_disposal_verifier(publisher, request, expected) do
     if @test_environment and function_exported?(publisher, :verify_disposal, 2),
