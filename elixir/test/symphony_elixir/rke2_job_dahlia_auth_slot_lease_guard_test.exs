@@ -216,6 +216,85 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
     assert verify_opts[:json] == %{allocationId: @allocation.id}
   end
 
+  test "pre-spawn authorization accepts only success or the exact authenticated slot denial" do
+    caller = self()
+
+    context =
+      pre_spawn_context(fn url, opts ->
+        send(caller, {:pre_spawn_request, url, opts})
+        {:ok, %Req.Response{status: 200, body: %{"data" => %{"authorized" => true}}}}
+      end)
+
+    assert :ok = DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
+    assert_receive {:pre_spawn_request, url, opts}
+    assert String.ends_with?(url, "/#{@lease_id}/authorize")
+    assert opts[:headers] == [{"authorization", "Bearer host-only-token"}]
+    assert opts[:json] == %{allocationId: @allocation.id}
+    assert opts[:retry] == false
+    assert opts[:redirect] == false
+
+    denied =
+      pre_spawn_context(fn _url, _opts ->
+        {:ok, %Req.Response{status: 409, body: slot_denial_body()}}
+      end)
+
+    assert {:denied, :codex_auth_slot_denied} =
+             DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, denied)
+  end
+
+  test "pre-spawn authorization holds malformed conflicts and unavailable responses" do
+    malformed_bodies = [
+      %{},
+      put_in(slot_denial_body(), ["error", "code"], "another_denial"),
+      put_in(slot_denial_body(), ["error", "category"], "validation_error"),
+      Map.delete(slot_denial_body(), "meta"),
+      put_in(slot_denial_body(), ["meta", "request_id"], "")
+    ]
+
+    for body <- malformed_bodies do
+      context = pre_spawn_context(fn _, _ -> {:ok, %Req.Response{status: 409, body: body}} end)
+
+      assert {:held, :codex_auth_slot_authorization_unverified} =
+               DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
+    end
+
+    for response <- [
+          {:error, :timeout},
+          {:ok, %Req.Response{status: 503, body: %{}}},
+          {:ok, %Req.Response{status: 409, body: %{"error" => %{"code" => "codex_auth_slot_denied"}}}}
+        ] do
+      context = pre_spawn_context(fn _, _ -> response end)
+
+      assert {:held, :codex_auth_slot_authorization_unverified} =
+               DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
+    end
+  end
+
+  test "pre-spawn authorization holds a changed PVC UID without sending the denial request" do
+    context =
+      pre_spawn_context(fn _, _ -> flunk("changed PVC identity must stop before the provider check") end)
+      |> Map.put(:pvc_read_fun, fn _, _, _ ->
+        {:ok,
+         %{
+           "apiVersion" => "v1",
+           "kind" => "PersistentVolumeClaim",
+           "metadata" => %{"namespace" => "frigga", "name" => @slot.claim_name, "uid" => "replacement-pvc"},
+           "status" => %{"phase" => "Bound"}
+         }}
+      end)
+
+    assert {:held, :codex_auth_slot_authorization_unverified} =
+             DahliaAuthSlotLeaseGuard.authorize_pre_spawn(@slot, @assignment, @allocation, context)
+  end
+
+  test "pre-spawn authorization holds a slot bound to another assignment without a provider request" do
+    context = pre_spawn_context(fn _, _ -> flunk("mismatched slot must stop before the provider check") end)
+    slot = %{@slot | assignment_sha256: String.duplicate("b", 64)}
+
+    assert {:held, :codex_auth_slot_authorization_unverified} =
+             DahliaAuthSlotLeaseGuard.authorize_pre_spawn(slot, @assignment, @allocation, context)
+  end
+
   test "holds wrong lease, response, missing configuration, and release" do
     context = %{
       base_url: "https://dahlia.example",
@@ -437,6 +516,33 @@ defmodule SymphonyElixir.RKE2JobDahliaAuthSlotLeaseGuardTest do
   end
 
   defp read_pvc(_namespace, _claim_name, _context), do: {:error, :not_found}
+
+  defp pre_spawn_context(post_fun) do
+    %{
+      base_url: "https://dahlia.example",
+      runner_token: "host-only-token",
+      reservation_id: "reservation-one",
+      post_fun: post_fun,
+      pvc_namespace: "frigga",
+      pvc_read_fun: &read_pvc/3
+    }
+  end
+
+  defp slot_denial_body do
+    %{
+      "error" => %{
+        "code" => "codex_auth_slot_denied",
+        "category" => "state_conflict",
+        "message" => "The selected Codex auth slot is not authorized.",
+        "details" => %{"slotId" => "slot-one"}
+      },
+      "meta" => %{
+        "request_id" => "request-one",
+        "release_version" => "2026.10.5",
+        "api_version" => "v1"
+      }
+    }
+  end
 
   defp cleanup_receipt(receipt_id, observed_at) do
     %{

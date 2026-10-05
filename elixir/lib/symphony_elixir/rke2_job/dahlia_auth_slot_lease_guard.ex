@@ -122,6 +122,22 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
     end
   end
 
+  @doc "Checks exact slot authorization before the claim handoff establishes spawn intent."
+  @spec authorize_pre_spawn(map(), map(), map(), term()) ::
+          :ok | {:denied, :codex_auth_slot_denied} | {:held, atom()}
+  def authorize_pre_spawn(slot, assignment, allocation, context) do
+    with :ok <- matching_assignment?(slot, assignment, context),
+         {:ok, claim_uid} <- read_claim_uid(context, slot.claim_name),
+         true <- claim_uid == slot.claim_uid,
+         {:ok, response} <- pre_spawn_authorization_response(context, slot, allocation) do
+      response
+    else
+      _ -> {:held, :codex_auth_slot_authorization_unverified}
+    end
+  rescue
+    _error -> {:held, :codex_auth_slot_authorization_unverified}
+  end
+
   @impl true
   def verify_bound(slot, assignment, allocation, context) do
     with :ok <- matching_assignment?(slot, assignment, context),
@@ -369,6 +385,67 @@ defmodule SymphonyElixir.RKE2Job.DahliaAuthSlotLeaseGuard do
   rescue
     _error -> {:error, :unverified}
   end
+
+  defp pre_spawn_authorization_response(context, slot, allocation) do
+    with {:ok, base_url, token, reservation_id} <- configuration(context),
+         url =
+           base_url <>
+             "/runner/v1/verified-assignments/" <>
+             URI.encode(reservation_id, &URI.char_unreserved?/1) <> "/codex-auth-slots/" <> slot.lease_id <> "/authorize",
+         response <-
+           Map.get(context, :post_fun, &Req.post/2).(url,
+             headers: [{"authorization", "Bearer " <> token}],
+             json: %{allocationId: allocation.id},
+             connect_options: [timeout: @connect_timeout_ms],
+             receive_timeout: @request_timeout_ms,
+             retry: false,
+             redirect: false
+           ) do
+      case response do
+        {:ok, %Req.Response{status: status, body: %{"data" => %{"authorized" => true}}}}
+        when status in 200..299 ->
+          {:ok, :ok}
+
+        {:ok, %Req.Response{status: 409, body: body}} ->
+          if valid_slot_denial?(body),
+            do: {:ok, {:denied, :codex_auth_slot_denied}},
+            else: {:error, :unverified}
+
+        _ ->
+          {:error, :unverified}
+      end
+    else
+      _ -> {:error, :unverified}
+    end
+  rescue
+    _error -> {:error, :unverified}
+  end
+
+  defp valid_slot_denial?(
+         %{
+           "error" => %{
+             "code" => "codex_auth_slot_denied",
+             "category" => "state_conflict",
+             "message" => message,
+             "details" => details
+           },
+           "meta" => %{
+             "request_id" => request_id,
+             "release_version" => release_version,
+             "api_version" => api_version
+           }
+         } = body
+       ) do
+    MapSet.new(Map.keys(body)) == MapSet.new(["error", "meta"]) and
+      MapSet.new(Map.keys(body["error"])) == MapSet.new(["code", "category", "message", "details"]) and
+      MapSet.new(Map.keys(body["meta"])) == MapSet.new(["request_id", "release_version", "api_version"]) and
+      nonempty_text?(message) and is_map(details) and nonempty_text?(request_id) and
+      nonempty_text?(release_version) and nonempty_text?(api_version)
+  end
+
+  defp valid_slot_denial?(_body), do: false
+
+  defp nonempty_text?(value), do: is_binary(value) and String.valid?(value) and String.trim(value) != ""
 
   defp configuration(%{base_url: base_url, runner_token: token, reservation_id: reservation_id})
        when is_binary(base_url) and is_binary(token) and byte_size(token) > 0 and

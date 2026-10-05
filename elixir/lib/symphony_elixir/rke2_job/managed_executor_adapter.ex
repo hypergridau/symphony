@@ -77,6 +77,50 @@ defmodule SymphonyElixir.RKE2Job.ManagedExecutorAdapter do
     end
   end
 
+  @doc "Checks the exact OAuth slot before the suspended handoff writes spawn intent."
+  @spec preflight_owned(allocation(), map(), String.t(), term()) ::
+          :ok | {:denied, :codex_auth_slot_denied} | {:held, term()} | {:error, term()}
+  def preflight_owned(allocation, assignment, idempotency_key, context) do
+    with :ok <- validate_assignment(assignment),
+         :ok <- validate_key(idempotency_key, assignment, :preflight),
+         {:ok, ports} <- ports(context),
+         {:ok, expected} <- JobSpec.compile(assignment, ports.config),
+         {:ok, _uid} <- allocation_uid(allocation, expected) do
+      pre_spawn_auth_slot_guard(context, ports.config, assignment, allocation)
+    else
+      {:held, reason} -> {:held, reason}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp pre_spawn_auth_slot_guard(_context, %{auth_slot: nil}, _assignment, _allocation), do: :ok
+  defp pre_spawn_auth_slot_guard(_context, config, _assignment, _allocation) when not is_map_key(config, :auth_slot), do: :ok
+
+  defp pre_spawn_auth_slot_guard(context, config, assignment, allocation) when is_map(context) do
+    guard = Map.get(context, :auth_slot_lease_guard)
+
+    if is_atom(guard) and Code.ensure_loaded?(guard) and function_exported?(guard, :authorize_pre_spawn, 4) do
+      case guard.authorize_pre_spawn(
+             Map.get(config, :auth_slot),
+             assignment,
+             allocation,
+             auth_slot_guard_context(context, :authorize)
+           ) do
+        :ok -> :ok
+        {:denied, :codex_auth_slot_denied} -> {:denied, :codex_auth_slot_denied}
+        {:held, reason} -> {:held, reason}
+        _ -> {:held, :invalid_auth_slot_lease_guard_response}
+      end
+    else
+      {:held, :auth_slot_lease_guard_missing}
+    end
+  rescue
+    _error -> {:held, :auth_slot_lease_guard_failed}
+  end
+
+  defp pre_spawn_auth_slot_guard(_context, _config, _assignment, _allocation),
+    do: {:held, :auth_slot_lease_guard_missing}
+
   defp activation_authorizer(context, config, assignment, allocation, idempotency_key) do
     fn ->
       case auth_slot_guard(context, config, :authorize, [config[:auth_slot], assignment, allocation]) do
